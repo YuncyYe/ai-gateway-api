@@ -72,10 +72,13 @@ type OverviewQuery struct {
 	BaseQuery
 }
 
-// TimeSeriesQuery is the parameter of ReportManager.TimeSeries.
+// TimeSeriesQuery is the parameter of ReportManager.TimeSeries. Dimension is
+// optional: empty keeps the plain per-time series; otherwise the series is
+// split per dimension value (only the TimeSeriesDimensions set is accepted).
 type TimeSeriesQuery struct {
 	BaseQuery
-	Metric string `validate:"required"`
+	Metric    string `validate:"required"`
+	Dimension string
 }
 
 // RankingsQuery is the parameter of ReportManager.Rankings.
@@ -97,6 +100,11 @@ type LogsQuery struct {
 	RequestedModels []string
 	ErrOnly         bool
 	Keyword         string
+	CacheStatus     *string
+	MirrorHit       *bool
+	IntentQuestion  *string
+	IntentAnswer    *string
+	IntentSource    *string
 	Page            int
 	PageSize        int
 }
@@ -150,8 +158,16 @@ func (m *ReportManager) TimeSeries(ctx context.Context, query *TimeSeriesQuery) 
 	if !TimeSeriesMetrics[query.Metric] {
 		return nil, xerror.WrapParamErrorWithMsg("invalid metric: %s", query.Metric)
 	}
+	if query.Dimension != "" {
+		if !TimeSeriesDimensions[query.Dimension] {
+			return nil, xerror.WrapParamErrorWithMsg("invalid dimension: %s", query.Dimension)
+		}
+		if err := m.checkDimensionSupported(query.Dimension); err != nil {
+			return nil, err
+		}
+	}
 	bucket := BucketSeconds(query.End.Sub(query.Start))
-	return m.storager.TimeSeries(ctx, query.Metric, query.filter(), bucket)
+	return m.storager.TimeSeries(ctx, query.Metric, query.Dimension, query.filter(), bucket)
 }
 
 // Rankings implements ReportManagerInterface.
@@ -164,6 +180,9 @@ func (m *ReportManager) Rankings(ctx context.Context, query *RankingsQuery) ([]*
 	}
 	if !RankingDimensions[query.Dimension] {
 		return nil, xerror.WrapParamErrorWithMsg("invalid dimension: %s", query.Dimension)
+	}
+	if err := m.checkDimensionSupported(query.Dimension); err != nil {
+		return nil, err
 	}
 	limit := query.Limit
 	if limit <= 0 {
@@ -185,6 +204,9 @@ func (m *ReportManager) Distribution(ctx context.Context, query *DistributionQue
 	}
 	if !DistributionDimensions[query.Dimension] {
 		return nil, xerror.WrapParamErrorWithMsg("invalid dimension: %s", query.Dimension)
+	}
+	if err := m.checkDimensionSupported(query.Dimension); err != nil {
+		return nil, err
 	}
 	return m.storager.Distribution(ctx, query.Dimension, query.filter())
 }
@@ -218,6 +240,11 @@ func (m *ReportManager) Logs(ctx context.Context, query *LogsQuery) (*LogQueryRe
 		RequestedModels: query.RequestedModels,
 		ErrOnly:         query.ErrOnly,
 		Keyword:         query.Keyword,
+		CacheStatus:     query.CacheStatus,
+		MirrorHit:       query.MirrorHit,
+		IntentQuestion:  query.IntentQuestion,
+		IntentAnswer:    query.IntentAnswer,
+		IntentSource:    query.IntentSource,
 		Page:            page,
 		PageSize:        pageSize,
 	})
@@ -235,4 +262,26 @@ func (m *ReportManager) checkBase(query *BaseQuery) error {
 		return xerror.WrapParamErrorWithMsg("query window exceeds %v", MaxWindow)
 	}
 	return nil
+}
+
+// checkDimensionSupported appends the backend capability check to the
+// dimension whitelist validation: a dimension the configured backend does
+// not support is a parameter error (422), never a silently empty report.
+func (m *ReportManager) checkDimensionSupported(dimension string) error {
+	caps := m.storager.Capabilities()
+	if caps == nil {
+		return nil
+	}
+	for _, one := range caps.SupportedDimensions {
+		if one == dimension {
+			return nil
+		}
+	}
+	backend := caps.Backend
+	if backend == "" {
+		backend = "current"
+	}
+	return xerror.WrapParamErrorWithMsg(
+		"dimension %s not supported by %s backend (mysql only until doris support lands)",
+		dimension, backend)
 }

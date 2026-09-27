@@ -104,6 +104,44 @@ func parseStatusCodes(raw string) ([]int, error) {
 	return codes, nil
 }
 
+// intentSources is the validation set of the intent_source log filter
+// (mirrors the ai_intent_source log field).
+var intentSources = map[string]bool{
+	"explicit_header": true,
+	"classifier":      true,
+	"cache":           true,
+}
+
+// bindLogsFilterParams binds the logs-only exact-match filter parameters
+// introduced with the cache/mirror/intent log fields: cache_status,
+// mirror_hit, intent_question, intent_answer and intent_source (see
+// design-docs modifications/2026-09-27-report-cache-mirror-intent-fields).
+func bindLogsFilterParams(req *http.Request, logsQuery *ireport.LogsQuery) error {
+	if raw := req.Form.Get("cache_status"); raw != "" {
+		logsQuery.CacheStatus = &raw
+	}
+	if raw := req.Form.Get("mirror_hit"); raw != "" {
+		value, err := parseBoolParam(raw, "mirror_hit")
+		if err != nil {
+			return err
+		}
+		logsQuery.MirrorHit = value
+	}
+	if raw := req.Form.Get("intent_question"); raw != "" {
+		logsQuery.IntentQuestion = &raw
+	}
+	if raw := req.Form.Get("intent_answer"); raw != "" {
+		logsQuery.IntentAnswer = &raw
+	}
+	if raw := req.Form.Get("intent_source"); raw != "" {
+		if !intentSources[raw] {
+			return xerror.WrapParamErrorWithMsg("invalid intent_source: %s", raw)
+		}
+		logsQuery.IntentSource = &raw
+	}
+	return nil
+}
+
 // reportManager resolves the assembled report manager; when the module is
 // not assembled ([Report] missing) the routes are not registered at all,
 // this guard only covers direct invocations.

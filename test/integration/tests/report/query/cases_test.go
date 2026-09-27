@@ -74,6 +74,18 @@ func TestOverview(t *testing.T) {
 	assert.Equal(t, int64(2), data.RateLimitHits)
 	assert.Equal(t, int64(1), data.AuthRejects)
 	assert.Equal(t, int64(6), data.LogsTotal) // 明细表 COUNT(*)
+
+	// 缓存/镜像/意图组：明细 count 口径（见种子注释）+ 聚合表 cache token SUM。
+	assert.Equal(t, int64(2), data.Cache.HitCount)
+	assert.Equal(t, int64(2), data.Cache.MissCount)
+	assert.Equal(t, int64(1), data.Cache.SkipCount)
+	assert.InDelta(t, 0.5, data.Cache.HitRate, 1e-9) // hit/(hit+miss)，skip 不计分母
+	assert.Equal(t, int64(4500), data.Cache.ReadTokens)
+	assert.Equal(t, int64(700), data.Cache.WriteTokens)
+	assert.Equal(t, int64(2), data.Mirror.HitCount)
+	assert.Equal(t, int64(3), data.Intent.ClassifiedCount)
+	assert.Equal(t, int64(1), data.Intent.UnknownCount)
+	assert.InDelta(t, 0.25, data.Intent.UnknownRate, 1e-9)
 }
 
 // TestOverview_Filtered 验证过滤项（models + status_codes）参与聚合口径。
@@ -349,6 +361,256 @@ func TestLogs_RequestedModels(t *testing.T) {
 	assert.Equal(t, int64(1005), *data.Items[0].LogID)
 }
 
+// TestOverview_CacheMirrorIntentFiltered 验证新过滤项（models 之外的维度）不干扰
+// 缓存/镜像/意图组的明细 count 口径：过滤后窗口内 1001 单行。
+func TestOverview_CacheMirrorIntentFiltered(t *testing.T) {
+	var data overviewData
+	getJSON(t, reportPrefix+"/overview", with(windowQuery(),
+		"models", "gpt-4o", "status_codes", "200"), &data)
+
+	// 明细中 gpt-4o 且 200：1001、1006；其中 1006 intent 未求值、1001 全量字段。
+	assert.Equal(t, int64(2), data.LogsTotal)
+	assert.Equal(t, int64(1), data.Cache.HitCount)  // 1001
+	assert.Equal(t, int64(1), data.Cache.MissCount) // 1006
+	assert.Equal(t, int64(1), data.Mirror.HitCount) // 1001
+	assert.Equal(t, int64(1), data.Intent.ClassifiedCount)
+	assert.Equal(t, int64(0), data.Intent.UnknownCount)
+	assert.Equal(t, float64(0), data.Intent.UnknownRate) // 分母为 0
+}
+
+// TestTimeSeries_CacheTokens 验证 cache_tokens 时序：cache_read/cache_write
+// 两条序列（kind 区分），值 = 聚合表列 SUM ÷ 60s（不做 ÷1e8）。
+func TestTimeSeries_CacheTokens(t *testing.T) {
+	var data timeseriesData
+	getJSON(t, reportPrefix+"/timeseries", with(windowQuery(), "metric", "cache_tokens"), &data)
+
+	assert.Equal(t, 60, data.BucketSec)
+	require.Len(t, data.Series, 4)
+
+	type pointKey struct {
+		time int64
+		kind string
+	}
+	byKey := map[pointKey]float64{}
+	for _, one := range data.Series {
+		require.NotNil(t, one.Value)
+		byKey[pointKey{one.Time, one.Kind}] = *one.Value
+	}
+	// 10:00 桶：read=A(1000)+B(0)+C(3000)=4000、write=A(200)+B(400)+C(0)=600；
+	// 10:01 桶：read=D(500)+E(0)=500、write=D(100)+E(0)=100。
+	assert.InDelta(t, 4000.0/60, byKey[pointKey{epoch("2026-09-15 10:00:00"), "cache_read"}], 1e-9)
+	assert.InDelta(t, 600.0/60, byKey[pointKey{epoch("2026-09-15 10:00:00"), "cache_write"}], 1e-9)
+	assert.InDelta(t, 500.0/60, byKey[pointKey{epoch("2026-09-15 10:01:00"), "cache_read"}], 1e-9)
+	assert.InDelta(t, 100.0/60, byKey[pointKey{epoch("2026-09-15 10:01:00"), "cache_write"}], 1e-9)
+}
+
+// TestTimeSeries_Dimension 验证 timeseries 可选 dimension 参数：按
+// (时间桶, 维度值) 拆序列，点携带 name（空值为 ""）。
+func TestTimeSeries_Dimension(t *testing.T) {
+	var data timeseriesData
+	getJSON(t, reportPrefix+"/timeseries", with(windowQuery(),
+		"metric", "qps", "dimension", "ai_cache_status"), &data)
+
+	assert.Equal(t, 60, data.BucketSec)
+	// 10:00：hit(A+C=400)、miss(B=200)；10:01：hit(D=50)、''(E=10)。
+	require.Len(t, data.Series, 4)
+
+	type pointKey struct {
+		time int64
+		name string
+	}
+	byKey := map[pointKey]float64{}
+	for _, one := range data.Series {
+		require.NotNil(t, one.Value)
+		byKey[pointKey{one.Time, one.Name}] = *one.Value
+	}
+	assert.InDelta(t, 400.0/60, byKey[pointKey{epoch("2026-09-15 10:00:00"), "hit"}], 1e-9)
+	assert.InDelta(t, 200.0/60, byKey[pointKey{epoch("2026-09-15 10:00:00"), "miss"}], 1e-9)
+	assert.InDelta(t, 50.0/60, byKey[pointKey{epoch("2026-09-15 10:01:00"), "hit"}], 1e-9)
+	assert.InDelta(t, 10.0/60, byKey[pointKey{epoch("2026-09-15 10:01:00"), ""}], 1e-9)
+}
+
+// TestTimeSeries_InvalidDimension 验证 timeseries dimension 白名单：既有维度
+// （model）不被接受。
+func TestTimeSeries_InvalidDimension(t *testing.T) {
+	client := testutil.GetClient()
+
+	resp, err := client.Get(reportPrefix+"/timeseries", with(windowQuery(),
+		"metric", "qps", "dimension", "model"))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	testutil.AssertErrCode(t, resp, 422)
+	assert.Contains(t, resp.ErrMsg, "invalid dimension")
+}
+
+// TestRankings_CacheStatus 验证 ai_cache_status 维度排行：空值（''）不进排行。
+func TestRankings_CacheStatus(t *testing.T) {
+	var data rankingsData
+	getJSON(t, reportPrefix+"/rankings", with(windowQuery(), "dimension", "ai_cache_status"), &data)
+
+	require.Len(t, data.Items, 2)
+	assert.Equal(t, "hit", data.Items[0].Name)
+	assert.Equal(t, int64(450), data.Items[0].RequestCount) // A+C+D
+	assert.Equal(t, int64(0), data.Items[0].ErrorCount)
+	assert.Equal(t, "miss", data.Items[1].Name)
+	assert.Equal(t, int64(200), data.Items[1].RequestCount) // B
+}
+
+// TestRankings_MirrorHit 验证 mirror_hit 维度排行：数值维度 0/1 两桶都进排行。
+func TestRankings_MirrorHit(t *testing.T) {
+	var data rankingsData
+	getJSON(t, reportPrefix+"/rankings", with(windowQuery(), "dimension", "mirror_hit"), &data)
+
+	require.Len(t, data.Items, 2)
+	assert.Equal(t, "0", data.Items[0].Name)
+	assert.Equal(t, int64(510), data.Items[0].RequestCount) // B+C+E
+	assert.Equal(t, "1", data.Items[1].Name)
+	assert.Equal(t, int64(150), data.Items[1].RequestCount) // A+D
+}
+
+// TestRankings_IntentAnswer 验证 ai_intent_answer 维度排行。
+func TestRankings_IntentAnswer(t *testing.T) {
+	var data rankingsData
+	getJSON(t, reportPrefix+"/rankings", with(windowQuery(), "dimension", "ai_intent_answer"), &data)
+
+	require.Len(t, data.Items, 3)
+	byName := map[string]int64{}
+	for _, one := range data.Items {
+		byName[one.Name] = one.RequestCount
+	}
+	assert.Equal(t, int64(200), byName["unknown"]) // B
+	assert.Equal(t, int64(300), byName["writing"]) // C
+	assert.Equal(t, int64(150), byName["coding"])  // A+D
+	// 空值行 E 不进排行。
+	assert.NotContains(t, byName, "")
+}
+
+// TestDistribution_CacheStatus 验证 ai_cache_status 分布：空值归一为 unknown 桶。
+func TestDistribution_CacheStatus(t *testing.T) {
+	var data distributionData
+	getJSON(t, reportPrefix+"/distribution", with(windowQuery(), "dimension", "ai_cache_status"), &data)
+
+	require.Len(t, data.Items, 3)
+	byName := map[string]distItem{}
+	for _, one := range data.Items {
+		byName[one.Name] = one
+	}
+	assert.Equal(t, int64(450), byName["hit"].RequestCount)
+	assert.InDelta(t, 450.0/660.0, byName["hit"].Ratio, 1e-9)
+	assert.Equal(t, int64(200), byName["miss"].RequestCount)
+	assert.Equal(t, int64(10), byName["unknown"].RequestCount) // 行 E 的空值
+	assert.InDelta(t, 1, byName["hit"].Ratio+byName["miss"].Ratio+byName["unknown"].Ratio, 1e-9)
+}
+
+// TestDistribution_MirrorHit 验证 mirror_hit 分布：数值维度以字符串名返回。
+func TestDistribution_MirrorHit(t *testing.T) {
+	var data distributionData
+	getJSON(t, reportPrefix+"/distribution", with(windowQuery(), "dimension", "mirror_hit"), &data)
+
+	require.Len(t, data.Items, 2)
+	byName := map[string]distItem{}
+	for _, one := range data.Items {
+		byName[one.Name] = one
+	}
+	assert.Equal(t, int64(510), byName["0"].RequestCount)
+	assert.Equal(t, int64(150), byName["1"].RequestCount)
+	assert.InDelta(t, 150.0/660.0, byName["1"].Ratio, 1e-9)
+}
+
+// TestLogs_CacheMirrorIntentFilters 验证五个新过滤参数的端到端过滤口径。
+func TestLogs_CacheMirrorIntentFilters(t *testing.T) {
+	cases := []struct {
+		name     string
+		query    map[string]string
+		expectID []int64
+	}{
+		{"cache_status_hit", with(windowQuery(), "cache_status", "hit"), []int64{1003, 1001}},
+		{"cache_status_skip", with(windowQuery(), "cache_status", "skip"), []int64{1005}},
+		{"mirror_hit_true", with(windowQuery(), "mirror_hit", "true"), []int64{1005, 1001}},
+		{"mirror_hit_false", with(windowQuery(), "mirror_hit", "false"), []int64{1006, 1004, 1003, 1002}},
+		{"intent_question", with(windowQuery(), "intent_question", "task_type"), []int64{1005, 1003, 1002, 1001}},
+		{"intent_answer_coding", with(windowQuery(), "intent_answer", "coding"), []int64{1005, 1001}},
+		{"intent_answer_unknown", with(windowQuery(), "intent_answer", "unknown"), []int64{1002}},
+		{"intent_source_classifier", with(windowQuery(), "intent_source", "classifier"), []int64{1002, 1001}},
+		{"intent_source_cache", with(windowQuery(), "intent_source", "cache"), []int64{1005}},
+		{"combined", with(windowQuery(), "cache_status", "hit", "intent_answer", "coding"), []int64{1001}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var data logsData
+			getJSON(t, reportPrefix+"/logs", tc.query, &data)
+
+			assert.Equal(t, int64(len(tc.expectID)), data.Total)
+			require.Len(t, data.Items, len(tc.expectID))
+			for i, id := range tc.expectID {
+				assert.Equal(t, id, *data.Items[i].LogID, "position %d", i)
+			}
+		})
+	}
+}
+
+// TestLogs_CacheMirrorIntentRowShape 验证明细行新 10 列的序列化与空值语义。
+func TestLogs_CacheMirrorIntentRowShape(t *testing.T) {
+	var data logsData
+	getJSON(t, reportPrefix+"/logs", with(windowQuery(), "page_size", "6"), &data)
+
+	require.Len(t, data.Items, 6)
+	byID := map[int64]logItem{}
+	for _, one := range data.Items {
+		byID[*one.LogID] = one
+	}
+
+	full := byID[1001]
+	require.NotNil(t, full.AICacheStatus)
+	assert.Equal(t, "hit", *full.AICacheStatus)
+	require.NotNil(t, full.MirrorHit)
+	assert.True(t, *full.MirrorHit)
+	require.NotNil(t, full.MirrorCluster)
+	assert.Equal(t, "mirror-bj", *full.MirrorCluster)
+	require.NotNil(t, full.AIIntentQuestion)
+	assert.Equal(t, "task_type", *full.AIIntentQuestion)
+	require.NotNil(t, full.AIIntentAnswer)
+	assert.Equal(t, "coding", *full.AIIntentAnswer)
+	require.NotNil(t, full.AIIntentConfidence)
+	assert.InDelta(t, 0.95, *full.AIIntentConfidence, 1e-12)
+	require.NotNil(t, full.AIIntentSource)
+	assert.Equal(t, "classifier", *full.AIIntentSource)
+	require.NotNil(t, full.AIIntentLatencyUs)
+	assert.Equal(t, int64(1200), *full.AIIntentLatencyUs)
+	require.NotNil(t, full.AIIntentCacheHit)
+	assert.False(t, *full.AIIntentCacheHit)
+	require.NotNil(t, full.AIIntentQuestionsVer)
+	assert.Equal(t, "v3", *full.AIIntentQuestionsVer)
+
+	// cache 源：latency_us / cache_hit 为 NULL -> nil。
+	fromCache := byID[1005]
+	require.NotNil(t, fromCache.AIIntentSource)
+	assert.Equal(t, "cache", *fromCache.AIIntentSource)
+	assert.Nil(t, fromCache.AIIntentLatencyUs)
+	require.NotNil(t, fromCache.AIIntentCacheHit)
+	assert.True(t, *fromCache.AIIntentCacheHit)
+
+	// 意图未求值行（1004）：可空列为 NULL/空串。
+	none := byID[1004]
+	require.NotNil(t, none.AICacheStatus)
+	assert.Equal(t, "", *none.AICacheStatus)
+	require.NotNil(t, none.MirrorHit)
+	assert.False(t, *none.MirrorHit)
+	require.NotNil(t, none.MirrorCluster)
+	assert.Equal(t, "", *none.MirrorCluster)
+	require.NotNil(t, none.AIIntentQuestion)
+	assert.Equal(t, "", *none.AIIntentQuestion)
+	require.NotNil(t, none.AIIntentAnswer)
+	assert.Equal(t, "", *none.AIIntentAnswer)
+	assert.Nil(t, none.AIIntentConfidence)
+	require.NotNil(t, none.AIIntentSource)
+	assert.Equal(t, "", *none.AIIntentSource)
+	assert.Nil(t, none.AIIntentLatencyUs)
+	assert.Nil(t, none.AIIntentCacheHit)
+	require.NotNil(t, none.AIIntentQuestionsVer)
+	assert.Equal(t, "", *none.AIIntentQuestionsVer)
+}
+
 // TestLogs_PageSizeCap 验证 page_size 超上限按实现语义封顶 100（对齐
 // operation-logs 的分页惯例：超限截断而非报错）。
 func TestLogs_PageSizeCap(t *testing.T) {
@@ -382,6 +644,9 @@ func TestParamValidation(t *testing.T) {
 		{"invalid_ranking_dimension", "/rankings", with(windowQuery(), "dimension", "stream")},
 		{"invalid_distribution_dimension", "/distribution", with(windowQuery(), "dimension", "model")},
 		{"keyword_too_long", "/logs", with(windowQuery(), "keyword", longKeyword)},
+		{"invalid_mirror_hit", "/logs", with(windowQuery(), "mirror_hit", "not-bool")},
+		{"invalid_intent_source", "/logs", with(windowQuery(), "intent_source", "bogus")},
+		{"invalid_timeseries_dimension", "/timeseries", with(windowQuery(), "metric", "qps", "dimension", "model")},
 	}
 
 	for _, tc := range cases {

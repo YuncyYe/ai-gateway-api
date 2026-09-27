@@ -52,6 +52,7 @@ func ReportTimeSeriesAction(req *http.Request) (interface{}, error) {
 	if metric == "" {
 		return nil, xerror.WrapParamErrorWithMsg("%s", "metric is required")
 	}
+	dimension := req.Form.Get("dimension")
 
 	manager, err := reportManager(req)
 	if err != nil {
@@ -61,6 +62,7 @@ func ReportTimeSeriesAction(req *http.Request) (interface{}, error) {
 	series, err := manager.TimeSeries(req.Context(), &ireport.TimeSeriesQuery{
 		BaseQuery: *base,
 		Metric:    metric,
+		Dimension: dimension,
 	})
 	if err != nil {
 		return nil, err

@@ -13,7 +13,7 @@
 | 模型层设计文档 | [模型层设计文档.md](./模型层设计文档.md) | 描述 `model/` 层的子包职责、Manager + Storager 接口的分层模式、Param/Filter 设计、事务管理、典型业务流程以及各业务模型（API-Key、Entity、Provider、Cluster、Quota、RateLimit、Route 等）的交互方式。 |
 | 存储层设计文档 | [存储层设计文档.md](./存储层设计文档.md) | 描述 `storage/rdb` 层的 DAO + Storage 两层结构、通用 DAO 设计模式、事务与连接管理、34 张表的 DAO 映射关系以及 Storage 实现如何向上暴露接口供模型层调用。 |
 | 数据库设计文档 | [数据库设计文档.md](./数据库设计文档.md) | 描述 `ai-gateway-api` 当前实现中全部 34 张持久化表的字段、约束、索引、JSON 字段结构以及表间逻辑关系，覆盖基础配置、集群、路由、证书、API-Key、Entity、配额、限流、AI 缓存、AI 意图、模型定价、操作日志等模块。 |
-| 报表库设计文档 | [报表库设计文档.md](./报表库设计文档.md) | 描述独立报表库（`bfe_report`）的两张表设计：`bfe_ai_request_log` 明细表（89 列，幂等键/空值语义/按天 RANGE 分区/索引）与 `bfe_ai_metrics_1m` 分钟聚合表（37 维 + 24 指标，与 Doris 对齐、不设唯一键的理由）、聚合与分区管理语义、账号权限矩阵、容量建议与列演进规则；DDL 归 `db_ddl_report_mysql.sql`。 |
+| 报表库设计文档 | [报表库设计文档.md](./报表库设计文档.md) | 描述独立报表库（`bfe_report`）的两张表设计：`bfe_ai_request_log` 明细表（99 列，含 2026-09-27 缓存/镜像/意图 10 列；幂等键/空值语义/按天 RANGE 分区/索引）与 `bfe_ai_metrics_1m` 分钟聚合表（40 维 + 24 指标，含 `ai_cache_status`/`mirror_hit`/`ai_intent_answer` 3 个维度列，与 Doris 对齐、不设唯一键的理由）、聚合与分区管理语义、账号权限矩阵、容量建议与列演进规则；DDL 归 `db_ddl_report_mysql.sql`。 |
 
 ---
 
@@ -22,7 +22,7 @@
 | 文档名称 | 相对路径 | 摘要说明 |
 |---------|---------|---------|
 | 操作日志模块 | [details/操作日志模块.md](./details/操作日志模块.md) | 描述 `model/ioperlog` 操作日志设计：覆盖 entity / api-key / provider / cluster 等域的变更记录、成功与失败双路径日志、异步批量写入、敏感字段脱敏与 `GET /operation-logs` 查询接口；含嵌套资源（quota_plan / rate_limit_policy）写/审分层审计与 `resource_parent_id` 归属设计（issue #161）。 |
-| 报表查询模块 | [details/报表查询模块.md](./details/报表查询模块.md) | 描述 `/report/*` 报表查询设计：`model/ireport` Manager + `ReportStorager` 双后端（MySQL/Doris）方言实现、`Databases` 数据源复用与 `[Report]` 装配、分钟聚合 JOB（DELETE+INSERT 事务幂等、GET_LOCK 防重）与分区管理 JOB（RANGE 分区/DELETE 降级）、两张报表表 DDL 归属（`db_ddl_report_mysql.sql`）与三处经 LR03 集成测试验证的修正、FeatureReport 鉴权与未装配 404 行为。 |
+| 报表查询模块 | [details/报表查询模块.md](./details/报表查询模块.md) | 描述 `/report/*` 报表查询设计：`model/ireport` Manager + `ReportStorager` 双后端（MySQL/Doris）方言实现、`Capabilities()` 后端能力门控（新维度 Doris 返回 422）、`Databases` 数据源复用与 `[Report]` 装配、分钟聚合 JOB（DELETE+INSERT 事务幂等、GET_LOCK 防重）与分区管理 JOB（RANGE 分区/DELETE 降级）、两张报表表 DDL 归属（`db_ddl_report_mysql.sql`）与三处经 LR03 集成测试验证的修正、FeatureReport 鉴权与未装配 404 行为、缓存/镜像/意图字段消费（overview/logs/timeseries cache_tokens/新维度，2026-09-27）。 |
 | 认证授权机制 | [details/认证授权机制.md](./details/认证授权机制.md) | 描述 `model/iauth` 的认证授权设计，包括用户与 Token 共用 `users` 表、`Visitor` 统一抽象、Scope 作用域、Feature-Action 权限模型、四种认证方式以及中间件集成与数据库表设计。 |
 | InnerAPI 配置导出与版本控制 | [details/InnerAPI配置导出与版本控制.md](./details/InnerAPI配置导出与版本控制.md) | 描述面向 BFE/Conf Agent 的 InnerAPI 配置导出机制，包括 `VersionControlManager` 的 MD5 签名比对、版本号生成与同 Topic 严格单调递增保证（`uk_name_version` 唯一约束 + 版本 +1s 抬升 + 冲突重试，issue #142）、`config_versions` 表持久化、11 类配置导出主题、增量同步流程，以及 `mod-api-key` 的批量预加载 + 内存回溯性能优化。 |
 | API-Key 与 Entity 关联及模型继承 | [details/API-Key与Entity关联及模型继承.md](./details/API-Key与Entity关联及模型继承.md) | 描述 API-Key 与 Entity 的挂载关系、Entity 层级树约束、模型白名单交集与黑名单继承、配额计划层级合并、限流策略与路由规则的层级收集，以及导出到 BFE 时的最终生效规则。 |

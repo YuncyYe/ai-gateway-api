@@ -55,7 +55,7 @@ func (s *ReportServer) Close() {
 	}
 }
 
-// StartReportServer 装配报表查询集成测试环境：
+// StartReportServer 装配报表查询集成测试环境（Backend=mysql）：
 //  1. 读取 REPORT_MYSQL_DSN（格式 user:pass@tcp(host:port)/，允许不带库名）；
 //  2. 创建专用随机名数据库 report_it_<ns>，套用项目 db_ddl_report_mysql.sql
 //    （${INIT_DATE} 替换为今天+3 天，历史时间戳落入 p_init 分区）；
@@ -64,6 +64,13 @@ func (s *ReportServer) Close() {
 //
 // 任一失败时清理已创建的资源并返回错误。
 func StartReportServer(seedSQL ...string) (*ReportServer, error) {
+	return StartReportServerWithBackend("mysql", seedSQL...)
+}
+
+// StartReportServerWithBackend 与 StartReportServer 相同，但 [Report].Backend
+// 按参数装配（如 "doris" 门控用例：数据源仍是 MySQL 实例，仅 backend 标识不同，
+// 422 在查询层拦截、不触达 SQL）。
+func StartReportServerWithBackend(backend string, seedSQL ...string) (*ReportServer, error) {
 	dsn := os.Getenv("REPORT_MYSQL_DSN")
 	if dsn == "" {
 		return nil, ErrReportMySQLDSNNotSet
@@ -120,11 +127,11 @@ MaxOpenConns = 10
 MaxIdleConns = 5
 
 [Report]
-Backend = "mysql"
+Backend = "%s"
 Datasource = "report_db"
 EnableAggregateJob = false
 EnablePartitionMgmt = false
-`, s.DBName, cfg.addr, cfg.user, tomlLiteral(cfg.pass))
+`, s.DBName, cfg.addr, cfg.user, tomlLiteral(cfg.pass), backend)
 
 	s.Server, err = StartServerWithExtraConfig(extraTOML)
 	if err != nil {

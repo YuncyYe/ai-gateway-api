@@ -15,27 +15,28 @@
 
 | 编号 | 接口名称 | 方法 | 路径 | 说明 |
 |------|----------|------|------|------|
-| RP-1 | 总览指标 | GET | `/open-api/v1/report/overview` | 请求总量/错误率/Token/延迟/TTFT/TPOT/成本/限流/认证拒绝/日志总量 |
-| RP-2 | 时序数据 | GET | `/open-api/v1/report/timeseries` | `metric=qps\|tokens\|latency\|ttft\|tpot\|cost`，桶宽按窗口自动计算 |
-| RP-3 | 维度排行 | GET | `/open-api/v1/report/rankings` | `dimension=model\|requested_model\|provider\|apikey\|host\|status\|protocol\|mode`，按 request_count 降序 |
-| RP-4 | 占比分布 | GET | `/open-api/v1/report/distribution` | `dimension=status\|protocol\|mode\|stream`，空维度归一为 `unknown` |
-| RP-5 | 日志明细 | GET | `/open-api/v1/report/logs` | 按 log_time 倒序分页，支持 err_only/keyword/requested_models |
+| RP-1 | 总览指标 | GET | `/open-api/v1/report/overview` | 请求总量/错误率/Token/延迟/TTFT/TPOT/成本/限流/认证拒绝/日志总量；缓存（次数/命中率/cache token）/镜像（命中数）/意图（分类数/unknown 率）三组指标 |
+| RP-2 | 时序数据 | GET | `/open-api/v1/report/timeseries` | `metric=qps\|tokens\|latency\|ttft\|tpot\|cost\|cache_tokens`（cache_tokens 按 kind 分序列）；可选 `dimension=ai_intent_answer\|ai_cache_status\|mirror_hit`（仅 mysql 后端，doris 422） |
+| RP-3 | 维度排行 | GET | `/open-api/v1/report/rankings` | `dimension=model\|requested_model\|provider\|apikey\|host\|status\|protocol\|mode`（+ `ai_intent_answer\|ai_cache_status\|mirror_hit`，仅 mysql），按 request_count 降序 |
+| RP-4 | 占比分布 | GET | `/open-api/v1/report/distribution` | `dimension=status\|protocol\|mode\|stream`（+ 上述三个新维度，仅 mysql），空维度归一为 `unknown` |
+| RP-5 | 日志明细 | GET | `/open-api/v1/report/logs` | 按 log_time 倒序分页，支持 err_only/keyword/requested_models 及 `cache_status`/`mirror_hit`/`intent_question`/`intent_answer`/`intent_source` 精确过滤（两后端均可用） |
 
 ## 3. 测试用例统计
 
 | 场景 | 用例组 | 测试用例数 |
 |------|--------|-----------|
 | 未装配 404（含未知子路径） | A | 2 |
-| overview 口径 | B | 2 |
-| timeseries（qps/tokens） | B | 2 |
-| rankings（model/status/limit） | B | 3 |
-| distribution（status/protocol+unknown） | B | 2 |
-| logs（分页/过滤/行形状/requested_models/page_size 封顶） | B | 5 |
-| 参数校验（422） | B | 8（子用例） |
+| overview 口径（含缓存/镜像/意图组与过滤后口径） | B | 3 |
+| timeseries（qps/tokens/cost/cache_tokens/维度拆分） | B | 5 |
+| rankings（model/status/limit/三个新维度） | B | 6 |
+| distribution（status/protocol+unknown/三个新维度） | B | 5 |
+| logs（分页/过滤/行形状/requested_models/page_size 封顶/新五参数过滤/新列行形状） | B | 7 |
+| 参数校验（422，含 mirror_hit/intent_source/timeseries 维度白名单） | B | 8（子用例+3） |
+| doris 后端新维度门控 422 + 明细能力放行 | B | 2 |
 | 启动即建分区（两表同验） | C | 1 |
 | 覆盖期内写入成功 | C | 1 |
 | 边界外写入拒绝（Error 1526） | C | 1 |
-| **合计** | | **25** |
+| **合计** | | **32+** |
 
 ## 4. 认证方式
 

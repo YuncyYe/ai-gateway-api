@@ -3,9 +3,9 @@
 --
 -- 本文件定义报表库（独立于控制面库，见 design-docs/sys-design/报表库设计文档.md）
 -- 的两张表：
---   1. bfe_ai_request_log  明细表（89 列，与 Doris 明细表同名同列）：由 log-reader
+--   1. bfe_ai_request_log  明细表（99 列，与 Doris 明细表同名同列）：由 log-reader
 --      mod_log_mysql 插件批量幂等写入（INSERT ... ON DUPLICATE KEY UPDATE）；
---   2. bfe_ai_metrics_1m   分钟聚合表（37 维 + 24 指标，与 Doris 同名表对齐）：
+--   2. bfe_ai_metrics_1m   分钟聚合表（40 维 + 24 指标，与 Doris 同名表对齐）：
 --      由 ai-gateway-api 分钟聚合 JOB 生成，供 /open-api/v1/report/* 查询。
 --
 -- 执行方式（schema-first：先建表后启用 log-reader 插件，插件不自动建表）：
@@ -16,6 +16,23 @@
 --      mysql -u<user> -p<password> < db_ddl_report_mysql.sql
 --   3. 要求 MySQL >= 5.7.8（JSON 列），推荐 8.0；引擎 InnoDB，字符集 utf8mb4。
 --
+-- 存量表加列（2026-09-27 缓存/镜像/意图字段，普通 ALTER 即可）：
+--   ALTER TABLE bfe_ai_request_log
+--     ADD COLUMN ai_cache_status VARCHAR(16) NOT NULL DEFAULT '' AFTER ai_auth_hit_quota_plans,
+--     ADD COLUMN mirror_hit TINYINT NOT NULL DEFAULT 0 AFTER ai_cache_status,
+--     ADD COLUMN mirror_cluster VARCHAR(128) NOT NULL DEFAULT '' AFTER mirror_hit,
+--     ADD COLUMN ai_intent_question VARCHAR(64) NOT NULL DEFAULT '' AFTER mirror_cluster,
+--     ADD COLUMN ai_intent_answer VARCHAR(64) NOT NULL DEFAULT '' AFTER ai_intent_question,
+--     ADD COLUMN ai_intent_confidence DOUBLE DEFAULT NULL AFTER ai_intent_answer,
+--     ADD COLUMN ai_intent_source VARCHAR(32) NOT NULL DEFAULT '' AFTER ai_intent_confidence,
+--     ADD COLUMN ai_intent_latency_us BIGINT DEFAULT NULL AFTER ai_intent_source,
+--     ADD COLUMN ai_intent_cache_hit TINYINT DEFAULT NULL AFTER ai_intent_latency_us,
+--     ADD COLUMN ai_intent_questions_version VARCHAR(32) NOT NULL DEFAULT '' AFTER ai_intent_cache_hit;
+--   ALTER TABLE bfe_ai_metrics_1m
+--     ADD COLUMN ai_cache_status VARCHAR(16) NOT NULL DEFAULT '' AFTER ai_auth_reject_quota_plans_slot5,
+--     ADD COLUMN mirror_hit TINYINT NOT NULL DEFAULT 0 AFTER ai_cache_status,
+--     ADD COLUMN ai_intent_answer VARCHAR(64) NOT NULL DEFAULT '' AFTER mirror_hit;
+--
 -- 账号权限（最小权限原则，详见报表库设计文档 §5）：
 --   - 写入账号（log-reader）：明细表 INSERT/UPDATE，无 DDL/DELETE；
 --   - 查询/维护账号（ai-gateway-api）：明细表/聚合表 SELECT、聚合表 INSERT/DELETE、
@@ -23,7 +40,7 @@
 -- ============================================================================
 
 -- ---------------------------------
--- 明细表 bfe_ai_request_log（89 列）
+-- 明细表 bfe_ai_request_log（99 列）
 -- 列清单/列序/类型与 Doris 明细表一致，差异仅在类型适配：
 --   ARRAY<STRUCT<...>> 列用 JSON 存储（7 个：req_headers、res_headers、
 --   ai_route_rule_hits、ai_cluster_key_names、ai_rate_limit_hits、
@@ -136,6 +153,20 @@ CREATE TABLE IF NOT EXISTS bfe_ai_request_log (
     ai_auth_reject_reason   VARCHAR(256)  DEFAULT NULL,
     ai_auth_reject_quota_plans JSON       DEFAULT NULL,
     ai_auth_hit_quota_plans JSON          DEFAULT NULL,
+    -- AI 缓存/镜像/意图（2026-09-27 加列，proto v0.3.7/3.8/3.9 字段；
+    -- 列序与 log-reader mod_log_mysql/field_mapper.go 扩列后一致，三处同 PR 评审；
+    -- ai_cache_key、mirror_status~mirror_error 不进报表：前者 debug 专用防膨胀，
+    -- 后者 bfe 设计即走 Prometheus 不回写日志）
+    ai_cache_status         VARCHAR(16)   NOT NULL DEFAULT '',
+    mirror_hit              TINYINT       NOT NULL DEFAULT 0,
+    mirror_cluster          VARCHAR(128)  NOT NULL DEFAULT '',
+    ai_intent_question      VARCHAR(64)   NOT NULL DEFAULT '',
+    ai_intent_answer        VARCHAR(64)   NOT NULL DEFAULT '',
+    ai_intent_confidence    DOUBLE        DEFAULT NULL,
+    ai_intent_source        VARCHAR(32)   NOT NULL DEFAULT '',
+    ai_intent_latency_us    BIGINT        DEFAULT NULL,
+    ai_intent_cache_hit     TINYINT       DEFAULT NULL,
+    ai_intent_questions_version VARCHAR(32) NOT NULL DEFAULT '',
     -- 幂等键：与 Doris UNIQUE KEY 一致，log-reader 重发/-b 补读安全；
     -- 唯一键长度 (256+256+128)*4+5 ≈ 2565 字节 < 3072 InnoDB 上限，无需前缀索引；
     -- 唯一键包含分区列 log_time（MySQL 分区表约束）
@@ -152,9 +183,11 @@ PARTITION BY RANGE (TO_DAYS(log_time)) (
 );
 
 -- ---------------------------------
--- 聚合表 bfe_ai_metrics_1m（37 维 + 24 指标）
--- 维度集合与指标列与 Doris bfe_ai_metrics_1m 完全一致
---（见 ai-gateway-observability/doris/sqls/bfe_ai_metrics_1m.sql），MySQL 形态为
+-- 聚合表 bfe_ai_metrics_1m（40 维 + 24 指标）
+-- 维度集合与指标列与 Doris bfe_ai_metrics_1m 对齐
+--（见 ai-gateway-observability/doris/sqls/bfe_ai_metrics_1m.sql；Doris 侧
+--  ai_cache_status/mirror_hit/ai_intent_answer 三维度二期 AGGREGATE KEY 重建
+--  对齐，一期仅 MySQL 侧可用、查询层按 backend 能力门控），MySQL 形态为
 -- 普通 InnoDB 表：
 --   - 不设唯一键/主键：37 个维度列（含多个 VARCHAR(256)）无法构成 InnoDB 唯一键
 --     （3072 字节上限），且幂等性由聚合 JOB 的「DELETE 窗口 + INSERT SELECT 事务」
@@ -203,6 +236,11 @@ CREATE TABLE IF NOT EXISTS bfe_ai_metrics_1m (
     ai_auth_reject_quota_plans_slot3 VARCHAR(128) NOT NULL DEFAULT '',
     ai_auth_reject_quota_plans_slot4 VARCHAR(128) NOT NULL DEFAULT '',
     ai_auth_reject_quota_plans_slot5 VARCHAR(128) NOT NULL DEFAULT '',
+    -- 缓存/镜像/意图维度（2026-09-27 加列；低基数：status ≤4 值、mirror_hit 2 值、
+    -- intent_answer ≤ 问题选项数；行数膨胀上线后监控，预案见报表库设计文档 §4）
+    ai_cache_status    VARCHAR(16)   NOT NULL DEFAULT '',
+    mirror_hit         TINYINT       NOT NULL DEFAULT 0,
+    ai_intent_answer   VARCHAR(64)   NOT NULL DEFAULT '',
     -- 聚合指标（24 列，BIGINT，SUM 口径）
     request_count      BIGINT        DEFAULT NULL,
     error_count        BIGINT        DEFAULT NULL,

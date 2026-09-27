@@ -413,7 +413,7 @@ func initReport() error {
 
 	switch cfg.Backend {
 	case "mysql":
-		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database))
+		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database, "mysql"))
 		if cfg.EnableAggregateJob || cfg.EnablePartitionMgmt {
 			interval := time.Duration(cfg.AggregateIntervalSec) * time.Second
 			if !cfg.EnableAggregateJob {
@@ -428,8 +428,10 @@ func initReport() error {
 		}
 	case "doris":
 		// Doris aggregation is maintained by the existing Doris insert job;
-		// the api only queries.
-		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database))
+		// the api only queries. The backend identifier feeds Capabilities(),
+		// which gates the cache/mirror/intent dimensions (phase 1: mysql
+		// only, see design-docs modifications/2026-09-27-report-cache-mirror-intent-fields).
+		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database, "doris"))
 	default:
 		container.ReportManager = nil
 		return fmt.Errorf("unsupported [Report].Backend: %s", cfg.Backend)
