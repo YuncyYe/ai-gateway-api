@@ -85,7 +85,7 @@
 | `err_code` / `err_msg` | string | 错误码 / 错误详情；无错误时 `err_code` 为 null |
 | `ai_input_tokens` / `ai_output_tokens` / `ai_total_tokens` | int64 | Token 计数 |
 | `all_time` | int | 请求总耗时（毫秒） |
-| `ai_ttft_us` / `ai_tpot_us` | int64 | TTFT / TPOT（微秒） |
+| `ai_ttft_us` / `ai_tpot_us` | int64 | TTFT / TPOT（微秒）；未设置（非流式）为 **0**（历史口径：入库未做空值区分，与意图字段的 null 语义不同） |
 | `ai_cost_value` / `ai_cost_currency` | number / string | 成本金额（元/美元，服务端已完成 ÷1e8 换算）/ 币种；无成本为 null |
 | `ai_rate_limit_hits` / `ai_auth_reject_quota_plans` | string | JSON 原文（限流命中列表 / 被拒绝配额计划），未命中为 null |
 | `ai_cache_status` | string | 缓存命中状态：`hit` / `miss` / `skip`；空串=未启用缓存 |
