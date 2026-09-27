@@ -67,4 +67,4 @@ require (
 
 // replace github.com/bfenetworks/bfe => ../bfe
 
-replace github.com/bfenetworks/bfe => github.com/mileszhang2016/bfe v1.4.1-0.20260926111554-7e482d900228
+replace github.com/bfenetworks/bfe => github.com/mileszhang2016/bfe v1.4.1-0.20260927103007-ccc589eb665a

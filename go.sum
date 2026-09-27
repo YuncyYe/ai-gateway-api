@@ -74,8 +74,8 @@ github.com/leodido/go-urn v1.2.1/go.mod h1:zt4jvISO2HfUBqxjfIshjdMTYS56ZS/qv49ic
 github.com/mattn/go-isatty v0.0.9/go.mod h1:YNRxwqDuOph6SZLI9vUUz6OYw3QyUt7WiY2yME+cCiQ=
 github.com/mattn/go-isatty v0.0.17 h1:BTarxUcIeDqL27Mc+vyvdWYSL28zpIhv3RoTdsLMPng=
 github.com/mattn/go-isatty v0.0.17/go.mod h1:kYGgaQfpe5nmfYZH+SKPsOc2e4SrIfOl2e/yFXSvRLM=
-github.com/mileszhang2016/bfe v1.4.1-0.20260926111554-7e482d900228 h1:gHMkX3w//wokeOq7wyirELZaxceSPHrwL4WNpp7rvQI=
-github.com/mileszhang2016/bfe v1.4.1-0.20260926111554-7e482d900228/go.mod h1:jm953sCTUjDv32U+d+8+WuHF8DsHHVnRNKc0zoISZPI=
+github.com/mileszhang2016/bfe v1.4.1-0.20260927103007-ccc589eb665a h1:A+FR57RrC/R/fkDwbMZqCe8eUhoI1hPiGi393ozID7c=
+github.com/mileszhang2016/bfe v1.4.1-0.20260927103007-ccc589eb665a/go.mod h1:jm953sCTUjDv32U+d+8+WuHF8DsHHVnRNKc0zoISZPI=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd h1:TRLaZ9cD/w8PVh93nsPXa1VrQ6jlwL5oN8l14QlcNfg=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
