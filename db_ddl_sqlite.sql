@@ -562,6 +562,19 @@ CREATE TABLE traffic_mirror_rules (
 CREATE TRIGGER traffic_mirror_rules_updated_at AFTER UPDATE ON traffic_mirror_rules
   FOR EACH ROW BEGIN UPDATE traffic_mirror_rules SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
 
+-- create intent_config (AI意图配置表)
+DROP TABLE IF EXISTS intent_config;
+CREATE TABLE intent_config (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version TEXT NOT NULL,
+  min_confidence REAL NOT NULL DEFAULT 0.6,
+  questions TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER intent_config_updated_at AFTER UPDATE ON intent_config
+  FOR EACH ROW BEGIN UPDATE intent_config SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
 -- create route_rules (路由规则表)
 DROP TABLE IF EXISTS route_rules;
 CREATE TABLE route_rules (

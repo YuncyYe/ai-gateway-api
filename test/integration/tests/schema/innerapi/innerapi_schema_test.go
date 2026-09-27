@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -51,6 +52,7 @@ func TestInnerAPI_Schema(t *testing.T) {
 	t.Run("ai_route", testAIRouteSchema)
 	t.Run("ai_cache_rule", testAICacheRuleSchema)
 	t.Run("traffic_mirror_rule", testTrafficMirrorRuleSchema)
+	t.Run("mod_ai_intent", testModAIIntentSchema)
 	t.Run("epp_data", testEppDataSchema)
 	t.Run("server_data_conf_epp", testServerDataConfEppSchema)
 }
@@ -82,9 +84,9 @@ func setupAPIKeyWithRoute(t *testing.T, clusterName string) string {
 			"enabled": true,
 			"rules": []interface{}{
 				map[string]interface{}{
-					"name":    "default",
-					"cond":    "default_t()",
-					"targets": []interface{}{map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100}},
+					"name":      "default",
+					"cond":      "default_t()",
+					"targets":   []interface{}{map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100}},
 					"fallbacks": []interface{}{},
 				},
 			},
@@ -777,7 +779,7 @@ func testAICacheRuleSchema(t *testing.T) {
 
 // testTrafficMirrorRuleSchema 覆盖 /configs/traffic-mirror-rule 导出 schema。
 // 合同锁定：每条规则恰含 7 个导出 tag（全字段恒输出）；removeHeaders 两层默认语义
-//（缺省填默认黑名单、显式 [] 不剔除）以取值断言锁死。
+// （缺省填默认黑名单、显式 [] 不剔除）以取值断言锁死。
 func testTrafficMirrorRuleSchema(t *testing.T) {
 	clusterName, err := testutil.CreateCluster(testutil.UniqueClusterName())
 	require.NoError(t, err)
@@ -797,7 +799,7 @@ func testTrafficMirrorRuleSchema(t *testing.T) {
 			},
 			map[string]interface{}{
 				"name": testutil.UniqueName("inner-schema-tm-3"), "cond": validCondC, "mirror_cluster": clusterName,
-				"percentage":    10,
+				"percentage":     10,
 				"remove_headers": []interface{}{"X-Custom-Secret"},
 				"set_headers":    map[string]interface{}{"X-Shadow-Env": "pre-release"},
 				"body_rewrites":  []interface{}{map[string]interface{}{"path": "model", "value": "deepseek-v3"}},
@@ -876,6 +878,124 @@ func testTrafficMirrorRuleSchema(t *testing.T) {
 	assert.Contains(t, body, `"setHeaders":{}`)
 	assert.Contains(t, body, `"pathRewrite":""`)
 	assert.Contains(t, body, `"bodyRewrites":[{"path":"model","value":"deepseek-v3"}]`)
+}
+
+// ---------- mod_ai_intent ----------
+
+// intentConfigVersionPattern 锁定 Version 的时间戳格式（yyyyMMddHHmmss）。
+var intentConfigVersionPattern = regexp.MustCompile(`^\d{14}$`)
+
+// testModAIIntentSchema 覆盖 /configs/mod-ai-intent 导出 schema。
+// 合同锁定：Data 即 intent_questions.data 文件内容原样——Version 内嵌文件
+// （时间戳格式）、PascalCase 字段，无 Config 包装层（ai-route 形态，非 ai-cache
+// 两段结构）；choice/score 互斥键集合精确；version 增量参数（传当前 version）
+// 返回 Data:null（mod-ai-intent.md §3）。
+func testModAIIntentSchema(t *testing.T) {
+	const exportPath = "/inner-api/v1/configs/mod-ai-intent"
+
+	// 未发布首拉：Data 为 null（conf-agent 不落盘、不触发 reload）。
+	firstResp, err := testutil.GetClient().Get(exportPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, firstResp)
+	testutil.AssertDataNull(t, firstResp)
+
+	// 发布配置（1 choice + 1 score，含逐问题阈值覆盖）。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/intent-config", map[string]interface{}{
+		"min_confidence": 0.65,
+		"questions": []interface{}{
+			map[string]interface{}{
+				"name":         testutil.UniqueName("inner-schema-ic-choice"),
+				"type":         "choice",
+				"instructions": "这条请求属于哪类研发任务？",
+				"criteria": map[string]interface{}{
+					"coding":       "编写或修改代码、调试、重构、代码审查",
+					"test_writing": "编写测试用例、单元测试、集成测试、补充断言",
+				},
+			},
+			map[string]interface{}{
+				"name":           testutil.UniqueName("inner-schema-ic-score"),
+				"type":           "score",
+				"instructions":   "这个任务的复杂度如何？",
+				"min_confidence": 0.7,
+				"levels": []interface{}{
+					map[string]interface{}{"name": "simple", "description": "单步即可完成"},
+					map[string]interface{}{"name": "complex", "description": "需要深入推理或跨模块设计"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.ErrNum, putResp.ErrMsg)
+
+	// 发布后首拉：Data 非 null，符合 PascalCase 文件合同。
+	resp, err := testutil.GetClient().Get(exportPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	if resp.Data == nil || string(resp.Data) == "null" {
+		t.Fatal("first pull after publish must return data")
+	}
+	testutil.AssertSchema(t, resp, IntentConfigExportSchema)
+
+	// 定向断言 1：Version 时间戳格式；无 Config 包装层（顶层键精确 3 字段）。
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &payload))
+	version, ok := payload["Version"].(string)
+	require.True(t, ok, "Version should be string")
+	require.True(t, intentConfigVersionPattern.MatchString(version),
+		"Version must be a yyyyMMddHHmmss timestamp, got %q", version)
+	assert.ElementsMatch(t, []string{"Version", "MinConfidence", "Questions"}, keysOfInnerMap(payload),
+		"export must be the file content verbatim (Version embedded, no Config wrapper)")
+	assert.InDelta(t, 0.65, payload["MinConfidence"], 1e-9)
+
+	// 定向断言 2：choice/score 互斥键集合精确（PascalCase，防幻影键）。
+	questions, ok := payload["Questions"].([]interface{})
+	require.True(t, ok, "Questions should be array")
+	require.Len(t, questions, 2)
+
+	choice, ok := questions[0].(map[string]interface{})
+	require.True(t, ok, "Questions[0] should be object")
+	assert.ElementsMatch(t,
+		[]string{"Name", "Type", "Instructions", "Criteria"}, keysOfInnerMap(choice),
+		"choice question must carry exactly the PascalCase contract keys (no Levels)")
+	criteria, ok := choice["Criteria"].(map[string]interface{})
+	require.True(t, ok, "Criteria should be object")
+	assert.Contains(t, criteria, "coding")
+
+	score, ok := questions[1].(map[string]interface{})
+	require.True(t, ok, "Questions[1] should be object")
+	assert.ElementsMatch(t,
+		[]string{"Name", "Type", "Instructions", "MinConfidence", "Levels"}, keysOfInnerMap(score),
+		"score question must carry exactly the PascalCase contract keys (no Criteria)")
+	assert.InDelta(t, 0.7, score["MinConfidence"], 1e-9)
+	levels, ok := score["Levels"].([]interface{})
+	require.True(t, ok, "Levels should be array")
+	require.Len(t, levels, 2)
+	for i, item := range levels {
+		level, ok := item.(map[string]interface{})
+		require.True(t, ok, "Levels[%d] should be object", i)
+		assert.ElementsMatch(t, []string{"Name", "Description"}, keysOfInnerMap(level),
+			"Levels[%d] must not leak internal fields", i)
+	}
+
+	// 定向断言 3：原始 body 无 Config 包装层、无小写词汇泄漏。
+	body := string(resp.RawBody)
+	assert.NotContains(t, body, `"Config"`)
+	assert.NotContains(t, body, `"questions"`)
+	assert.NotContains(t, body, `"min_confidence"`)
+
+	// version 增量参数：传当前 version → Data:null（conf-agent 不落盘、不 reload）。
+	unchangedResp, err := testutil.GetClient().Get(exportPath, map[string]string{"version": version})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, unchangedResp)
+	testutil.AssertDataNull(t, unchangedResp)
+}
+
+func keysOfInnerMap(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ---------- epp_data ----------

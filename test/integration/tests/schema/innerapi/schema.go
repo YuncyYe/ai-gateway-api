@@ -277,3 +277,38 @@ var TrafficMirrorRuleExportSchema = &testutil.ObjectSchema{
 		"Config":  {Type: testutil.TypeObject, Nested: TrafficMirrorRuleExportBodySchema},
 	},
 }
+
+// IntentConfigQuestionExportSchema /configs/mod-ai-intent 导出问题元素 schema。
+// Required 为全部问题共有的 3 个 PascalCase tag；Criteria/Levels 按 type 互斥出现、
+// MinConfidence 为逐问题可选覆盖（BFE 文件合同，intent_questions.data.md）；
+// 与 Open API 小写词汇不同，转换发生在导出 Generator。
+var IntentConfigQuestionExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Name", "Type", "Instructions"},
+	Optional: []string{"Criteria", "Levels", "MinConfidence"},
+	Fields: map[string]testutil.FieldSpec{
+		"Name":         {Type: testutil.TypeString},
+		"Type":         {Type: testutil.TypeString, Enum: []interface{}{"choice", "score"}},
+		"Instructions": {Type: testutil.TypeString},
+		"Criteria":     {Type: testutil.TypeObject},
+		"Levels": {Type: testutil.TypeArray, Elem: &testutil.ObjectSchema{
+			Required: []string{"Name", "Description"},
+			Fields: map[string]testutil.FieldSpec{
+				"Name":        {Type: testutil.TypeString},
+				"Description": {Type: testutil.TypeString},
+			},
+		}},
+		"MinConfidence": {Type: testutil.TypeNumber},
+	},
+}
+
+// IntentConfigExportSchema /configs/mod-ai-intent 返回 schema（mod-ai-intent.md §3）。
+// Data 即 intent_questions.data 文件内容原样：Version 内嵌文件（时间戳格式
+// yyyyMMddHHmmss），无 Config 包装层（ai-route 形态，非 ai-cache 两段结构）。
+var IntentConfigExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Version", "MinConfidence", "Questions"},
+	Fields: map[string]testutil.FieldSpec{
+		"Version":       {Type: testutil.TypeString},
+		"MinConfidence": {Type: testutil.TypeNumber},
+		"Questions":     {Type: testutil.TypeArray, Elem: IntentConfigQuestionExportSchema},
+	},
+}

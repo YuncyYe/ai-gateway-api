@@ -25,6 +25,7 @@
 | epp_data 接口 | [epp-data.md](./epp-data.md) |
 | ai-cache-rule 接口 | [ai-cache-rule.md](./ai-cache-rule.md) |
 | traffic-mirror-rule 接口 | [traffic-mirror-rule.md](./traffic-mirror-rule.md) |
+| mod-ai-intent 接口 | [mod-ai-intent.md](./mod-ai-intent.md) |
 | k8s_pools 接口 | [k8s-pools.md](./k8s-pools.md) |
 | 数据模型定义 | [data-models.md](./data-models.md) |
 | 附录 | [appendix.md](./appendix.md) |

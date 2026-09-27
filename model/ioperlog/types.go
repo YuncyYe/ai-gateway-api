@@ -61,21 +61,22 @@ const (
 type ResourceType string
 
 const (
-	ResourceTypeEntity          ResourceType = "entity"
-	ResourceTypeEntityType      ResourceType = "entity_type"
-	ResourceTypeAPIKey          ResourceType = "api_key"
-	ResourceTypeProvider        ResourceType = "provider"
-	ResourceTypeCluster         ResourceType = "cluster"
-	ResourceTypeRoute           ResourceType = "route"
-	ResourceTypeDomain          ResourceType = "domain"
-	ResourceTypeCertificate     ResourceType = "certificate"
-	ResourceTypeQuotaPlan       ResourceType = "quota_plan"
-	ResourceTypeRateLimitPolicy ResourceType = "rate_limit_policy"
-	ResourceTypeAICacheRule     ResourceType = "ai_cache_rule"
+	ResourceTypeEntity            ResourceType = "entity"
+	ResourceTypeEntityType        ResourceType = "entity_type"
+	ResourceTypeAPIKey            ResourceType = "api_key"
+	ResourceTypeProvider          ResourceType = "provider"
+	ResourceTypeCluster           ResourceType = "cluster"
+	ResourceTypeRoute             ResourceType = "route"
+	ResourceTypeDomain            ResourceType = "domain"
+	ResourceTypeCertificate       ResourceType = "certificate"
+	ResourceTypeQuotaPlan         ResourceType = "quota_plan"
+	ResourceTypeRateLimitPolicy   ResourceType = "rate_limit_policy"
+	ResourceTypeAICacheRule       ResourceType = "ai_cache_rule"
 	ResourceTypeTrafficMirrorRule ResourceType = "traffic_mirror_rule"
-	ResourceTypeModelPrice      ResourceType = "model_price"
-	ResourceTypeUser            ResourceType = "user"
-	ResourceTypeToken           ResourceType = "token"
+	ResourceTypeIntentConfig      ResourceType = "intent_config"
+	ResourceTypeModelPrice        ResourceType = "model_price"
+	ResourceTypeUser              ResourceType = "user"
+	ResourceTypeToken             ResourceType = "token"
 )
 
 // OperationLogEntry represents a single operation log record.

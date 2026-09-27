@@ -23,12 +23,13 @@ import (
 // calibers follow the existing Grafana dashboard panels (see
 // design-docs/modifications/2026-09-15-report-query-api/api-changes.md §2.2).
 const (
-	MetricQPS     = "qps"     // requests per second
-	MetricTokens  = "tokens"  // token throughput (tokens per second)
-	MetricLatency = "latency" // request latency in milliseconds
-	MetricTTFT    = "ttft"    // time to first token in milliseconds (stream requests)
-	MetricTPOT    = "tpot"    // time per output token in milliseconds (stream requests)
-	MetricCost    = "cost"    // cost growth (amount per second in the currency unit), per currency
+	MetricQPS         = "qps"          // requests per second
+	MetricTokens      = "tokens"       // token throughput (tokens per second)
+	MetricLatency     = "latency"      // request latency in milliseconds
+	MetricTTFT        = "ttft"         // time to first token in milliseconds (stream requests)
+	MetricTPOT        = "tpot"         // time per output token in milliseconds (stream requests)
+	MetricCost        = "cost"         // cost growth (amount per second in the currency unit), per currency
+	MetricCacheTokens = "cache_tokens" // cache token throughput (tokens per second), per kind (cache_read/cache_write)
 )
 
 // CostFixedPointScale is the scale of the fixed-point cost values stored
@@ -42,25 +43,29 @@ func CostFixedPointToAmount(value int64) float64 { return float64(value) / CostF
 
 // TimeSeriesMetrics is the validation set of metric names.
 var TimeSeriesMetrics = map[string]bool{
-	MetricQPS:     true,
-	MetricTokens:  true,
-	MetricLatency: true,
-	MetricTTFT:    true,
-	MetricTPOT:    true,
-	MetricCost:    true,
+	MetricQPS:         true,
+	MetricTokens:      true,
+	MetricLatency:     true,
+	MetricTTFT:        true,
+	MetricTPOT:        true,
+	MetricCost:        true,
+	MetricCacheTokens: true,
 }
 
 // Dimension names accepted by the /report/rankings endpoint.
 const (
-	DimensionModel          = "model"           // ai_target_model
-	DimensionRequestedModel = "requested_model" // ai_requested_model
-	DimensionProvider       = "provider"        // ai_provider
-	DimensionAPIKey         = "apikey"          // ai_apikey_id
-	DimensionHost           = "host"            // hostid
-	DimensionStatus         = "status"          // res_status_code
-	DimensionProtocol       = "protocol"        // ai_protocol
-	DimensionMode           = "mode"            // ai_mode
-	DimensionStream         = "stream"          // ai_stream
+	DimensionModel          = "model"            // ai_target_model
+	DimensionRequestedModel = "requested_model"  // ai_requested_model
+	DimensionProvider       = "provider"         // ai_provider
+	DimensionAPIKey         = "apikey"           // ai_apikey_id
+	DimensionHost           = "host"             // hostid
+	DimensionStatus         = "status"           // res_status_code
+	DimensionProtocol       = "protocol"         // ai_protocol
+	DimensionMode           = "mode"             // ai_mode
+	DimensionStream         = "stream"           // ai_stream
+	DimensionCacheStatus    = "ai_cache_status"  // ai_cache_status (hit/miss/skip, '' = cache disabled)
+	DimensionMirrorHit      = "mirror_hit"       // mirror_hit (0/1)
+	DimensionIntentAnswer   = "ai_intent_answer" // ai_intent_answer ('' = intent not evaluated)
 )
 
 // RankingDimensions is the validation set of dimensions for rankings.
@@ -73,14 +78,29 @@ var RankingDimensions = map[string]bool{
 	DimensionStatus:         true,
 	DimensionProtocol:       true,
 	DimensionMode:           true,
+	DimensionCacheStatus:    true,
+	DimensionMirrorHit:      true,
+	DimensionIntentAnswer:   true,
 }
 
 // DistributionDimensions is the validation set of dimensions for distribution.
 var DistributionDimensions = map[string]bool{
-	DimensionStatus:   true,
-	DimensionProtocol: true,
-	DimensionMode:     true,
-	DimensionStream:   true,
+	DimensionStatus:       true,
+	DimensionProtocol:     true,
+	DimensionMode:         true,
+	DimensionStream:       true,
+	DimensionCacheStatus:  true,
+	DimensionMirrorHit:    true,
+	DimensionIntentAnswer: true,
+}
+
+// TimeSeriesDimensions is the validation set of the optional dimension
+// parameter of /report/timeseries: only the three cache/mirror/intent
+// dimensions are accepted (they split the series per dimension value).
+var TimeSeriesDimensions = map[string]bool{
+	DimensionCacheStatus:  true,
+	DimensionMirrorHit:    true,
+	DimensionIntentAnswer: true,
 }
 
 // DimensionColumns maps dimension names to the aggregate table columns.
@@ -96,6 +116,9 @@ var DimensionColumns = map[string]string{
 	DimensionProtocol:       "ai_protocol",
 	DimensionMode:           "ai_mode",
 	DimensionStream:         "ai_stream",
+	DimensionCacheStatus:    "ai_cache_status",
+	DimensionMirrorHit:      "mirror_hit",
+	DimensionIntentAnswer:   "ai_intent_answer",
 }
 
 // Filter carries the filter criteria shared by all report endpoints.
@@ -113,10 +136,15 @@ type Filter struct {
 // LogFilter extends Filter with log-list-only criteria.
 type LogFilter struct {
 	Filter
-	RequestedModels []string // ai_requested_model
-	ErrOnly         bool     // only rows with non-empty err_code
-	Keyword         string   // fuzzy match against err_msg
-	Page            int      // 1-based
+	RequestedModels []string  // ai_requested_model
+	ErrOnly         bool      // only rows with non-empty err_code
+	Keyword         string    // fuzzy match against err_msg
+	CacheStatus     *string   // exact match on ai_cache_status (hit/miss/skip)
+	MirrorHit       *bool     // exact match on mirror_hit
+	IntentQuestion  *string   // exact match on ai_intent_question
+	IntentAnswer    *string   // exact match on ai_intent_answer (may be "unknown")
+	IntentSource    *string   // exact match on ai_intent_source (explicit_header/classifier/cache)
+	Page            int       // 1-based
 	PageSize        int
 }
 
@@ -126,6 +154,36 @@ type LogFilter struct {
 type CostItem struct {
 	Currency string  `json:"currency"`
 	Value    float64 `json:"value"`
+}
+
+// CacheOverview is the cache indicator group of GET /report/overview.
+// HitRate = HitCount/(HitCount+MissCount); SkipCount is not in the
+// denominator. ReadTokens/WriteTokens are the window sums of the aggregate
+// table cache_read_tokens/cache_write_tokens columns (raw token counts, the
+// same caliber as the BFE log fields, not divided by 1e8).
+type CacheOverview struct {
+	HitCount    int64   `json:"hit_count"`
+	MissCount   int64   `json:"miss_count"`
+	SkipCount   int64   `json:"skip_count"`
+	HitRate     float64 `json:"hit_rate"`
+	ReadTokens  int64   `json:"read_tokens"`
+	WriteTokens int64   `json:"write_tokens"`
+}
+
+// MirrorOverview is the traffic-mirror indicator group of GET /report/overview.
+type MirrorOverview struct {
+	HitCount int64 `json:"hit_count"`
+}
+
+// IntentOverview is the ai-intent indicator group of GET /report/overview.
+// The counts follow the routing-consumed caliber: phase-1 BFE only logs the
+// single consumed question, so these are NOT the classification volume of all
+// configured questions. UnknownCount is the answer below the confidence gate
+// at consumption time; UnknownRate = UnknownCount/(ClassifiedCount+UnknownCount).
+type IntentOverview struct {
+	ClassifiedCount int64   `json:"classified_count"`
+	UnknownCount    int64   `json:"unknown_count"`
+	UnknownRate     float64 `json:"unknown_rate"`
 }
 
 // OverviewResult is the data of GET /report/overview. LatencyP50Ms /
@@ -153,12 +211,18 @@ type OverviewResult struct {
 	RateLimitHits int64       `json:"rate_limit_hits"`
 	AuthRejects   int64       `json:"auth_rejects"`
 	LogsTotal     int64       `json:"logs_total"`
+
+	Cache  CacheOverview  `json:"cache"`
+	Mirror MirrorOverview `json:"mirror"`
+	Intent IntentOverview `json:"intent"`
 }
 
 // MetricPoint is one time-series point. Value is set for single-value
-// metrics (qps / ttft / tpot / cost); Input/Output/Total for tokens;
-// Avg/Max for latency; P50/P90/P99 only on the Doris latency series.
-// Currency distinguishes per-currency cost points.
+// metrics (qps / ttft / tpot / cost / cache_tokens); Input/Output/Total for
+// tokens; Avg/Max for latency; P50/P90/P99 only on the Doris latency series.
+// Currency distinguishes per-currency cost points; Kind distinguishes the
+// cache_read/cache_write cache_tokens series; Name carries the dimension
+// value of a dimension-split series (optional dimension parameter).
 type MetricPoint struct {
 	Time     int64    `json:"time"`
 	Value    *float64 `json:"value,omitempty"`
@@ -171,6 +235,8 @@ type MetricPoint struct {
 	P90      *float64 `json:"p90,omitempty"`
 	P99      *float64 `json:"p99,omitempty"`
 	Currency string   `json:"currency,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Name     string   `json:"name,omitempty"`
 }
 
 // RankingItem is one row of GET /report/rankings.
@@ -235,6 +301,17 @@ type LogRow struct {
 	OriginURI           *string `json:"origin_uri"`
 	ReqHeaders          *string `json:"req_headers"`
 	ResHeaders          *string `json:"res_headers"`
+
+	AICacheStatus           *string  `json:"ai_cache_status"`
+	MirrorHit               *bool    `json:"mirror_hit"`
+	MirrorCluster           *string  `json:"mirror_cluster"`
+	AIIntentQuestion        *string  `json:"ai_intent_question"`
+	AIIntentAnswer          *string  `json:"ai_intent_answer"`
+	AIIntentConfidence      *float64 `json:"ai_intent_confidence"`
+	AIIntentSource          *string  `json:"ai_intent_source"`
+	AIIntentLatencyUs       *int64   `json:"ai_intent_latency_us"`
+	AIIntentCacheHit        *bool    `json:"ai_intent_cache_hit"`
+	AIIntentQuestionsVer    *string  `json:"ai_intent_questions_version"`
 }
 
 // LogQueryResult is the data of GET /report/logs.
@@ -245,15 +322,28 @@ type LogQueryResult struct {
 	Items    []*LogRow `json:"items"`
 }
 
+// BackendCaps describes the capabilities of a report storage backend. The
+// manager gates dimension requests against SupportedDimensions so an
+// unsupported dimension is rejected with an explicit parameter error (422)
+// instead of silently returning an empty report (see design-docs
+// modifications/2026-09-27-report-cache-mirror-intent-fields).
+type BackendCaps struct {
+	Backend             string   // backend identifier: "mysql" | "doris"
+	SupportedDimensions []string // dimension names (Dimension* constants) supported by this backend
+}
+
 // ReportStorager defines the storage operations backing the report queries.
 // Implementations exist for MySQL (storage/mysqlreport) and Doris
-// (storage/dorisreport); the manager never contains SQL.
+// (storage/dorisreport); the manager never contains SQL. The dimension
+// parameter of TimeSeries is optional (empty = plain per-time series); the
+// accepted values are the TimeSeriesDimensions set.
 type ReportStorager interface {
 	Overview(ctx context.Context, f *Filter) (*OverviewResult, error)
-	TimeSeries(ctx context.Context, metric string, f *Filter, bucketSec int) ([]*MetricPoint, error)
+	TimeSeries(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error)
 	Rankings(ctx context.Context, dimension string, f *Filter, limit int) ([]*RankingItem, error)
 	Distribution(ctx context.Context, dimension string, f *Filter) ([]*DistItem, error)
 	Logs(ctx context.Context, f *LogFilter) (*LogQueryResult, error)
+	Capabilities() *BackendCaps
 }
 
 // BucketSeconds returns the time-bucket width in seconds for a query

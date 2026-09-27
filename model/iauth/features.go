@@ -129,6 +129,9 @@ const (
 	// traffic mirror
 	FeatureTrafficMirror Feature = "TrafficMirror"
 
+	// ai intent
+	FeatureAIIntent Feature = "AIIntent"
+
 	// model pricing
 	FeatureModelPrice Feature = "ModelPrice"
 	FeatureProvider   Feature = "Provider"
@@ -234,5 +237,6 @@ var scope2permission = map[string]map[Feature]Action{
 		FeatureRateLimitPolicy:   ActionExport,
 		FeatureAICache:           ActionExport,
 		FeatureTrafficMirror:     ActionExport,
+		FeatureAIIntent:          ActionExport,
 	},
 }

@@ -41,6 +41,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/icluster_conf"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/iintent_config"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ik8s_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imodel_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imods"
@@ -66,6 +67,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/cluster_conf"
 	entityStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/entity"
 	eppPoolStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/epp_pool"
+	intentConfigStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/iintent_config"
 	k8sPoolStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/k8s_pool"
 	operationLogStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/ioperlog"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/model_price"
@@ -341,6 +343,13 @@ func Init() error {
 		stateful.DefaultConfig.RunTime.AIRouteInnerProductName)
 	container.TrafficMirrorManager.SetOperationLogManager(container.OperationLogManager)
 
+	container.IntentConfigStorager = intentConfigStorage.NewIntentConfigStorager(stateful.NewBFEDBContext)
+	container.IntentConfigManager = iintent_config.NewIntentConfigManager(
+		container.TxnStoragerSingleton,
+		container.IntentConfigStorager,
+		container.VersionControlManager)
+	container.IntentConfigManager.SetOperationLogManager(container.OperationLogManager)
+
 	// Wire nested-resource auditors so Entity/API Key nested quota-plan and
 	// rate-limit-policy writes emit operation logs with resource_parent_id
 	// filled (issue #161).
@@ -404,7 +413,7 @@ func initReport() error {
 
 	switch cfg.Backend {
 	case "mysql":
-		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database))
+		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database, "mysql"))
 		if cfg.EnableAggregateJob || cfg.EnablePartitionMgmt {
 			interval := time.Duration(cfg.AggregateIntervalSec) * time.Second
 			if !cfg.EnableAggregateJob {
@@ -419,8 +428,10 @@ func initReport() error {
 		}
 	case "doris":
 		// Doris aggregation is maintained by the existing Doris insert job;
-		// the api only queries.
-		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database))
+		// the api only queries. The backend identifier feeds Capabilities(),
+		// which gates the cache/mirror/intent dimensions (phase 1: mysql
+		// only, see design-docs modifications/2026-09-27-report-cache-mirror-intent-fields).
+		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database, "doris"))
 	default:
 		container.ReportManager = nil
 		return fmt.Errorf("unsupported [Report].Backend: %s", cfg.Backend)

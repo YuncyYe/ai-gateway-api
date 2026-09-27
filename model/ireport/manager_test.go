@@ -26,10 +26,11 @@ import (
 
 type fakeReportStorager struct {
 	overviewFn     func(ctx context.Context, f *Filter) (*OverviewResult, error)
-	timeSeriesFn   func(ctx context.Context, metric string, f *Filter, bucketSec int) ([]*MetricPoint, error)
+	timeSeriesFn   func(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error)
 	rankingsFn     func(ctx context.Context, dimension string, f *Filter, limit int) ([]*RankingItem, error)
 	distributionFn func(ctx context.Context, dimension string, f *Filter) ([]*DistItem, error)
 	logsFn         func(ctx context.Context, f *LogFilter) (*LogQueryResult, error)
+	caps           *BackendCaps
 }
 
 func (s *fakeReportStorager) Overview(ctx context.Context, f *Filter) (*OverviewResult, error) {
@@ -39,9 +40,9 @@ func (s *fakeReportStorager) Overview(ctx context.Context, f *Filter) (*Overview
 	return &OverviewResult{}, nil
 }
 
-func (s *fakeReportStorager) TimeSeries(ctx context.Context, metric string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
+func (s *fakeReportStorager) TimeSeries(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
 	if s.timeSeriesFn != nil {
-		return s.timeSeriesFn(ctx, metric, f, bucketSec)
+		return s.timeSeriesFn(ctx, metric, dimension, f, bucketSec)
 	}
 	return nil, nil
 }
@@ -65,6 +66,30 @@ func (s *fakeReportStorager) Logs(ctx context.Context, f *LogFilter) (*LogQueryR
 		return s.logsFn(ctx, f)
 	}
 	return &LogQueryResult{}, nil
+}
+
+// Capabilities returns the injected caps; nil means "support everything"
+// (the capability check is a pass-through then).
+func (s *fakeReportStorager) Capabilities() *BackendCaps {
+	return s.caps
+}
+
+// mysqlLikeCaps mimics the MySQL backend: all dimensions supported.
+func mysqlLikeCaps() *BackendCaps {
+	return &BackendCaps{Backend: "mysql", SupportedDimensions: []string{
+		DimensionModel, DimensionRequestedModel, DimensionProvider, DimensionAPIKey,
+		DimensionHost, DimensionStatus, DimensionProtocol, DimensionMode, DimensionStream,
+		DimensionCacheStatus, DimensionMirrorHit, DimensionIntentAnswer,
+	}}
+}
+
+// dorisLikeCaps mimics the Doris backend (phase 1): the three new
+// dimensions are not declared.
+func dorisLikeCaps() *BackendCaps {
+	return &BackendCaps{Backend: "doris", SupportedDimensions: []string{
+		DimensionModel, DimensionRequestedModel, DimensionProvider, DimensionAPIKey,
+		DimensionHost, DimensionStatus, DimensionProtocol, DimensionMode, DimensionStream,
+	}}
 }
 
 func testWindow() (time.Time, time.Time) {
@@ -141,7 +166,7 @@ func TestReportManager_TimeSeries_Bucket(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBucket int
 			storager := &fakeReportStorager{
-				timeSeriesFn: func(ctx context.Context, metric string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
+				timeSeriesFn: func(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
 					gotBucket = bucketSec
 					return []*MetricPoint{{Time: 1782345600}}, nil
 				},
@@ -311,6 +336,60 @@ func TestReportManager_Logs_Filters(t *testing.T) {
 	assert.Equal(t, end, gotFilter.End)
 }
 
+// TestReportManager_Logs_CacheMirrorIntentFilters 验证五个新过滤参数透传到 LogFilter。
+func TestReportManager_Logs_CacheMirrorIntentFilters(t *testing.T) {
+	var gotFilter *LogFilter
+	storager := &fakeReportStorager{
+		logsFn: func(ctx context.Context, f *LogFilter) (*LogQueryResult, error) {
+			gotFilter = f
+			return &LogQueryResult{}, nil
+		},
+	}
+	manager := NewReportManager(storager)
+	start, end := testWindow()
+
+	cacheStatus := "hit"
+	mirrorHit := true
+	intentQuestion := "task_type"
+	intentAnswer := "unknown"
+	intentSource := "classifier"
+	_, err := manager.Logs(context.Background(), &LogsQuery{
+		BaseQuery:      BaseQuery{Start: start, End: end},
+		CacheStatus:    &cacheStatus,
+		MirrorHit:      &mirrorHit,
+		IntentQuestion: &intentQuestion,
+		IntentAnswer:   &intentAnswer,
+		IntentSource:   &intentSource,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, gotFilter)
+	require.NotNil(t, gotFilter.CacheStatus)
+	assert.Equal(t, "hit", *gotFilter.CacheStatus)
+	require.NotNil(t, gotFilter.MirrorHit)
+	assert.True(t, *gotFilter.MirrorHit)
+	require.NotNil(t, gotFilter.IntentQuestion)
+	assert.Equal(t, "task_type", *gotFilter.IntentQuestion)
+	require.NotNil(t, gotFilter.IntentAnswer)
+	assert.Equal(t, "unknown", *gotFilter.IntentAnswer)
+	require.NotNil(t, gotFilter.IntentSource)
+	assert.Equal(t, "classifier", *gotFilter.IntentSource)
+
+	// 缺省时保持 nil（不过滤）。
+	var emptyFilter *LogFilter
+	storager.logsFn = func(ctx context.Context, f *LogFilter) (*LogQueryResult, error) {
+		emptyFilter = f
+		return &LogQueryResult{}, nil
+	}
+	_, err = manager.Logs(context.Background(), &LogsQuery{BaseQuery: BaseQuery{Start: start, End: end}})
+	require.NoError(t, err)
+	require.NotNil(t, emptyFilter)
+	assert.Nil(t, emptyFilter.CacheStatus)
+	assert.Nil(t, emptyFilter.MirrorHit)
+	assert.Nil(t, emptyFilter.IntentQuestion)
+	assert.Nil(t, emptyFilter.IntentAnswer)
+	assert.Nil(t, emptyFilter.IntentSource)
+}
+
 func TestReportManager_Logs_KeywordTooLong(t *testing.T) {
 	manager := NewReportManager(&fakeReportStorager{})
 	start, end := testWindow()
@@ -382,4 +461,151 @@ func TestDimensionColumns(t *testing.T) {
 	for dimension := range DistributionDimensions {
 		assert.NotEmpty(t, DimensionColumns[dimension], dimension)
 	}
+	for dimension := range TimeSeriesDimensions {
+		assert.NotEmpty(t, DimensionColumns[dimension], dimension)
+	}
+}
+
+// TestReportManager_DimensionCapabilityGate 验证后端能力门控：维度白名单
+// 校验通过但后端不支持时返回 422，错误信息指明 mysql only（xerror 约定）。
+func TestReportManager_DimensionCapabilityGate(t *testing.T) {
+	start, end := testWindow()
+	newDims := []string{DimensionCacheStatus, DimensionMirrorHit, DimensionIntentAnswer}
+
+	t.Run("rankings_doris_422", func(t *testing.T) {
+		manager := NewReportManager(&fakeReportStorager{caps: dorisLikeCaps()})
+		for _, dim := range newDims {
+			_, err := manager.Rankings(context.Background(), &RankingsQuery{
+				BaseQuery: BaseQuery{Start: start, End: end},
+				Dimension: dim,
+			})
+			require.Error(t, err, dim)
+			assert.Contains(t, err.Error(), "not supported by doris backend (mysql only until doris support lands)")
+		}
+	})
+
+	t.Run("distribution_doris_422", func(t *testing.T) {
+		manager := NewReportManager(&fakeReportStorager{caps: dorisLikeCaps()})
+		for _, dim := range newDims {
+			_, err := manager.Distribution(context.Background(), &DistributionQuery{
+				BaseQuery: BaseQuery{Start: start, End: end},
+				Dimension: dim,
+			})
+			require.Error(t, err, dim)
+			assert.Contains(t, err.Error(), "not supported by doris backend")
+		}
+	})
+
+	t.Run("timeseries_doris_422", func(t *testing.T) {
+		manager := NewReportManager(&fakeReportStorager{caps: dorisLikeCaps()})
+		for _, dim := range newDims {
+			_, err := manager.TimeSeries(context.Background(), &TimeSeriesQuery{
+				BaseQuery: BaseQuery{Start: start, End: end},
+				Metric:    MetricQPS,
+				Dimension: dim,
+			})
+			require.Error(t, err, dim)
+			assert.Contains(t, err.Error(), "not supported by doris backend")
+		}
+	})
+
+	t.Run("legacy_dimensions_still_supported_on_doris", func(t *testing.T) {
+		var gotDimension string
+		storager := &fakeReportStorager{
+			caps: dorisLikeCaps(),
+			rankingsFn: func(ctx context.Context, dimension string, f *Filter, limit int) ([]*RankingItem, error) {
+				gotDimension = dimension
+				return nil, nil
+			},
+		}
+		manager := NewReportManager(storager)
+		_, err := manager.Rankings(context.Background(), &RankingsQuery{
+			BaseQuery: BaseQuery{Start: start, End: end},
+			Dimension: DimensionModel,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DimensionModel, gotDimension)
+	})
+
+	t.Run("mysql_supports_new_dimensions", func(t *testing.T) {
+		var gotDimension string
+		storager := &fakeReportStorager{
+			caps: mysqlLikeCaps(),
+			rankingsFn: func(ctx context.Context, dimension string, f *Filter, limit int) ([]*RankingItem, error) {
+				gotDimension = dimension
+				return nil, nil
+			},
+		}
+		manager := NewReportManager(storager)
+		for _, dim := range newDims {
+			_, err := manager.Rankings(context.Background(), &RankingsQuery{
+				BaseQuery: BaseQuery{Start: start, End: end},
+				Dimension: dim,
+			})
+			require.NoError(t, err, dim)
+			assert.Equal(t, dim, gotDimension)
+		}
+	})
+}
+
+// TestReportManager_TimeSeries_Dimension 验证 timeseries 的 dimension 参数：
+// 仅接受三个新维度；白名单外 400（invalid dimension），doris 422。
+func TestReportManager_TimeSeries_Dimension(t *testing.T) {
+	start, end := testWindow()
+
+	var gotDimension string
+	storager := &fakeReportStorager{
+		caps: mysqlLikeCaps(),
+		timeSeriesFn: func(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
+			gotDimension = dimension
+			return nil, nil
+		},
+	}
+	manager := NewReportManager(storager)
+
+	_, err := manager.TimeSeries(context.Background(), &TimeSeriesQuery{
+		BaseQuery: BaseQuery{Start: start, End: end},
+		Metric:    MetricQPS,
+		Dimension: DimensionCacheStatus,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DimensionCacheStatus, gotDimension)
+
+	// 缺省 dimension 保持空串（行为不变）。
+	_, err = manager.TimeSeries(context.Background(), &TimeSeriesQuery{
+		BaseQuery: BaseQuery{Start: start, End: end},
+		Metric:    MetricQPS,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "", gotDimension)
+
+	// 既有维度（如 model）不在 timeseries 维度白名单内。
+	_, err = manager.TimeSeries(context.Background(), &TimeSeriesQuery{
+		BaseQuery: BaseQuery{Start: start, End: end},
+		Metric:    MetricQPS,
+		Dimension: DimensionModel,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid dimension")
+}
+
+// TestReportManager_CacheTokensMetric 验证 cache_tokens 指标进入时序白名单。
+func TestReportManager_CacheTokensMetric(t *testing.T) {
+	var gotMetric string
+	storager := &fakeReportStorager{
+		caps: mysqlLikeCaps(),
+		timeSeriesFn: func(ctx context.Context, metric, dimension string, f *Filter, bucketSec int) ([]*MetricPoint, error) {
+			gotMetric = metric
+			return nil, nil
+		},
+	}
+	manager := NewReportManager(storager)
+	start, end := testWindow()
+
+	_, err := manager.TimeSeries(context.Background(), &TimeSeriesQuery{
+		BaseQuery: BaseQuery{Start: start, End: end},
+		Metric:    MetricCacheTokens,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, MetricCacheTokens, gotMetric)
 }

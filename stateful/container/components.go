@@ -36,6 +36,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/icluster_conf"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/iintent_config"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ik8s_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imodel_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imods"
@@ -98,6 +99,7 @@ var (
 	RateLimitPolicyStorager rate_limit_policy.RateLimitPolicyStorager
 	AICacheStorager         ai_cache.AICacheStorager
 	TrafficMirrorStorager   traffic_mirror.TrafficMirrorStorager
+	IntentConfigStorager    iintent_config.IntentConfigStorager
 	RouteRulesStorager      shared.RouteRulesStorager
 	QuotaCacheSingleton     quotacache.QuotaCache
 
@@ -120,6 +122,7 @@ var (
 	RateLimitPolicyManager *rate_limit_policy.RateLimitPolicyManager
 	AICacheManager         *ai_cache.AICacheManager
 	TrafficMirrorManager   *traffic_mirror.TrafficMirrorManager
+	IntentConfigManager    *iintent_config.IntentConfigManager
 	RouteRulesManager      *route_rules.RouteRulesManager
 	AIRouteExporter        *imods.AIRouteExporter
 	BalanceSyncManager     *quota.BalanceSyncManager

@@ -11,9 +11,9 @@
 | 总体设计文档 | [总体设计文档.md](./总体设计文档.md) | 描述 `ai-gateway-api` 在 AI 网关中的定位、功能范围、三层架构（接口层/模型层/存储层）、组件交互关系、核心数据流以及 OpenAPI 与 InnerAPI 的职责划分。 |
 | 接口层设计文档 | [接口层设计文档.md](./接口层设计文档.md) | 描述管理面 OpenAPI（`/open-api/v1`）与数据面 InnerAPI（`/inner-api/v1`）的路由组织、统一的 `xreq.Endpoint` 抽象、全局与业务中间件链、子包划分以及典型接口实现模式。 |
 | 模型层设计文档 | [模型层设计文档.md](./模型层设计文档.md) | 描述 `model/` 层的子包职责、Manager + Storager 接口的分层模式、Param/Filter 设计、事务管理、典型业务流程以及各业务模型（API-Key、Entity、Provider、Cluster、Quota、RateLimit、Route 等）的交互方式。 |
-| 存储层设计文档 | [存储层设计文档.md](./存储层设计文档.md) | 描述 `storage/rdb` 层的 DAO + Storage 两层结构、通用 DAO 设计模式、事务与连接管理、33 张表的 DAO 映射关系以及 Storage 实现如何向上暴露接口供模型层调用。 |
-| 数据库设计文档 | [数据库设计文档.md](./数据库设计文档.md) | 描述 `ai-gateway-api` 当前实现中全部 33 张持久化表的字段、约束、索引、JSON 字段结构以及表间逻辑关系，覆盖基础配置、集群、路由、证书、API-Key、Entity、配额、限流、AI 缓存、模型定价、操作日志等模块。 |
-| 报表库设计文档 | [报表库设计文档.md](./报表库设计文档.md) | 描述独立报表库（`bfe_report`）的两张表设计：`bfe_ai_request_log` 明细表（89 列，幂等键/空值语义/按天 RANGE 分区/索引）与 `bfe_ai_metrics_1m` 分钟聚合表（37 维 + 24 指标，与 Doris 对齐、不设唯一键的理由）、聚合与分区管理语义、账号权限矩阵、容量建议与列演进规则；DDL 归 `db_ddl_report_mysql.sql`。 |
+| 存储层设计文档 | [存储层设计文档.md](./存储层设计文档.md) | 描述 `storage/rdb` 层的 DAO + Storage 两层结构、通用 DAO 设计模式、事务与连接管理、34 张表的 DAO 映射关系以及 Storage 实现如何向上暴露接口供模型层调用。 |
+| 数据库设计文档 | [数据库设计文档.md](./数据库设计文档.md) | 描述 `ai-gateway-api` 当前实现中全部 34 张持久化表的字段、约束、索引、JSON 字段结构以及表间逻辑关系，覆盖基础配置、集群、路由、证书、API-Key、Entity、配额、限流、AI 缓存、AI 意图、模型定价、操作日志等模块。 |
+| 报表库设计文档 | [报表库设计文档.md](./报表库设计文档.md) | 描述独立报表库（`bfe_report`）的两张表设计：`bfe_ai_request_log` 明细表（99 列，含 2026-09-27 缓存/镜像/意图 10 列；幂等键/空值语义/按天 RANGE 分区/索引）与 `bfe_ai_metrics_1m` 分钟聚合表（40 维 + 24 指标，含 `ai_cache_status`/`mirror_hit`/`ai_intent_answer` 3 个维度列，与 Doris 对齐、不设唯一键的理由）、聚合与分区管理语义、账号权限矩阵、容量建议与列演进规则；DDL 归 `db_ddl_report_mysql.sql`。 |
 
 ---
 
@@ -22,12 +22,13 @@
 | 文档名称 | 相对路径 | 摘要说明 |
 |---------|---------|---------|
 | 操作日志模块 | [details/操作日志模块.md](./details/操作日志模块.md) | 描述 `model/ioperlog` 操作日志设计：覆盖 entity / api-key / provider / cluster 等域的变更记录、成功与失败双路径日志、异步批量写入、敏感字段脱敏与 `GET /operation-logs` 查询接口；含嵌套资源（quota_plan / rate_limit_policy）写/审分层审计与 `resource_parent_id` 归属设计（issue #161）。 |
-| 报表查询模块 | [details/报表查询模块.md](./details/报表查询模块.md) | 描述 `/report/*` 报表查询设计：`model/ireport` Manager + `ReportStorager` 双后端（MySQL/Doris）方言实现、`Databases` 数据源复用与 `[Report]` 装配、分钟聚合 JOB（DELETE+INSERT 事务幂等、GET_LOCK 防重）与分区管理 JOB（RANGE 分区/DELETE 降级）、两张报表表 DDL 归属（`db_ddl_report_mysql.sql`）与三处经 LR03 集成测试验证的修正、FeatureReport 鉴权与未装配 404 行为。 |
+| 报表查询模块 | [details/报表查询模块.md](./details/报表查询模块.md) | 描述 `/report/*` 报表查询设计：`model/ireport` Manager + `ReportStorager` 双后端（MySQL/Doris）方言实现、`Capabilities()` 后端能力门控（新维度 Doris 返回 422）、`Databases` 数据源复用与 `[Report]` 装配、分钟聚合 JOB（DELETE+INSERT 事务幂等、GET_LOCK 防重）与分区管理 JOB（RANGE 分区/DELETE 降级）、两张报表表 DDL 归属（`db_ddl_report_mysql.sql`）与三处经 LR03 集成测试验证的修正、FeatureReport 鉴权与未装配 404 行为、缓存/镜像/意图字段消费（overview/logs/timeseries cache_tokens/新维度，2026-09-27）。 |
 | 认证授权机制 | [details/认证授权机制.md](./details/认证授权机制.md) | 描述 `model/iauth` 的认证授权设计，包括用户与 Token 共用 `users` 表、`Visitor` 统一抽象、Scope 作用域、Feature-Action 权限模型、四种认证方式以及中间件集成与数据库表设计。 |
-| InnerAPI 配置导出与版本控制 | [details/InnerAPI配置导出与版本控制.md](./details/InnerAPI配置导出与版本控制.md) | 描述面向 BFE/Conf Agent 的 InnerAPI 配置导出机制，包括 `VersionControlManager` 的 MD5 签名比对、版本号生成与同 Topic 严格单调递增保证（`uk_name_version` 唯一约束 + 版本 +1s 抬升 + 冲突重试，issue #142）、`config_versions` 表持久化、10 类配置导出主题、增量同步流程，以及 `mod-api-key` 的批量预加载 + 内存回溯性能优化。 |
+| InnerAPI 配置导出与版本控制 | [details/InnerAPI配置导出与版本控制.md](./details/InnerAPI配置导出与版本控制.md) | 描述面向 BFE/Conf Agent 的 InnerAPI 配置导出机制，包括 `VersionControlManager` 的 MD5 签名比对、版本号生成与同 Topic 严格单调递增保证（`uk_name_version` 唯一约束 + 版本 +1s 抬升 + 冲突重试，issue #142）、`config_versions` 表持久化、11 类配置导出主题、增量同步流程，以及 `mod-api-key` 的批量预加载 + 内存回溯性能优化。 |
 | API-Key 与 Entity 关联及模型继承 | [details/API-Key与Entity关联及模型继承.md](./details/API-Key与Entity关联及模型继承.md) | 描述 API-Key 与 Entity 的挂载关系、Entity 层级树约束、模型白名单交集与黑名单继承、配额计划层级合并、限流策略与路由规则的层级收集，以及导出到 BFE 时的最终生效规则。 |
 | 限流策略与导出 | [details/限流策略与导出.md](./details/限流策略与导出.md) | 描述限流策略的数据模型（TPM/RPM/并发数）、JSON 配置结构、CRUD 校验、API-Key/Entity 引用关系、按 Entity 层级向上合并导出到 BFE 的流程，以及 BFE 侧预期行为与边界情况。 |
 | AI 缓存规则与导出 | [details/AI缓存规则与导出.md](./details/AI缓存规则与导出.md) | 描述 AI 缓存规则集合资源（`ai_cache_rules`）：集合级全量读写（first-match-wins、无 `enabled`、无 `/{id}`）、Open API 事务重建语义、导出到 BFE `mod_ai_cache` 的字段 tag 契约（一期导出五字段）、`iversion_control` 生成器流程、Redis 连接经 `CopyFiles` 不下发，以及与 rate_limit_policy 导出的差异。 |
+| 意图配置与导出 | [details/意图配置与导出.md](./details/意图配置与导出.md) | 描述 AI 意图配置单例资源（`intent_config`）：单行覆盖式全量读写（无 `enabled`、无历史版本）、空 `questions` 软开关停用意图分类、`intent_questions.data` 导出（Data = 文件内容原样，Version 内嵌文件，非 ai-cache 的 Config 包装形态）、路由 cond 直传消费意图条件（fail-safe 引用语义）、静态 `mod_ai_intent.conf` 经 `CopyFiles` 不下发，以及与 ai_cache_rules 导出的差异。 |
 | 流量镜像规则与导出 | [details/流量镜像规则与导出.md](./details/流量镜像规则与导出.md) | 描述流量镜像规则集合资源（`traffic_mirror_rules`）：集合级全量读写（first-match-wins、无 `enabled`、无 `/{id}`、`cond` 必填且全匹配显式 `default_t()`）、`mirror_cluster` 存在性校验、`remove_headers` 缺省填默认黑名单的两层默认语义、Open API 事务重建语义、导出到 BFE `mod_traffic_mirror` 的字段 tag 契约（规则全字段恒输出）、`iversion_control` 生成器流程、模块调参经 `CopyFiles` 不下发，以及与 ai_cache_rules 导出的差异。 |
 | 路由规则管理 | [details/路由规则管理.md](./details/路由规则管理.md) | 区分产品级 BFE 路由规则与 AI 路由规则，描述 `route_rules` 表的三级（Global/Entity/API-Key）管理、校验规则、与 API-Key/Entity 生命周期的一致性、导出到 BFE 的绑定顺序与文件格式。 |
 | 配额余额同步机制 | [details/配额余额同步机制.md](./details/配额余额同步机制.md) | 描述 Redis 作为余额唯一真实来源的架构，包括 OpenAPI 查询余额直接读 Redis、`QuotaCache` 批量读取接口（`BatchGetRemaining` / `GetInt64Batch`）、`QuotaResetScheduler` 调度器（含 Redis 分布式锁 + 看门狗续期）、`BalanceSyncManager` 的过期重置（原子 `SET` Redis + `last_reset_at` 条件更新）、`QuotaPlanManager.ApplyQuotaPlanChange` 对 quota_plan 变更的差异化处理、自然周/月重置逻辑、Redis Key 生命周期以及 `last_reset_at` 上移至 `quota_plans` 表的设计；包含 RMB 配额定点精度设计与 `Clock` 时钟注入。 |

@@ -532,6 +532,18 @@ CREATE TABLE `traffic_mirror_rules` (
   UNIQUE KEY `uk_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='流量镜像规则表';
 
+-- create intent_config (AI意图配置表)
+DROP TABLE IF EXISTS `intent_config`;
+CREATE TABLE `intent_config` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID（固定 id=1，单行覆盖式存储）',
+  `version` VARCHAR(32) NOT NULL COMMENT '当前配置版本，时间戳格式 yyyyMMddHHmmss，每次 PUT 更新',
+  `min_confidence` DECIMAL(4,3) NOT NULL DEFAULT 0.600 COMMENT '全局置信度门控阈值 [0,1]',
+  `questions` TEXT NOT NULL COMMENT '问题集 JSON（可为 []，表示停用意图分类），结构同 BFE intent_questions.data 的 Questions[]',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI意图配置表（mod_ai_intent intent_questions.data 数据源：问题集+门控阈值，单行覆盖式存储）';
+
 -- create route_rules (路由规则表)
 DROP TABLE IF EXISTS `route_rules`;
 CREATE TABLE `route_rules` (

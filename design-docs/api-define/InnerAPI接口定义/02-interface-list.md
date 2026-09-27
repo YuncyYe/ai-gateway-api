@@ -16,6 +16,7 @@
 | 10 | `/configs/epp_data/config` | 导出 EPP 配置（epp_config + assignment 全量视图，合并单端点） | `version` | [epp-data.md](./epp-data.md) |
 | 11 | `/configs/ai-cache-rule` | 导出 AI 缓存规则配置 | `version` | [ai-cache-rule.md](./ai-cache-rule.md) |
 | 12 | `/configs/traffic-mirror-rule` | 导出流量镜像规则配置 | `version` | [traffic-mirror-rule.md](./traffic-mirror-rule.md) |
+| 13 | `/configs/mod-ai-intent` | 导出 AI 意图配置（intent_questions.data） | `version` | [mod-ai-intent.md](./mod-ai-intent.md) |
 
 ## 2. k8s_pools 接口（资源读写）
 

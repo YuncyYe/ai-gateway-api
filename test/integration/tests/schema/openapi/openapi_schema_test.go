@@ -51,6 +51,7 @@ func TestOpenAPI_Schema(t *testing.T) {
 	t.Run("global_route_rules", testGlobalRouteRulesSchema)
 	t.Run("ai_cache", testAICacheSchema)
 	t.Run("traffic_mirror", testTrafficMirrorSchema)
+	t.Run("intent_config", testIntentConfigSchema)
 	t.Run("epp_pool", testEppPoolSchema)
 	t.Run("epp_assignments", testEppAssignmentsSchema)
 }
@@ -200,8 +201,8 @@ func testAPIKeySchema(t *testing.T) {
 			"enabled": true,
 			"rules": []interface{}{
 				map[string]interface{}{
-					"name":  "default",
-					"cond":  "default_t()",
+					"name": "default",
+					"cond": "default_t()",
 					"targets": []interface{}{
 						map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100},
 					},
@@ -747,8 +748,6 @@ func testGlobalRouteRulesSchema(t *testing.T) {
 	testutil.AssertSchema(t, putResp, GlobalRouteRulesSchema)
 }
 
-
-
 // ---------- ai-cache-rules ----------
 
 // testAICacheSchema 覆盖 AI 缓存规则集合（GET/PUT 同构）。
@@ -851,7 +850,7 @@ func testTrafficMirrorSchema(t *testing.T) {
 			map[string]interface{}{"name": testutil.UniqueName("schema-tm-1"), "cond": `default_t()`, "mirror_cluster": clusterName},
 			map[string]interface{}{
 				"name": testutil.UniqueName("schema-tm-2"), "cond": `req_path_prefix_in("/v1/completions", true)`, "mirror_cluster": clusterName,
-				"percentage":    10,
+				"percentage":     10,
 				"remove_headers": []interface{}{"Authorization"},
 				"set_headers":    map[string]interface{}{"X-A": "1"},
 				"body_rewrites":  []interface{}{map[string]interface{}{"path": "model", "value": "m2"}},
@@ -1061,4 +1060,162 @@ func assertAssignmentEntry(t *testing.T, data []byte, clusterName string, unassi
 	require.NotEmpty(t, primary["id"])
 	require.NotEmpty(t, primary["host"])
 	require.NotNil(t, entry["standby"])
+}
+
+// ---------- intent-config ----------
+
+// testIntentConfigSchema 覆盖意图配置单例（GET/PUT 同构，单例级全量读写）。
+// 单例资源无 /{id} 端点："GET 单查" 即重复拉取（唯一读形状）。
+// 另做定向断言：顶层键精确为合同 4 字段，不得含内部 version、无 id/enabled
+// （单行覆盖式存储，intent-config.md §1）；questions 元素按 type 互斥
+// （choice 恰 4 键 / score 恰 5 键），不泄漏内部字段；空 questions 软开关
+// （questions: []）PUT/GET 往返合法。
+func testIntentConfigSchema(t *testing.T) {
+	intentPath := "/open-api/v1/intent-config"
+
+	// 未发布态：资源不存在错误码（Model.NullData → 404）。
+	notFoundResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, notFoundResp, 404)
+
+	// PUT 完整文档（1 choice + 1 score），含逐问题阈值覆盖。
+	putResp, err := testutil.GetClient().Put(intentPath, map[string]interface{}{
+		"min_confidence": 0.6,
+		"questions": []interface{}{
+			map[string]interface{}{
+				"name":         testutil.UniqueName("schema-ic-choice"),
+				"type":         "choice",
+				"instructions": "这条请求属于哪类研发任务？",
+				"criteria": map[string]interface{}{
+					"coding":       "编写或修改代码、调试、重构、代码审查",
+					"test_writing": "编写测试用例、单元测试、集成测试、补充断言",
+				},
+			},
+			map[string]interface{}{
+				"name":           testutil.UniqueName("schema-ic-score"),
+				"type":           "score",
+				"instructions":   "这个任务的复杂度如何？",
+				"min_confidence": 0.7,
+				"levels": []interface{}{
+					map[string]interface{}{"name": "simple", "description": "单步即可完成"},
+					map[string]interface{}{"name": "complex", "description": "需要深入推理"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, IntentConfigSchema)
+	assertIntentConfigContract(t, putResp.Data)
+
+	// GET（唯一读形状，与 PUT 响应同构）。
+	getResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, getResp)
+	testutil.AssertSchema(t, getResp, IntentConfigSchema)
+	assertIntentConfigContract(t, getResp.Data)
+
+	// 非法 PUT：参数错误码（422），配置保持原状。
+	invalidBodies := []map[string]interface{}{
+		// min_confidence 越界
+		{"min_confidence": 1.5, "questions": []interface{}{}},
+		// 选项名含 '|'
+		{"questions": []interface{}{map[string]interface{}{
+			"name": "schema-ic-pipe", "type": "choice", "instructions": "i",
+			"criteria": map[string]interface{}{"a|b": "d"},
+		}}},
+		// criteria/levels 互斥违反（choice 带 levels）
+		{"questions": []interface{}{map[string]interface{}{
+			"name": "schema-ic-mutex", "type": "choice", "instructions": "i",
+			"criteria": map[string]interface{}{"a": "b"},
+			"levels":   []interface{}{map[string]interface{}{"name": "l", "description": "d"}},
+		}}},
+		// questions 超 10 个
+		{"questions": make([]interface{}, 11)},
+	}
+	for _, body := range invalidBodies {
+		badResp, err := testutil.GetClient().Put(intentPath, body)
+		require.NoError(t, err)
+		testutil.AssertErrCode(t, badResp, 422)
+	}
+
+	// 拒绝后配置不变（仍是完整文档）。
+	unchangedResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, unchangedResp)
+	assertIntentConfigContract(t, unchangedResp.Data)
+
+	// 空 questions 软开关（questions: []）PUT/GET 往返合法。
+	emptyPutResp, err := testutil.GetClient().Put(intentPath, map[string]interface{}{"questions": []interface{}{}})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyPutResp)
+	testutil.AssertSchema(t, emptyPutResp, IntentConfigSchema)
+
+	var emptyData map[string]interface{}
+	require.NoError(t, json.Unmarshal(emptyPutResp.Data, &emptyData))
+	assert.ElementsMatch(t, []string{"min_confidence", "questions", "created_at", "updated_at"}, keysOfMap(emptyData))
+	assert.Empty(t, emptyData["questions"], "questions:[] must round trip as empty array")
+
+	emptyGetResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyGetResp)
+	testutil.AssertSchema(t, emptyGetResp, IntentConfigSchema)
+	emptyQuestions, err := testutil.GetDataField(emptyGetResp, "questions")
+	require.NoError(t, err)
+	assert.Empty(t, emptyQuestions)
+}
+
+// assertIntentConfigContract 定向合同锁：顶层键精确 4 字段（无 version/id/enabled），
+// questions[0]（choice）恰 4 键、questions[1]（score）恰 5 键（互斥 + 逐问题阈值），
+// levels 元素恰 {name,description}，均不泄漏内部字段（intent-config.md §1/§2.2）。
+func assertIntentConfigContract(t *testing.T, data []byte) {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &payload))
+
+	assert.ElementsMatch(t,
+		[]string{"min_confidence", "questions", "created_at", "updated_at"}, keysOfMap(payload),
+		"top-level keys must exactly match contract (no version/id/enabled)")
+
+	questions, ok := payload["questions"].([]interface{})
+	require.True(t, ok, "questions should be array")
+	require.Len(t, questions, 2)
+
+	choice, ok := questions[0].(map[string]interface{})
+	require.True(t, ok, "questions[0] should be object")
+	assert.ElementsMatch(t,
+		[]string{"name", "type", "instructions", "criteria"}, keysOfMap(choice),
+		"choice question keys must exactly match contract (no levels, no internal fields)")
+	assert.Equal(t, "choice", choice["type"])
+
+	score, ok := questions[1].(map[string]interface{})
+	require.True(t, ok, "questions[1] should be object")
+	assert.ElementsMatch(t,
+		[]string{"name", "type", "instructions", "min_confidence", "levels"}, keysOfMap(score),
+		"score question keys must exactly match contract (no criteria, per-question threshold exported)")
+	assert.Equal(t, "score", score["type"])
+	assert.InDelta(t, 0.7, score["min_confidence"], 1e-9)
+
+	levels, ok := score["levels"].([]interface{})
+	require.True(t, ok, "levels should be array")
+	require.NotEmpty(t, levels)
+	for i, item := range levels {
+		level, ok := item.(map[string]interface{})
+		require.True(t, ok, "levels[%d] should be object", i)
+		assert.ElementsMatch(t, []string{"name", "description"}, keysOfMap(level),
+			"levels[%d] must not leak internal fields", i)
+	}
+
+	// 原始 body 不得出现内部 version 键（下发链路内部字段，核心断言）。
+	assert.NotContains(t, string(data), `"version"`)
+	assert.NotContains(t, string(data), `"id"`)
+	assert.NotContains(t, string(data), `"enabled"`)
+}
+
+func keysOfMap(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
