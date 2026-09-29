@@ -416,7 +416,7 @@ func newTestClusterBase() *Cluster {
 func newTestClusterEPP() *Cluster {
 	c := newTestClusterBase()
 	c.BalanceMode = BalanceModeEPP
-	c.EppConfig = `{"scheduling_profile":"balanced"}`
+	c.EppConfig = `{"load_profile":"balanced"}`
 	return c
 }
 

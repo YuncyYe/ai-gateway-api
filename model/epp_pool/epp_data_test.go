@@ -33,8 +33,8 @@ func TestEppDataGenerator(t *testing.T) {
 		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`},
-		{Name: "cluster-b", EppConfigJSON: `{"scheduling_profile":"latency-first"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`},
+		{Name: "cluster-b", EppConfigJSON: `{"load_profile":"queue-first"}`},
 		{Name: "cluster-c", EppConfigJSON: `{"prefix_cache_affinity":true}`},
 	}}
 	store.seedAssignments(
@@ -115,10 +115,17 @@ func TestEppDataGenerator_Errors(t *testing.T) {
 	})
 
 	t.Run("invalid stored epp_config", func(t *testing.T) {
-		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"nope"}`}}}
+		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"load_profile":"nope"}`}}}
 		m := testManager(newMemoryEppPoolStorager(), source)
 		_, err := m.EppDataGenerator(ctx)
 		require.NoError(t, err) // parse ok; field validation happens at write time
+	})
+
+	t.Run("unknown stored field rejected", func(t *testing.T) {
+		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`}}}
+		m := testManager(newMemoryEppPoolStorager(), source)
+		_, err := m.EppDataGenerator(ctx)
+		require.Error(t, err)
 	})
 }
 
@@ -130,7 +137,7 @@ func TestExportEppData_VersionSemantics(t *testing.T) {
 		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
 	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
 
@@ -168,7 +175,7 @@ func TestOverrideAssignment_TriggersExport(t *testing.T) {
 		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
 
 	var exported []*iversion_control.ExportData
@@ -196,12 +203,16 @@ func TestEppDataGenerator_ClusterSourceError(t *testing.T) {
 func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	// End-to-end: stored raw JSON -> parse -> validate -> compile -> marshal.
 	raw := `{
-		"scheduling_profile": "throughput-first",
-		"cache_affinity": "high",
+		"load_profile": "kv-first",
+		"affinity": "high",
 		"session_affinity_enabled": true,
 		"session_affinity_header": "x-session-id",
 		"kv_cache_utilization_max": 0.85,
-		"flow_control": {"max_requests": -1, "queue_ttl": 45, "no_endpoint_queue_ttl": 0, "enable_eviction": true}
+		"waiting_queue_max": 8,
+		"running_requests_max": 16,
+		"fallback_on_empty": true,
+		"metrics_staleness_threshold_ms": 300,
+		"flow_control": {"max_requests": -1, "queue_ttl": 45, "no_endpoint_queue_ttl": 0, "enable_eviction": false}
 	}`
 	conf, err := ParseEppConfig(raw)
 	require.NoError(t, err)
@@ -219,7 +230,9 @@ func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	assert.NotContains(t, flowControl, "maxRequests") // -1 not generated
 	assert.Equal(t, "45s", flowControl["defaultRequestTTL"])
 	assert.Equal(t, "0s", flowControl["noEndpointRequestTTL"])
-	assert.Equal(t, true, flowControl["enableEviction"])
+	assert.NotContains(t, flowControl, "enableEviction")
+	saturationDetector := flowControl["saturationDetector"].(map[string]interface{})
+	assert.Equal(t, pluginNameSaturationDetector, saturationDetector["pluginRef"])
 
 	// max_requests 为 -1（不限）：全局不生成，但 band 0 必须显式存在且带显式上限。
 	bands := flowControl["priorityBands"].([]interface{})
@@ -229,5 +242,21 @@ func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	assert.Equal(t, "10000", band["maxRequests"])
 	assert.Equal(t, "5Gi", band["maxBytes"])
 
-	assert.Equal(t, "llm-cluster-a", decoded["plugins"].([]interface{})[0].(map[string]interface{})["parameters"].(map[string]interface{})["clusterName"])
+	// Detector plugin is always injected with the shared KV threshold and the
+	// configured queue / staleness thresholds.
+	pluginList := decoded["plugins"].([]interface{})
+	assert.Equal(t, "llm-cluster-a", pluginList[0].(map[string]interface{})["parameters"].(map[string]interface{})["clusterName"])
+
+	var detectorParams map[string]interface{}
+	for _, p := range pluginList {
+		plugin := p.(map[string]interface{})
+		if plugin["name"] == pluginNameSaturationDetector {
+			detectorParams = plugin["parameters"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, detectorParams)
+	assert.Equal(t, 0.85, detectorParams["kvCacheUtilThreshold"])
+	assert.Equal(t, float64(8), detectorParams["queueDepthThreshold"])
+	assert.Equal(t, "300ms", detectorParams["metricsStalenessThreshold"])
+	assert.Equal(t, stalenessPolicyIgnore, detectorParams["stalenessPolicy"])
 }

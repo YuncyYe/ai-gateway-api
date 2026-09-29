@@ -76,7 +76,7 @@ func createEPPCluster(t *testing.T, name string) string {
 	resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         name,
 		"balance_mode": "EPP",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": providerName,

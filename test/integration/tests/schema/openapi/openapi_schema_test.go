@@ -403,17 +403,21 @@ func testClusterSchema(t *testing.T) {
 		"description":  "schema test epp",
 		"balance_mode": "EPP",
 		"epp_config": map[string]interface{}{
-			"scheduling_profile":       "latency-first",
-			"cache_affinity":           "high",
-			"prefix_cache_affinity":    true,
-			"session_affinity_enabled": true,
-			"session_affinity_header":  "x-session-id",
-			"kv_cache_utilization_max": 0.85,
+			"load_profile":                   "queue-first",
+			"affinity":                       "high",
+			"prefix_cache_affinity":          true,
+			"session_affinity_enabled":       true,
+			"session_affinity_header":        "x-session-id",
+			"kv_cache_utilization_max":       0.85,
+			"waiting_queue_max":              5,
+			"running_requests_max":           16,
+			"fallback_on_empty":              true,
+			"metrics_staleness_threshold_ms": 300,
 			"flow_control": map[string]interface{}{
 				"max_requests":          200,
 				"queue_ttl":             45,
 				"no_endpoint_queue_ttl": 120,
-				"enable_eviction":       true,
+				"enable_eviction":       false,
 			},
 		},
 		"llm_config": map[string]interface{}{
@@ -433,17 +437,21 @@ func testClusterSchema(t *testing.T) {
 
 	// epp_config 原样回读（存储保留用户原始 JSON，未携带字段不落盘）。
 	assertEppConfigEcho(t, eppOneResp.Data, map[string]interface{}{
-		"scheduling_profile":       "latency-first",
-		"cache_affinity":           "high",
-		"prefix_cache_affinity":    true,
-		"session_affinity_enabled": true,
-		"session_affinity_header":  "x-session-id",
-		"kv_cache_utilization_max": 0.85,
+		"load_profile":                   "queue-first",
+		"affinity":                       "high",
+		"prefix_cache_affinity":          true,
+		"session_affinity_enabled":       true,
+		"session_affinity_header":        "x-session-id",
+		"kv_cache_utilization_max":       0.85,
+		"waiting_queue_max":              float64(5),
+		"running_requests_max":           float64(16),
+		"fallback_on_empty":              true,
+		"metrics_staleness_threshold_ms": float64(300),
 		"flow_control": map[string]interface{}{
 			"max_requests":          float64(200),
 			"queue_ttl":             float64(45),
 			"no_endpoint_queue_ttl": float64(120),
-			"enable_eviction":       true,
+			"enable_eviction":       false,
 		},
 	})
 
@@ -452,7 +460,7 @@ func testClusterSchema(t *testing.T) {
 	dormantResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         dormantClusterName,
 		"balance_mode": "WRR",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "throughput-first"},
+		"epp_config":   map[string]interface{}{"load_profile": "kv-first"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": eppProviderName,
@@ -467,7 +475,7 @@ func testClusterSchema(t *testing.T) {
 	testutil.AssertSuccess(t, dormantOneResp)
 	testutil.AssertSchema(t, dormantOneResp, ClusterSchema)
 	assertEppConfigEcho(t, dormantOneResp.Data, map[string]interface{}{
-		"scheduling_profile": "throughput-first",
+		"load_profile": "kv-first",
 	})
 
 	t.Cleanup(func() {
@@ -973,7 +981,7 @@ func testEppAssignmentsSchema(t *testing.T) {
 	createResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         clusterName,
 		"balance_mode": "EPP",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": providerName,

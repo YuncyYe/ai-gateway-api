@@ -179,18 +179,23 @@ var EppConfigFlowControlSchema = &testutil.ObjectSchema{
 // balance_mode=WRR 时 epp_config 可为 null（休眠保留），故 ClusterSchema 中设为 Optional。
 var EppConfigSchema = &testutil.ObjectSchema{
 	Optional: []string{
-		"scheduling_profile", "cache_affinity",
+		"load_profile", "affinity",
 		"prefix_cache_affinity", "session_affinity_enabled", "session_affinity_header",
-		"kv_cache_utilization_max", "flow_control",
+		"kv_cache_utilization_max", "waiting_queue_max", "running_requests_max",
+		"fallback_on_empty", "metrics_staleness_threshold_ms", "flow_control",
 	},
 	Fields: map[string]testutil.FieldSpec{
-		"scheduling_profile": {Type: testutil.TypeString, Enum: []interface{}{"latency-first", "balanced", "throughput-first"}},
-		"cache_affinity":     {Type: testutil.TypeString, Enum: []interface{}{"low", "medium", "high"}},
-		"prefix_cache_affinity":    {Type: testutil.TypeBool},
-		"session_affinity_enabled": {Type: testutil.TypeBool},
-		"session_affinity_header":  {Type: testutil.TypeString},
-		"kv_cache_utilization_max": {Type: testutil.TypeNumber},
-		"flow_control":             {Type: testutil.TypeObject, Nested: EppConfigFlowControlSchema},
+		"load_profile":                   {Type: testutil.TypeString, Enum: []interface{}{"queue-first", "balanced", "kv-first"}},
+		"affinity":                       {Type: testutil.TypeString, Enum: []interface{}{"off", "low", "medium", "high"}},
+		"prefix_cache_affinity":          {Type: testutil.TypeBool},
+		"session_affinity_enabled":       {Type: testutil.TypeBool},
+		"session_affinity_header":        {Type: testutil.TypeString},
+		"kv_cache_utilization_max":       {Type: testutil.TypeNumber},
+		"waiting_queue_max":              {Type: testutil.TypeNumber},
+		"running_requests_max":           {Type: testutil.TypeNumber},
+		"fallback_on_empty":              {Type: testutil.TypeBool},
+		"metrics_staleness_threshold_ms": {Type: testutil.TypeNumber},
+		"flow_control":                   {Type: testutil.TypeObject, Nested: EppConfigFlowControlSchema},
 	},
 }
 

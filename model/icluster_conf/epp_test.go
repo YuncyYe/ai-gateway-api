@@ -117,7 +117,7 @@ func newFakeEppPoolManager(assigned map[string]*epp_pool.AssignmentParam, storag
 	return epp_pool.NewEppPoolManager(&fakeTxn{}, storager, nil, nil, nil)
 }
 
-const validEppConfigJSON = `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`
+const validEppConfigJSON = `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`
 
 func TestValidateClusterBalanceConfig(t *testing.T) {
 	t.Run("default WRR without any input", func(t *testing.T) {
@@ -157,11 +157,16 @@ func TestValidateClusterBalanceConfig(t *testing.T) {
 
 	t.Run("non-empty epp_config validated regardless of balance_mode", func(t *testing.T) {
 		for _, cfg := range []string{
-			`{"scheduling_profile":"bogus"}`,
-			`{"cache_affinity":"extreme"}`,
+			`{"load_profile":"bogus"}`,
+			`{"affinity":"extreme"}`,
 			`{"kv_cache_utilization_max":1.5}`,
+			`{"waiting_queue_max":-1}`,
+			`{"metrics_staleness_threshold_ms":0}`,
 			`{"unknown_field":true}`,
+			`{"scheduling_profile":"balanced"}`,
+			`{"cache_affinity":"low"}`,
 			`{"flow_control":{"queue_ttl":-1}}`,
+			`{"flow_control":{"enable_eviction":true}}`,
 			`{"session_affinity_enabled":true}`,
 		} {
 			_, _, err := validateClusterBalanceConfig(nil, BalanceModeWRR, lib.PString(cfg), "")
@@ -309,11 +314,11 @@ func TestClusterManager_CreateCluster_EPP(t *testing.T) {
 		m := NewClusterManager(&fakeTxn{}, clusterStore, subClusterStore, bfeClusterStore, poolStore, providerStore, nil, nil, nil)
 		err := m.CreateCluster(ctx, product, &ClusterParam{
 			Name:      lib.PString("c1"),
-			EppConfig: lib.PString(`{"scheduling_profile":"bogus"}`),
+			EppConfig: lib.PString(`{"load_profile":"bogus"}`),
 			LLMConfig: llmConfig(),
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "scheduling_profile")
+		assert.Contains(t, err.Error(), "load_profile")
 	})
 
 	t.Run("assignment failure does not block create", func(t *testing.T) {

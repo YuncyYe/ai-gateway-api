@@ -107,7 +107,7 @@ func TestClusterParamToMap_APIVocabulary(t *testing.T) {
 			Provider: lib.PString("p1"),
 		},
 		BalanceMode: lib.PString(BalanceModeEPP),
-		EppConfig:   lib.PString(`{"scheduling_profile":"balanced"}`),
+		EppConfig:   lib.PString(`{"load_profile":"balanced"}`),
 		// Internal bookkeeping fields: must not leak into the snapshot.
 		ID:          lib.PInt64(7),
 		ProductID:   lib.PInt64(2),
@@ -175,7 +175,7 @@ func TestClusterParamToMap_APIVocabulary(t *testing.T) {
 
 	epp, ok := m["epp_config"].(map[string]interface{})
 	require.True(t, ok, "epp_config should be a decoded JSON object, not an escaped string")
-	assert.Equal(t, "balanced", epp["scheduling_profile"])
+	assert.Equal(t, "balanced", epp["load_profile"])
 }
 
 // TestClusterToMap_APIVocabulary is the issue #205 before-snapshot anchor:
@@ -189,7 +189,7 @@ func TestClusterToMap_APIVocabulary(t *testing.T) {
 	c.ProductID = 2
 	c.Description = "old desc"
 	c.LLMConfig = &LLMConfig{Models: []string{"m1"}, Provider: lib.PString("p1")}
-	c.EppConfig = `{"scheduling_profile":"balanced"}`
+	c.EppConfig = `{"load_profile":"balanced"}`
 
 	m := clusterToMap(c)
 	require.NotNil(t, m)
@@ -233,7 +233,7 @@ func TestClusterToMap_APIVocabulary(t *testing.T) {
 
 	epp, ok := m["epp_config"].(map[string]interface{})
 	require.True(t, ok, "epp_config should be a decoded JSON object")
-	assert.Equal(t, "balanced", epp["scheduling_profile"])
+	assert.Equal(t, "balanced", epp["load_profile"])
 }
 
 // TestClusterToMap_EPPVocabulary covers the EPP balance mode and the

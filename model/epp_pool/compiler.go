@@ -15,6 +15,7 @@
 package epp_pool
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -112,11 +113,18 @@ type PluginRefConfig struct {
 // string because the apix FlowControlConfig types it as resource.Quantity,
 // whose canonical JSON form is a string ("1000").
 type FlowControlConfig struct {
-	MaxRequests          string               `json:"maxRequests,omitempty"`
-	DefaultRequestTTL    string               `json:"defaultRequestTTL,omitempty"`
-	NoEndpointRequestTTL string               `json:"noEndpointRequestTTL,omitempty"`
-	EnableEviction       bool                 `json:"enableEviction,omitempty"`
-	PriorityBands        []PriorityBandConfig `json:"priorityBands,omitempty"`
+	MaxRequests          string                    `json:"maxRequests,omitempty"`
+	DefaultRequestTTL    string                    `json:"defaultRequestTTL,omitempty"`
+	NoEndpointRequestTTL string                    `json:"noEndpointRequestTTL,omitempty"`
+	EnableEviction       bool                      `json:"enableEviction,omitempty"`
+	SaturationDetector   *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
+	PriorityBands        []PriorityBandConfig      `json:"priorityBands,omitempty"`
+}
+
+// SaturationDetectorConfig references the saturation detector plugin used for
+// both endpoint filtering and flow-control backpressure.
+type SaturationDetectorConfig struct {
+	PluginRef string `json:"pluginRef"`
 }
 
 // PriorityBandConfig mirrors apix PriorityBandConfig (only the subset we
@@ -136,26 +144,28 @@ type RequestHandlerConfig struct {
 
 // Fixed plugin instance names of the compile template.
 const (
-	pluginNameDiscovery      = "ep-discover"
-	pluginNameUtilFilter     = "util-filter"
-	pluginNameKVScorer       = "kv-scorer"
-	pluginNameQueueScorer    = "queue-scorer"
-	pluginNamePrefixScorer   = "prefix-scorer"
-	pluginNameSessionScorer  = "session-scorer"
-	pluginNameMaxScorePicker = "max-score"
-	pluginNameOpenAIParser   = "openai-parser"
+	pluginNameDiscovery          = "ep-discover"
+	pluginNameUtilFilter         = "util-filter"
+	pluginNameSaturationDetector = "saturation-detector"
+	pluginNameKVScorer           = "kv-scorer"
+	pluginNameQueueScorer        = "queue-scorer"
+	pluginNamePrefixScorer       = "prefix-scorer"
+	pluginNameSessionScorer      = "session-scorer"
+	pluginNameMaxScorePicker     = "max-score"
+	pluginNameOpenAIParser       = "openai-parser"
 )
 
 // Fixed plugin types of the compile template.
 const (
-	pluginTypeDiscovery      = "cluster-table-discovery"
-	pluginTypeUtilFilter     = "utilization-filter"
-	pluginTypeKVScorer       = "kv-cache-utilization-scorer"
-	pluginTypeQueueScorer    = "queue-scorer"
-	pluginTypePrefixScorer   = "prefix-cache-scorer"
-	pluginTypeSessionScorer  = "session-affinity-scorer"
-	pluginTypeMaxScorePicker = "max-score-picker"
-	pluginTypeOpenAIParser   = "openai-parser"
+	pluginTypeDiscovery          = "cluster-table-discovery"
+	pluginTypeUtilFilter         = "utilization-filter"
+	pluginTypeSaturationDetector = "utilization-detector"
+	pluginTypeKVScorer           = "kv-cache-utilization-scorer"
+	pluginTypeQueueScorer        = "queue-scorer"
+	pluginTypePrefixScorer       = "prefix-cache-scorer"
+	pluginTypeSessionScorer      = "session-affinity-scorer"
+	pluginTypeMaxScorePicker     = "max-score-picker"
+	pluginTypeOpenAIParser       = "openai-parser"
 )
 
 // sessionAffinityStrategySessionID must match llm-d-router's
@@ -164,6 +174,11 @@ const (
 const sessionAffinityStrategySessionID = "session_id"
 
 const metricKVCacheUtilization = "kv-cache-utilization"
+
+const (
+	metricWaitingQueue    = "waiting-queue"
+	metricRunningRequests = "running-requests"
+)
 
 const featureGateFlowControl = "flowControl"
 
@@ -184,22 +199,24 @@ const (
 	defaultPriorityBandMaxBytes = "5Gi"
 )
 
-// scorerWeights maps scheduling profiles / cache affinities to (kv, queue) weights.
-var scorerWeights = map[string][2]float64{
-	SchedulingProfileLatencyFirst:    {0.2, 1.0},
-	SchedulingProfileBalanced:        {1.0, 0.5},
-	SchedulingProfileThroughputFirst: {1.0, 0.2},
+// loadProfileWeights maps the load profile to (kv, queue) scorer weights.
+var loadProfileWeights = map[string][2]float64{
+	LoadProfileQueueFirst: {0.2, 1.0},
+	LoadProfileBalanced:   {0.6, 0.6},
+	LoadProfileKVFirst:    {1.0, 0.2},
+}
 
-	CacheAffinityLow:    {0.2, 1.0},
-	CacheAffinityMedium: {0.6, 0.6},
-	CacheAffinityHigh:   {1.0, 0.2},
+// affinityWeights maps the affinity strength to the prefix/session scorer weight.
+var affinityWeights = map[string]float64{
+	AffinityOff: 0, AffinityLow: 0.3, AffinityMedium: 0.6, AffinityHigh: 1.0,
 }
 
 // CompileEppConfig deterministically compiles the simplified epp_config of
-// one cluster into the full EndpointPickerConfig (api-changes.md §3.2.1).
+// one cluster into the full EndpointPickerConfig (api-changes.md §3.2).
 // The result is always structurally valid; defaults are applied for unset fields.
 func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPickerConfig {
-	kvWeight, queueWeight := compileScorerWeights(conf)
+	kvWeight, queueWeight := compileLoadProfileWeights(conf)
+	affinityWeight := compileAffinityWeight(conf) // affinity=off => 0
 
 	plugins := []*PluginConfig{
 		{
@@ -209,18 +226,8 @@ func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPi
 				"clusterName": clusterName,
 			},
 		},
-		{
-			Name: pluginNameUtilFilter,
-			Type: pluginTypeUtilFilter,
-			Parameters: map[string]interface{}{
-				"conditions": []map[string]interface{}{
-					{
-						"metric":   metricKVCacheUtilization,
-						"maxValue": conf.EffectiveKVCacheUtilizationMax(),
-					},
-				},
-			},
-		},
+		compileUtilFilterPlugin(conf),
+		compileSaturationDetectorPlugin(conf),
 		{
 			Name:       pluginNameKVScorer,
 			Type:       pluginTypeKVScorer,
@@ -239,7 +246,9 @@ func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPi
 		{PluginRef: pluginNameQueueScorer, Weight: float64Ptr(queueWeight)},
 	}
 
-	if conf.EffectivePrefixCacheAffinity() {
+	// Affinity scorers are injected only when the feature switch is on and the
+	// affinity strength is non-zero (affinity=off disables them entirely).
+	if conf.EffectivePrefixCacheAffinity() && affinityWeight > 0 {
 		plugins = append(plugins, &PluginConfig{
 			Name:       pluginNamePrefixScorer,
 			Type:       pluginTypePrefixScorer,
@@ -247,11 +256,11 @@ func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPi
 		})
 		profilePlugins = append(profilePlugins, &ProfilePluginConfig{
 			PluginRef: pluginNamePrefixScorer,
-			Weight:    float64Ptr(1.0),
+			Weight:    float64Ptr(affinityWeight),
 		})
 	}
 
-	if conf.EffectiveSessionAffinityEnabled() && conf.SessionAffinityHeader != nil {
+	if conf.EffectiveSessionAffinityEnabled() && affinityWeight > 0 && conf.SessionAffinityHeader != nil {
 		plugins = append(plugins, &PluginConfig{
 			Name: pluginNameSessionScorer,
 			Type: pluginTypeSessionScorer,
@@ -266,7 +275,7 @@ func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPi
 		})
 		profilePlugins = append(profilePlugins, &ProfilePluginConfig{
 			PluginRef: pluginNameSessionScorer,
-			Weight:    float64Ptr(1.0),
+			Weight:    float64Ptr(affinityWeight),
 		})
 	}
 
@@ -303,30 +312,90 @@ func CompileEppConfig(clusterName string, conf *EppConfigSimplified) *EndpointPi
 		},
 	}
 
+	// The flow-control section is always emitted: it carries the saturation
+	// detector reference and priority band 0. The flowControl feature gate is
+	// only enabled when the user configured flow_control (queueing/backpressure).
+	compiled.FlowControl = compileFlowControl(conf)
 	if conf.FlowControl != nil {
 		compiled.FeatureGates = []string{featureGateFlowControl}
-		compiled.FlowControl = compileFlowControl(conf.FlowControl)
 	}
 
 	return compiled
 }
 
-// compileScorerWeights resolves the (kv, queue) scorer weights: an explicit
-// cache_affinity overrides the scheduling profile; otherwise the profile
-// weights are used.
-func compileScorerWeights(conf *EppConfigSimplified) (float64, float64) {
-	if conf != nil && conf.CacheAffinity != nil {
-		weights, ok := scorerWeights[*conf.CacheAffinity]
-		if ok {
-			return weights[0], weights[1]
-		}
-	}
-
-	weights, ok := scorerWeights[conf.EffectiveSchedulingProfile()]
+// compileLoadProfileWeights resolves the (kv, queue) scorer weights from the
+// load profile (default balanced when unset/unknown).
+func compileLoadProfileWeights(conf *EppConfigSimplified) (float64, float64) {
+	weights, ok := loadProfileWeights[conf.EffectiveLoadProfile()]
 	if !ok {
-		weights = scorerWeights[DefaultSchedulingProfile]
+		weights = loadProfileWeights[DefaultLoadProfile]
 	}
 	return weights[0], weights[1]
+}
+
+// compileAffinityWeight resolves the affinity scorer weight from the affinity
+// strength (0 when off, which disables the prefix/session affinity scorers).
+func compileAffinityWeight(conf *EppConfigSimplified) float64 {
+	weight, ok := affinityWeights[conf.EffectiveAffinity()]
+	if !ok {
+		return affinityWeights[DefaultAffinity]
+	}
+	return weight
+}
+
+// compileUtilFilterPlugin builds the admission filter: the kv-cache-utilization
+// condition is always present; waiting-queue / running-requests conditions are
+// added only when the corresponding threshold is enabled (>0).
+func compileUtilFilterPlugin(conf *EppConfigSimplified) *PluginConfig {
+	conditions := []map[string]interface{}{
+		{
+			"metric":   metricKVCacheUtilization,
+			"maxValue": conf.EffectiveKVCacheUtilizationMax(),
+		},
+	}
+	if q := conf.EffectiveWaitingQueueMax(); q > 0 {
+		conditions = append(conditions, map[string]interface{}{
+			"metric":   metricWaitingQueue,
+			"maxValue": q,
+		})
+	}
+	if r := conf.EffectiveRunningRequestsMax(); r > 0 {
+		conditions = append(conditions, map[string]interface{}{
+			"metric":   metricRunningRequests,
+			"maxValue": r,
+		})
+	}
+	return &PluginConfig{
+		Name: pluginNameUtilFilter,
+		Type: pluginTypeUtilFilter,
+		Parameters: map[string]interface{}{
+			"conditions":      conditions,
+			"fallbackOnEmpty": conf.EffectiveFallbackOnEmpty(),
+		},
+	}
+}
+
+// compileSaturationDetectorPlugin builds the saturation detector. Its KV cache
+// threshold is the single source shared with the filter; its queue threshold
+// mirrors waiting_queue_max when enabled (default 5 otherwise); the staleness
+// policy is fixed to "ignore" and headroom to 0; the bad-endpoint eviction
+// threshold comes from metrics_staleness_threshold_ms.
+func compileSaturationDetectorPlugin(conf *EppConfigSimplified) *PluginConfig {
+	qDepth := defaultSaturationQueueDepthThreshold
+	if q := conf.EffectiveWaitingQueueMax(); q >= 1 {
+		qDepth = int(q)
+	}
+	return &PluginConfig{
+		Name: pluginNameSaturationDetector,
+		Type: pluginTypeSaturationDetector,
+		Parameters: map[string]interface{}{
+			"kvCacheUtilThreshold":      conf.EffectiveKVCacheUtilizationMax(),
+			"queueDepthThreshold":       qDepth,
+			"stalenessPolicy":           stalenessPolicyIgnore,
+			"headroom":                  0.0,
+			"metricsStalenessThreshold": fmt.Sprintf("%dms", conf.EffectiveMetricsStalenessThresholdMs()),
+		},
+	}
 }
 
 // compileFlowControl expands the simplified flow_control section. Durations
@@ -335,33 +404,40 @@ func compileScorerWeights(conf *EppConfigSimplified) (float64, float64) {
 // priority 0, and an unconfigured band would silently fall back to the llm-d
 // hidden defaults (5000 requests / 1GB), truncating any global max_requests
 // above 5000 (hasCapacity enforces global and band limits independently).
-func compileFlowControl(fc *FlowControlSimplified) *FlowControlConfig {
+// The saturation detector reference is always emitted (filter and backpressure
+// share it); enable_eviction is never emitted (not wired in EPP yet). When
+// no_endpoint_queue_ttl is unset it expands to queue_ttl explicitly.
+func compileFlowControl(conf *EppConfigSimplified) *FlowControlConfig {
 	compiled := &FlowControlConfig{}
 	band := PriorityBandConfig{Priority: 0, MaxBytes: defaultPriorityBandMaxBytes}
 
-	if fc.MaxRequests != nil && *fc.MaxRequests > 0 {
-		q := strconv.Itoa(*fc.MaxRequests)
-		compiled.MaxRequests = q
-		band.MaxRequests = q // band 0 mirrors the global limit
+	if fc := conf.FlowControl; fc != nil {
+		if fc.MaxRequests != nil && *fc.MaxRequests > 0 {
+			q := strconv.Itoa(*fc.MaxRequests)
+			compiled.MaxRequests = q
+			band.MaxRequests = q // band 0 mirrors the global limit
+		} else {
+			// max_requests == -1 (FlowControlUnlimited) or unset: the global
+			// limit stays omitted, but the per-band limit must be explicit.
+			band.MaxRequests = defaultPriorityBandMaxRequests
+		}
+
+		if fc.QueueTTL != nil {
+			compiled.DefaultRequestTTL = secondsToDuration(*fc.QueueTTL)
+		}
+
+		// no_endpoint_queue_ttl defaults to queue_ttl (expanded explicitly).
+		if fc.NoEndpointQueueTTL != nil {
+			compiled.NoEndpointRequestTTL = secondsToDuration(*fc.NoEndpointQueueTTL)
+		} else if fc.QueueTTL != nil {
+			compiled.NoEndpointRequestTTL = secondsToDuration(*fc.QueueTTL)
+		}
 	} else {
-		// max_requests == -1 (FlowControlUnlimited) or unset: the global limit
-		// stays omitted, but the per-band limit must be explicit.
 		band.MaxRequests = defaultPriorityBandMaxRequests
 	}
 
-	if fc.QueueTTL != nil {
-		compiled.DefaultRequestTTL = secondsToDuration(*fc.QueueTTL)
-	}
-
-	if fc.NoEndpointQueueTTL != nil {
-		compiled.NoEndpointRequestTTL = secondsToDuration(*fc.NoEndpointQueueTTL)
-	}
-
-	if fc.EnableEviction != nil {
-		compiled.EnableEviction = *fc.EnableEviction
-	}
-
 	compiled.PriorityBands = []PriorityBandConfig{band}
+	compiled.SaturationDetector = &SaturationDetectorConfig{PluginRef: pluginNameSaturationDetector}
 	return compiled
 }
 

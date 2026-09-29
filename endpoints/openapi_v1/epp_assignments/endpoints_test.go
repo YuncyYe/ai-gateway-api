@@ -184,8 +184,8 @@ func setupManager(t *testing.T) (*fakeEppPoolStorager, func()) {
 		PrimaryInstanceID: "epp-a",
 	})
 	clusterSource := &fakeClusterSource{clusters: []*epp_pool.EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
-		{Name: "cluster-b", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
+		{Name: "cluster-b", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
 	container.EppPoolManager = epp_pool.NewEppPoolManager(
 		&fakeTxn{},

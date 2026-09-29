@@ -118,25 +118,25 @@ func TestClusterModel2Control_EPPFields(t *testing.T) {
 			HashStrategy:  icluster_conf.ClusterHashStrategyClientIPOnlyI,
 		},
 		BalanceMode: icluster_conf.BalanceModeEPP,
-		EppConfig:   `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`,
+		EppConfig:   `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`,
 	}
 
 	rsp := clusterModel2Control(cluster)
 	assert.Equal(t, icluster_conf.BalanceModeEPP, rsp.BalanceMode)
 	assert.JSONEq(t,
-		`{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`,
+		`{"load_profile":"balanced","kv_cache_utilization_max":0.9}`,
 		string(rsp.EppConfig))
 
 	data, err := json.Marshal(rsp)
 	assert.NoError(t, err)
 	assert.Contains(t, string(data), `"balance_mode":"EPP"`)
-	assert.Contains(t, string(data), `"epp_config":{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`)
+	assert.Contains(t, string(data), `"epp_config":{"load_profile":"balanced","kv_cache_utilization_max":0.9}`)
 
 	// WRR dormancy: a stored epp_config is still returned verbatim.
 	cluster.BalanceMode = icluster_conf.BalanceModeWRR
 	rsp = clusterModel2Control(cluster)
 	assert.Equal(t, icluster_conf.BalanceModeWRR, rsp.BalanceMode)
 	assert.JSONEq(t,
-		`{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`,
+		`{"load_profile":"balanced","kv_cache_utilization_max":0.9}`,
 		string(rsp.EppConfig))
 }

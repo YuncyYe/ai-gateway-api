@@ -133,7 +133,7 @@ func TestInnerAPI_EppData(t *testing.T) {
 		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 			"name":         degradeCluster,
 			"balance_mode": "EPP",
-			"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+			"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 			"llm_config": map[string]interface{}{
 				"models":   []string{"deepseek-chat"},
 				"provider": providerName,
@@ -215,15 +215,20 @@ func TestInnerAPI_EppData(t *testing.T) {
 			"name":         fullCluster,
 			"balance_mode": "EPP",
 			"epp_config": map[string]interface{}{
-				"scheduling_profile":       "latency-first",
-				"kv_cache_utilization_max": 0.85,
-				"session_affinity_enabled": true,
-				"session_affinity_header":  "x-session-id",
+				"load_profile":                   "queue-first",
+				"affinity":                       "high",
+				"kv_cache_utilization_max":       0.85,
+				"waiting_queue_max":              5,
+				"running_requests_max":           16,
+				"fallback_on_empty":              true,
+				"metrics_staleness_threshold_ms": 300,
+				"session_affinity_enabled":       true,
+				"session_affinity_header":        "x-session-id",
 				"flow_control": map[string]interface{}{
 					"max_requests":          200,
 					"queue_ttl":             45,
 					"no_endpoint_queue_ttl": 120,
-					"enable_eviction":       true,
+					"enable_eviction":       false,
 				},
 			},
 			"llm_config": map[string]interface{}{
@@ -273,7 +278,9 @@ func TestInnerAPI_EppData(t *testing.T) {
 		assert.Equal(t, "200", flowControl["maxRequests"])
 		assert.Equal(t, "45s", flowControl["defaultRequestTTL"])
 		assert.Equal(t, "2m0s", flowControl["noEndpointRequestTTL"])
-		assert.Equal(t, true, flowControl["enableEviction"])
+		assert.NotContains(t, flowControl, "enableEviction")
+		saturationDetector := flowControl["saturationDetector"].(map[string]interface{})
+		assert.Equal(t, "saturation-detector", saturationDetector["pluginRef"])
 
 		// band 0 显式下发：ai-gateway-epp 所有请求均为 priority 0，
 		// 不显式下发会静默落入 llm-d 隐藏默认（5000/1GB）截断全局配置。
@@ -291,7 +298,7 @@ func TestInnerAPI_EppData(t *testing.T) {
 			plugin := p.(map[string]interface{})
 			pluginTypes[plugin["name"].(string)] = true
 		}
-		for _, name := range []string{"ep-discover", "util-filter", "kv-scorer", "queue-scorer", "prefix-scorer", "session-scorer", "max-score", "openai-parser"} {
+		for _, name := range []string{"ep-discover", "util-filter", "saturation-detector", "kv-scorer", "queue-scorer", "prefix-scorer", "session-scorer", "max-score", "openai-parser"} {
 			assert.True(t, pluginTypes[name], "plugin %s should exist", name)
 		}
 
@@ -310,14 +317,26 @@ func TestInnerAPI_EppData(t *testing.T) {
 			}
 			if plugin["name"] == "util-filter" {
 				params := plugin["parameters"].(map[string]interface{})
+				assert.Equal(t, true, params["fallbackOnEmpty"])
 				conditions := params["conditions"].([]interface{})
-				condition := conditions[0].(map[string]interface{})
-				assert.Equal(t, "kv-cache-utilization", condition["metric"])
-				assert.Equal(t, 0.85, condition["maxValue"])
+				require.Len(t, conditions, 3)
+				assert.Equal(t, "kv-cache-utilization", conditions[0].(map[string]interface{})["metric"])
+				assert.Equal(t, 0.85, conditions[0].(map[string]interface{})["maxValue"])
+				assert.Equal(t, "waiting-queue", conditions[1].(map[string]interface{})["metric"])
+				assert.Equal(t, float64(5), conditions[1].(map[string]interface{})["maxValue"])
+				assert.Equal(t, "running-requests", conditions[2].(map[string]interface{})["metric"])
+				assert.Equal(t, float64(16), conditions[2].(map[string]interface{})["maxValue"])
+			}
+			if plugin["name"] == "saturation-detector" {
+				params := plugin["parameters"].(map[string]interface{})
+				assert.Equal(t, 0.85, params["kvCacheUtilThreshold"])
+				assert.Equal(t, float64(5), params["queueDepthThreshold"])
+				assert.Equal(t, "300ms", params["metricsStalenessThreshold"])
+				assert.Equal(t, "ignore", params["stalenessPolicy"])
 			}
 		}
 
-		// latency-first 档位权重：kv=0.2，queue=1.0
+		// queue-first 档位权重：kv=0.2，queue=1.0；affinity=high → 亲和 scorer 权重 1.0
 		profiles := compiled["schedulingProfiles"].([]interface{})
 		profile := profiles[0].(map[string]interface{})
 		weights := map[string]float64{}
@@ -329,6 +348,8 @@ func TestInnerAPI_EppData(t *testing.T) {
 		}
 		assert.Equal(t, 0.2, weights["kv-scorer"])
 		assert.Equal(t, 1.0, weights["queue-scorer"])
+		assert.Equal(t, 1.0, weights["prefix-scorer"])
+		assert.Equal(t, 1.0, weights["session-scorer"])
 
 		// assignment 段：全量视图，primary/standby 与分配视图一致
 		assignment := config["assignment"].(map[string]interface{})

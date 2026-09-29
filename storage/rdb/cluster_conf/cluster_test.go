@@ -121,7 +121,7 @@ func TestRDBClusterStorager_BalanceModeEppConfig(t *testing.T) {
 	s := setupTestClusterStorager(t)
 
 	t.Run("create with EPP mode and epp_config round-trips", func(t *testing.T) {
-		eppConfig := `{"scheduling_profile":"balanced"}`
+		eppConfig := `{"load_profile":"balanced"}`
 		id, err := s.ClusterCreate(ctx, product, &icluster_conf.ClusterParam{
 			Name:        lib.PString("c-epp"),
 			ProductID:   lib.PInt64(product.ID),
@@ -174,12 +174,12 @@ func TestRDBClusterStorager_BalanceModeEppConfig(t *testing.T) {
 
 		require.NoError(t, s.ClusterUpdate(ctx, product, cluster, &icluster_conf.ClusterParam{
 			BalanceMode: lib.PString(icluster_conf.BalanceModeWRR),
-			EppConfig:   lib.PString(`{"scheduling_profile":"latency-first"}`),
+			EppConfig:   lib.PString(`{"load_profile":"queue-first"}`),
 		}))
 
 		updated, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-epp")})
 		require.NoError(t, err)
 		assert.Equal(t, icluster_conf.BalanceModeWRR, updated.BalanceMode)
-		assert.Equal(t, `{"scheduling_profile":"latency-first"}`, updated.EppConfig)
+		assert.Equal(t, `{"load_profile":"queue-first"}`, updated.EppConfig)
 	})
 }

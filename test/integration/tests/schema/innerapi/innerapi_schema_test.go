@@ -1043,7 +1043,7 @@ func testEppDataSchema(t *testing.T) {
 	patchEppPoolForSchema(t)
 
 	clusterName := createEPPClusterForSchema(t, map[string]interface{}{
-		"scheduling_profile": "throughput-first",
+		"load_profile": "kv-first",
 		"flow_control": map[string]interface{}{
 			"max_requests": 100,
 			"queue_ttl":    30,
@@ -1078,6 +1078,17 @@ func testEppDataSchema(t *testing.T) {
 	require.Contains(t, compiled, "featureGates")
 	require.Contains(t, compiled, "schedulingProfiles")
 	require.Contains(t, compiled, "dataLayer")
+
+	pluginNames := map[string]bool{}
+	for _, p := range plugins {
+		pluginNames[p.(map[string]interface{})["name"].(string)] = true
+	}
+	require.True(t, pluginNames["saturation-detector"], "compiled plugins should include saturation-detector")
+	flowControl, ok := compiled["flowControl"].(map[string]interface{})
+	require.True(t, ok, "compiled epp_config.flowControl should be present")
+	saturationDetector, ok := flowControl["saturationDetector"].(map[string]interface{})
+	require.True(t, ok, "flowControl.saturationDetector should be present")
+	require.Equal(t, "saturation-detector", saturationDetector["pluginRef"])
 }
 
 // ---------- server_data_conf EPP 导出 ----------
@@ -1086,7 +1097,7 @@ func testServerDataConfEppSchema(t *testing.T) {
 	patchEppPoolForSchema(t)
 
 	eppClusterName := createEPPClusterForSchema(t, map[string]interface{}{
-		"scheduling_profile": "balanced",
+		"load_profile": "balanced",
 	})
 	wrrClusterName := testutil.UniqueClusterName()
 	{

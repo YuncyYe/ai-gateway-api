@@ -443,8 +443,13 @@ func copyFile(src, dst string) error {
 	}
 	defer d.Close()
 
-	_, err = io.Copy(d, s)
-	return err
+	if _, err = io.Copy(d, s); err != nil {
+		return err
+	}
+
+	// The copied binary is exec'd as a child process; preserve the executable
+	// bit (os.Create uses 0666, which is not executable on Linux/macOS).
+	return os.Chmod(dst, 0o755)
 }
 
 // copyDir 复制目录

@@ -74,16 +74,21 @@ func TestClusters_EPP(t *testing.T) {
 	defer testutil.DeleteProvider(providerName)
 
 	validConfig := map[string]interface{}{
-		"scheduling_profile":        "balanced",
-		"prefix_cache_affinity":     true,
-		"kv_cache_utilization_max":  0.9,
-		"session_affinity_enabled":  true,
-		"session_affinity_header":   "x-session-id",
+		"load_profile":                   "balanced",
+		"affinity":                       "medium",
+		"prefix_cache_affinity":          true,
+		"kv_cache_utilization_max":       0.9,
+		"waiting_queue_max":              0,
+		"running_requests_max":           0,
+		"fallback_on_empty":              false,
+		"metrics_staleness_threshold_ms": 200,
+		"session_affinity_enabled":       true,
+		"session_affinity_header":        "x-session-id",
 		"flow_control": map[string]interface{}{
-			"max_requests":         100,
-			"queue_ttl":            30,
+			"max_requests":          100,
+			"queue_ttl":             30,
 			"no_endpoint_queue_ttl": 600,
-			"enable_eviction":      false,
+			"enable_eviction":       false,
 		},
 	}
 
@@ -111,10 +116,10 @@ func TestClusters_EPP(t *testing.T) {
 		testutil.AssertErrCode(t, resp, 422)
 	})
 
-	t.Run("CL-EPP-003 scheduling_profile 枚举越界返回 422", func(t *testing.T) {
+	t.Run("CL-EPP-003 load_profile 枚举越界返回 422", func(t *testing.T) {
 		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(
 			testutil.UniqueClusterName(), providerName, map[string]interface{}{
-				"scheduling_profile": "super-fast",
+				"load_profile": "super-fast",
 			}))
 		if err != nil {
 			t.Fatalf("request failed: %v", err)
@@ -122,15 +127,45 @@ func TestClusters_EPP(t *testing.T) {
 		testutil.AssertErrCode(t, resp, 422)
 	})
 
-	t.Run("CL-EPP-004 cache_affinity 枚举越界返回 422", func(t *testing.T) {
+	t.Run("CL-EPP-004 affinity 枚举越界返回 422", func(t *testing.T) {
 		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(
 			testutil.UniqueClusterName(), providerName, map[string]interface{}{
-				"cache_affinity": "extreme",
+				"affinity": "extreme",
 			}))
 		if err != nil {
 			t.Fatalf("request failed: %v", err)
 		}
 		testutil.AssertErrCode(t, resp, 422)
+	})
+
+	t.Run("CL-EPP-004b 已删除的旧字段返回 422", func(t *testing.T) {
+		for _, cfg := range []map[string]interface{}{
+			{"scheduling_profile": "balanced"},
+			{"cache_affinity": "low"},
+		} {
+			resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(
+				testutil.UniqueClusterName(), providerName, cfg))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			testutil.AssertErrCode(t, resp, 422)
+		}
+	})
+
+	t.Run("CL-EPP-004c waiting_queue_max / metrics_staleness_threshold_ms 越界返回 422", func(t *testing.T) {
+		for _, cfg := range []map[string]interface{}{
+			{"waiting_queue_max": -1},
+			{"running_requests_max": -1},
+			{"metrics_staleness_threshold_ms": 0},
+			{"flow_control": map[string]interface{}{"enable_eviction": true}},
+		} {
+			resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(
+				testutil.UniqueClusterName(), providerName, cfg))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			testutil.AssertErrCode(t, resp, 422)
+		}
 	})
 
 	t.Run("CL-EPP-005 kv_cache_utilization_max 越界返回 422", func(t *testing.T) {
@@ -182,8 +217,8 @@ func TestClusters_EPP(t *testing.T) {
 	t.Run("CL-EPP-009 epp_config 携带未知字段返回 422", func(t *testing.T) {
 		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(
 			testutil.UniqueClusterName(), providerName, map[string]interface{}{
-				"scheduling_profile": "balanced",
-				"unknown_field":      1,
+				"load_profile":  "balanced",
+				"unknown_field": 1,
 			}))
 		if err != nil {
 			t.Fatalf("request failed: %v", err)
@@ -218,9 +253,11 @@ func TestClusters_EPP(t *testing.T) {
 		assert.Equal(t, "EPP", data["balance_mode"])
 		eppConfig, ok := data["epp_config"].(map[string]interface{})
 		require.True(t, ok, "epp_config should be echoed back")
-		assert.Equal(t, "balanced", eppConfig["scheduling_profile"])
+		assert.Equal(t, "balanced", eppConfig["load_profile"])
+		assert.Equal(t, "medium", eppConfig["affinity"])
 		assert.Equal(t, true, eppConfig["prefix_cache_affinity"])
 		assert.Equal(t, 0.9, eppConfig["kv_cache_utilization_max"])
+		assert.Equal(t, float64(0), eppConfig["waiting_queue_max"])
 		assert.Equal(t, true, eppConfig["session_affinity_enabled"])
 		assert.Equal(t, "x-session-id", eppConfig["session_affinity_header"])
 		fc := eppConfig["flow_control"].(map[string]interface{})
@@ -235,7 +272,7 @@ func TestClusters_EPP(t *testing.T) {
 		body := map[string]interface{}{
 			"name":         clusterName,
 			"balance_mode": "WRR",
-			"epp_config":   map[string]interface{}{"scheduling_profile": "throughput-first"},
+			"epp_config":   map[string]interface{}{"load_profile": "kv-first"},
 			"llm_config": map[string]interface{}{
 				"models":   []string{"deepseek-chat"},
 				"provider": providerName,
@@ -251,7 +288,7 @@ func TestClusters_EPP(t *testing.T) {
 		assert.Equal(t, "WRR", data["balance_mode"])
 		eppConfig, ok := data["epp_config"].(map[string]interface{})
 		require.True(t, ok, "epp_config should be retained in WRR mode")
-		assert.Equal(t, "throughput-first", eppConfig["scheduling_profile"])
+		assert.Equal(t, "kv-first", eppConfig["load_profile"])
 
 		t.Cleanup(func() { testutil.DeleteCluster(clusterName) })
 	})
@@ -273,7 +310,7 @@ func TestClusters_EPP(t *testing.T) {
 	t.Run("CL-EPP-014 EPP 到 WRR 再回 EPP 配置与分配保留", func(t *testing.T) {
 		clusterName := testutil.UniqueClusterName()
 		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", minEPPClusterBody(clusterName, providerName, map[string]interface{}{
-			"scheduling_profile": "latency-first",
+			"load_profile": "queue-first",
 		}))
 		if err != nil {
 			t.Fatalf("create failed: %v", err)
@@ -294,7 +331,7 @@ func TestClusters_EPP(t *testing.T) {
 		assert.Equal(t, "WRR", data["balance_mode"])
 		eppConfig, ok := data["epp_config"].(map[string]interface{})
 		require.True(t, ok, "epp_config should be retained after EPP -> WRR")
-		assert.Equal(t, "latency-first", eppConfig["scheduling_profile"])
+		assert.Equal(t, "queue-first", eppConfig["load_profile"])
 
 		// WRR -> EPP：无需重新携带 epp_config，休眠配置继续生效
 		resp, err = testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
@@ -309,7 +346,7 @@ func TestClusters_EPP(t *testing.T) {
 		assert.Equal(t, "EPP", data["balance_mode"])
 		eppConfig, ok = data["epp_config"].(map[string]interface{})
 		require.True(t, ok, "epp_config should survive WRR -> EPP")
-		assert.Equal(t, "latency-first", eppConfig["scheduling_profile"])
+		assert.Equal(t, "queue-first", eppConfig["load_profile"])
 	})
 
 	t.Run("CL-EPP-015 WRR 休眠状态下更新携带非法 epp_config 返回 422", func(t *testing.T) {
