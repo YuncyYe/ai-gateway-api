@@ -73,7 +73,9 @@ func assertSettingsDefaults(t *testing.T, data map[string]interface{}) {
 
 	rewrite, ok := data["rewrite"].(map[string]interface{})
 	require.True(t, ok, "rewrite must be an object")
-	assert.Equal(t, []string{"strength", "protected_survival_rate"}, keysOf(rewrite))
+	// keysOf 基于 map 迭代序，必须按集合比较，否则 ~50% 概率假失败
+	//（Go map 迭代序随机；2026-10-12 全量集成 -count=8 复现 4/8 失败）。
+	assert.ElementsMatch(t, []string{"strength", "protected_survival_rate"}, keysOf(rewrite))
 	assert.Equal(t, "lite", rewrite["strength"])
 	assert.InDelta(t, 0.95, rewrite["protected_survival_rate"], 1e-9)
 }

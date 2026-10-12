@@ -102,7 +102,7 @@ func Bind(req *http.Request, data interface{}) error {
 
 	vars := mux.Vars(req)
 	if err := internal.MapUri(data, m2ms(vars)); err != nil {
-		return err
+		return xerror.WrapParamError(err)
 	}
 	if err := validateData(data, getTranslator(req)); err != nil {
 		return err
@@ -126,7 +126,7 @@ func BindJSON(req *http.Request, data interface{}) error {
 func BindURI(req *http.Request, data interface{}) error {
 	vars := mux.Vars(req)
 	if err := internal.MapUri(data, m2ms(vars)); err != nil {
-		return err
+		return xerror.WrapParamError(err)
 	}
 
 	if err := validateData(data, getTranslator(req)); err != nil {
@@ -139,7 +139,7 @@ func BindURI(req *http.Request, data interface{}) error {
 func BindForm(req *http.Request, data interface{}) error {
 	req.ParseForm()
 	if err := internal.MapForm(data, req.Form); err != nil {
-		return err
+		return xerror.WrapParamError(err)
 	}
 
 	if err := validateData(data, getTranslator(req)); err != nil {

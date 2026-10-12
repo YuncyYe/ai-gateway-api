@@ -647,6 +647,12 @@ func TestParamValidation(t *testing.T) {
 		{"invalid_mirror_hit", "/logs", with(windowQuery(), "mirror_hit", "not-bool")},
 		{"invalid_intent_source", "/logs", with(windowQuery(), "intent_source", "bogus")},
 		{"invalid_timeseries_dimension", "/timeseries", with(windowQuery(), "metric", "qps", "dimension", "model")},
+		// issue #233：stream 非法布尔值（共有过滤项 tag 绑定路径）五个端点全部 422
+		{"invalid_stream_overview", "/overview", with(windowQuery(), "stream", "not-bool")},
+		{"invalid_stream_logs", "/logs", with(windowQuery(), "stream", "not-bool")},
+		{"invalid_stream_timeseries", "/timeseries", with(windowQuery(), "metric", "qps", "stream", "not-bool")},
+		{"invalid_stream_rankings", "/rankings", with(windowQuery(), "dimension", "model", "stream", "not-bool")},
+		{"invalid_stream_distribution", "/distribution", with(windowQuery(), "dimension", "status", "stream", "not-bool")},
 	}
 
 	for _, tc := range cases {
@@ -656,6 +662,20 @@ func TestParamValidation(t *testing.T) {
 			require.NotNil(t, resp)
 			testutil.AssertErrCode(t, resp, 422)
 			assert.Contains(t, resp.ErrMsg, "Param Illegal")
+			if tc.name == "invalid_stream_overview" {
+				// 字段感知文案，且不回显 strconv 解析错误原文
+				assert.Contains(t, resp.ErrMsg, "invalid stream: not-bool")
+				assert.NotContains(t, resp.ErrMsg, "strconv")
+			}
 		})
 	}
+}
+
+// TestStreamFilterValidValues 验证 stream 合法取值与缺省行为不回退（issue #233 回归）。
+func TestStreamFilterValidValues(t *testing.T) {
+	var data overviewData
+	// 显式 true/false 与省略 stream 均应 200
+	getJSON(t, reportPrefix+"/overview", with(windowQuery(), "stream", "true"), &data)
+	getJSON(t, reportPrefix+"/overview", with(windowQuery(), "stream", "false"), &data)
+	getJSON(t, reportPrefix+"/overview", windowQuery(), &data)
 }
