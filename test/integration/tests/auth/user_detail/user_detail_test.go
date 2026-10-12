@@ -15,8 +15,11 @@
 package auth_test
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
 )
@@ -47,7 +50,13 @@ func TestAuth_UserDetail(t *testing.T) {
 		}
 		testutil.AssertSuccess(t, resp)
 		testutil.AssertDataFieldEquals(t, resp, "user_name", userName)
-		testutil.AssertDataFieldEquals(t, resp, "is_admin", true)
+		testutil.AssertDataFieldEquals(t, resp, "role", "system_admin")
+		// 契约：用户读接口不得返回 session_key（任何角色视角）。
+		var data map[string]interface{}
+		if err := json.Unmarshal(resp.Data, &data); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		assert.NotContains(t, data, "session_key")
 	})
 
 	t.Run("AUTH-6-002 查询不存在用户", func(t *testing.T) {

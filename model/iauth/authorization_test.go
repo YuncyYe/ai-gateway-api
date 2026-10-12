@@ -257,11 +257,11 @@ func TestAuthorizeManager_FetchProductTokens(t *testing.T) {
 	assert.Len(t, tokens, 1)
 }
 
-func TestAuthorizeManager_UpdateUserIsAdmin(t *testing.T) {
+func TestAuthorizeManager_UpdateUserRole(t *testing.T) {
 	ctx := context.Background()
 	setupConfig(t)
 
-	t.Run("set admin", func(t *testing.T) {
+	t.Run("set system admin", func(t *testing.T) {
 		authStore := &fakeAuthorizeStorager{
 			updateUserScopesFn: func(ctx context.Context, user *User, scopes []string) error {
 				assert.Equal(t, []string{ScopeSystem}, scopes)
@@ -270,19 +270,58 @@ func TestAuthorizeManager_UpdateUserIsAdmin(t *testing.T) {
 		}
 		m := NewAuthorizeManager(&fakeTxn{}, authStore)
 
-		require.NoError(t, m.UpdateUserIsAdmin(ctx, &User{Name: "alice"}, true))
+		require.NoError(t, m.UpdateUserRole(ctx, &User{Name: "alice"}, RoleSystemAdmin))
 	})
 
-	t.Run("unset admin", func(t *testing.T) {
+	t.Run("set readonly admin", func(t *testing.T) {
 		authStore := &fakeAuthorizeStorager{
 			updateUserScopesFn: func(ctx context.Context, user *User, scopes []string) error {
-				assert.Equal(t, []string{ScopeProduct}, scopes)
+				assert.Equal(t, []string{ScopeSystemReadonly}, scopes)
 				return nil
 			},
 		}
 		m := NewAuthorizeManager(&fakeTxn{}, authStore)
 
-		require.NoError(t, m.UpdateUserIsAdmin(ctx, &User{Name: "alice"}, false))
+		require.NoError(t, m.UpdateUserRole(ctx, &User{Name: "alice"}, RoleSystemAdminReadonly))
+	})
+
+	t.Run("invalid role", func(t *testing.T) {
+		authStore := &fakeAuthorizeStorager{
+			updateUserScopesFn: func(ctx context.Context, user *User, scopes []string) error {
+				t.Fatal("UpdateUserScopes must not be called for an invalid role")
+				return nil
+			},
+		}
+		m := NewAuthorizeManager(&fakeTxn{}, authStore)
+
+		require.Error(t, m.UpdateUserRole(ctx, &User{Name: "alice"}, "other"))
+	})
+
+	t.Run("builtin admin downgrade rejected", func(t *testing.T) {
+		authStore := &fakeAuthorizeStorager{
+			updateUserScopesFn: func(ctx context.Context, user *User, scopes []string) error {
+				t.Fatal("UpdateUserScopes must not be called when downgrading builtin admin")
+				return nil
+			},
+		}
+		m := NewAuthorizeManager(&fakeTxn{}, authStore)
+
+		require.Error(t, m.UpdateUserRole(ctx, &User{Name: "admin"}, RoleSystemAdminReadonly))
+		// Case-insensitive variant is rejected as well.
+		require.Error(t, m.UpdateUserRole(ctx, &User{Name: "Admin"}, RoleSystemAdminReadonly))
+	})
+
+	t.Run("builtin admin pinned write", func(t *testing.T) {
+		authStore := &fakeAuthorizeStorager{
+			updateUserScopesFn: func(ctx context.Context, user *User, scopes []string) error {
+				assert.Equal(t, []string{ScopeSystem}, scopes)
+				return nil
+			},
+		}
+		m := NewAuthorizeManager(&fakeTxn{}, authStore)
+
+		// Pinning builtin admin to system_admin is an allowed idempotent write.
+		require.NoError(t, m.UpdateUserRole(ctx, &User{Name: "admin"}, RoleSystemAdmin))
 	})
 
 	t.Run("storage error", func(t *testing.T) {
@@ -293,7 +332,122 @@ func TestAuthorizeManager_UpdateUserIsAdmin(t *testing.T) {
 		}
 		m := NewAuthorizeManager(&fakeTxn{}, authStore)
 
-		err := m.UpdateUserIsAdmin(ctx, &User{Name: "alice"}, true)
+		err := m.UpdateUserRole(ctx, &User{Name: "alice"}, RoleSystemAdmin)
 		require.Error(t, err)
 	})
+}
+
+// allFeatures lists every Feature constant. Tests assert that
+// scope2permission entries cover this list exactly, so a newly added Feature
+// that nobody granted is caught here instead of silently defaulting to deny.
+var allFeatures = []Feature{
+	FeatureProxyPool, FeatureBFECluster, FeatureBFEPool, FeatureArea, FeatureDomain,
+	FeatureProduct, FeatureExtraFile,
+	FeatureProductPool, FeatureRoute, FeatureSubCluster, FeatureProductCluster,
+	FeatureGeneral, FeatureTraffic, FeatureCert, FeatureActiveHealthCheck,
+	FeatureProductUser, FeatureUser, FeatureToken,
+	FeatureNLBPool, FeatureNLBCluster, FeatureAIRoute, FeatureAPIKey,
+	FeatureEntityType, FeatureEntity, FeatureQuotaPlan, FeatureRateLimitPolicy,
+	FeatureAICache, FeatureAIContext, FeatureTrafficMirror, FeatureAIIntent,
+	FeatureModelPrice, FeatureProvider,
+	FeatureK8sPool, FeatureOperationLog, FeatureReport, FeatureSecurity, FeatureBatch,
+}
+
+func TestScope2Permission_SystemReadonlyCoversAllFeatures(t *testing.T) {
+	readonly, ok := scope2permission[ScopeSystemReadonly]
+	require.True(t, ok, "SystemReadonly scope missing from scope2permission")
+
+	writeActions := ActionUpdate | ActionCreate | ActionDelete | ActionExport | ActionCancel
+	for _, f := range allFeatures {
+		a, exists := readonly[f]
+		require.True(t, exists, "SystemReadonly must explicitly list Feature %s", f)
+		assert.True(t, a.IsAllowed(ActionRead), "%s must allow ActionRead", f)
+		assert.False(t, a.IsAllowed(writeActions),
+			"%s must not allow update/create/delete/export/cancel", f)
+	}
+	assert.Len(t, readonly, len(allFeatures), "no extra entries allowed (unlisted defaults to deny)")
+}
+
+func TestScope2Permission_SystemComplete(t *testing.T) {
+	// The System entry must enumerate every Feature too. Today admins pass
+	// through the IsAdmin() short-circuit so this is behaviour-preserving, but
+	// it removes the hidden dependency should that short-circuit ever change.
+	system, ok := scope2permission[ScopeSystem]
+	require.True(t, ok)
+	for _, f := range allFeatures {
+		a, exists := system[f]
+		require.True(t, exists, "System must explicitly list Feature %s", f)
+		assert.Equal(t, actionAll, a, "%s must grant actionAll", f)
+	}
+	assert.Len(t, system, len(allFeatures))
+}
+
+func TestAuthorizeManager_Authorizate_SystemReadonly(t *testing.T) {
+	ctx := context.Background()
+	setupConfig(t)
+
+	m := NewAuthorizeManager(&fakeTxn{}, &fakeAuthorizeStorager{})
+	v := &Visitor{User: &User{Name: "viewer", Scopes: []string{ScopeSystemReadonly}}}
+	ctx = NewVisitorContext(ctx, v)
+
+	t.Run("read allowed", func(t *testing.T) {
+		require.NoError(t, m.Authorizate(ctx, NewFeatureAuthorization(FeatureAPIKey, ActionRead)))
+		require.NoError(t, m.Authorizate(ctx, NewFeatureAuthorization(FeatureAPIKey, ActionReadAll)))
+		require.NoError(t, m.Authorizate(ctx, NewFeatureAuthorization(FeatureReport, ActionRead)))
+		require.NoError(t, m.Authorizate(ctx, NewFeatureAuthorization(FeatureAIIntent, ActionRead)))
+	})
+
+	t.Run("write denied", func(t *testing.T) {
+		for _, action := range []Action{ActionUpdate, ActionCreate, ActionDelete, ActionExport, ActionCancel} {
+			err := m.Authorizate(ctx, NewFeatureAuthorization(FeatureAPIKey, action))
+			require.Error(t, err, "action %d must be denied", action)
+			assert.Contains(t, err.Error(), "Feature Access Deny")
+		}
+	})
+}
+
+func TestRoleScopesMapping(t *testing.T) {
+	scopes, err := RoleToScopes(RoleSystemAdmin)
+	require.NoError(t, err)
+	assert.Equal(t, []string{ScopeSystem}, scopes)
+
+	scopes, err = RoleToScopes(RoleSystemAdminReadonly)
+	require.NoError(t, err)
+	assert.Equal(t, []string{ScopeSystemReadonly}, scopes)
+
+	_, err = RoleToScopes("other")
+	require.Error(t, err)
+
+	assert.Equal(t, RoleSystemAdmin, ScopesToRole([]string{ScopeSystem}, false))
+	assert.Equal(t, RoleSystemAdminReadonly, ScopesToRole([]string{ScopeSystemReadonly}, false))
+	// Fallback on the Admin flag for legacy users whose Scopes are empty.
+	assert.Equal(t, RoleSystemAdmin, ScopesToRole(nil, true))
+	assert.Equal(t, RoleSystemAdminReadonly, ScopesToRole(nil, false))
+}
+
+func TestUserGetScopesAndReadonly(t *testing.T) {
+	// Populated scopes win.
+	u := &User{Name: "viewer", Admin: false, Scopes: []string{ScopeSystemReadonly}}
+	assert.Equal(t, []string{ScopeSystemReadonly}, u.GetScopes())
+	assert.False(t, u.IsAdmin())
+
+	v := &Visitor{User: u}
+	assert.True(t, v.HasScope(ScopeSystemReadonly))
+	assert.False(t, v.HasScope(ScopeSystem))
+	assert.True(t, v.IsSystemReadonly())
+
+	// Fallback derivation for legacy users without Scopes.
+	legacy := &User{Name: "legacy", Admin: true}
+	assert.Equal(t, []string{ScopeSystem}, legacy.GetScopes())
+	assert.False(t, (&Visitor{User: legacy}).IsSystemReadonly())
+
+	// A full admin holding extra scopes is never "read-only".
+	admin := &User{Name: "root", Admin: true, Scopes: []string{ScopeSystem, ScopeSystemReadonly}}
+	assert.False(t, (&Visitor{User: admin}).IsSystemReadonly())
+
+	// Token-based visitors.
+	tv := &Visitor{Token: &Token{Name: "t", Scope: ScopeSystemReadonly}}
+	assert.True(t, tv.IsSystemReadonly())
+	sv := &Visitor{Token: &Token{Name: "t", Scope: ScopeSupport}}
+	assert.False(t, sv.IsSystemReadonly())
 }

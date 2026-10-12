@@ -377,16 +377,17 @@ func ExpiredTime(t *int64) error {
 
 // Scope validates an auth token scope.
 func Scope(s string) error {
-	if s != "System" && s != "Support" {
-		return xerror.WrapParamErrorWithMsg("scope must be System or Support")
+	if s != "System" && s != "SystemReadonly" && s != "Support" {
+		return xerror.WrapParamErrorWithMsg("scope must be System, SystemReadonly or Support")
 	}
 	return nil
 }
 
-// IsAdmin validates that is_admin is true (the system only supports true).
-func IsAdmin(b bool) error {
-	if !b {
-		return xerror.WrapParamErrorWithMsg("is_admin must be true")
+// Role validates a user role. Keep the literals in sync with the role
+// constants in model/iauth (lib must not import model to avoid cycles).
+func Role(s string) error {
+	if s != "system_admin" && s != "system_admin_readonly" {
+		return xerror.WrapParamErrorWithMsg("role must be system_admin or system_admin_readonly")
 	}
 	return nil
 }

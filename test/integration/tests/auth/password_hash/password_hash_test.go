@@ -116,7 +116,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		resp, err := testutil.GetClient().Post("/open-api/v1/auth/users", map[string]interface{}{
 			"user_name": rejectedName,
 			"password":  longPassword,
-			"is_admin":  true,
+			"role":      "system_admin",
 		})
 		require.NoError(t, err)
 		testutil.AssertErrCode(t, resp, 422)

@@ -18,20 +18,20 @@ import "github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
 
 // UserSchema 用户数据模型 schema
 var UserSchema = &testutil.ObjectSchema{
-	Required: []string{"user_name", "is_admin"},
+	Required: []string{"user_name", "role"},
 	Fields: map[string]testutil.FieldSpec{
 		"user_name": {Type: testutil.TypeString},
-		"is_admin":  {Type: testutil.TypeBool},
+		"role":      {Type: testutil.TypeString, Enum: []interface{}{"system_admin", "system_admin_readonly"}},
 	},
 }
 
 // SessionKeySchema 登录返回 schema
 var SessionKeySchema = &testutil.ObjectSchema{
-	Required: []string{"session_key", "user_name", "is_admin"},
+	Required: []string{"session_key", "user_name", "role"},
 	Fields: map[string]testutil.FieldSpec{
 		"session_key": {Type: testutil.TypeString},
 		"user_name":   {Type: testutil.TypeString},
-		"is_admin":    {Type: testutil.TypeBool},
+		"role":        {Type: testutil.TypeString, Enum: []interface{}{"system_admin", "system_admin_readonly"}},
 	},
 }
 
@@ -41,7 +41,7 @@ var TokenSchema = &testutil.ObjectSchema{
 	Fields: map[string]testutil.FieldSpec{
 		"name":  {Type: testutil.TypeString},
 		"token": {Type: testutil.TypeString},
-		"scope": {Type: testutil.TypeString, Enum: []interface{}{"System", "Support"}},
+		"scope": {Type: testutil.TypeString, Enum: []interface{}{"System", "SystemReadonly", "Support"}},
 	},
 }
 

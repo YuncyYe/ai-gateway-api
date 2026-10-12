@@ -15,9 +15,11 @@
 package provider
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xmask"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xreq"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iprovider"
@@ -65,6 +67,10 @@ func ListAction(req *http.Request) (interface{}, error) {
 		}
 	}
 
+	if err := maskKeysIfReadonly(req.Context(), list...); err != nil {
+		return nil, err
+	}
+
 	return &listResponse{
 		List: list,
 		Pagination: &pagination{
@@ -73,6 +79,28 @@ func ListAction(req *http.Request) (interface{}, error) {
 			Total:    total,
 		},
 	}, nil
+}
+
+// maskKeysIfReadonly masks keys[].key when the visitor is the read-only
+// system admin. The Keys slice is shallow-copied before mutation so shared
+// backing arrays are never written back.
+func maskKeysIfReadonly(ctx context.Context, providers ...*iprovider.Provider) error {
+	v, err := iauth.MustGetVisitor(ctx)
+	if err != nil {
+		return err
+	}
+	if !v.IsSystemReadonly() {
+		return nil
+	}
+	for _, p := range providers {
+		masked := make([]iprovider.ProviderKey, len(p.Keys))
+		copy(masked, p.Keys)
+		for i := range masked {
+			masked[i].Key = xmask.Secret(masked[i].Key)
+		}
+		p.Keys = masked
+	}
+	return nil
 }
 
 func queryFilter(req *http.Request) *iprovider.ProviderFilter {
