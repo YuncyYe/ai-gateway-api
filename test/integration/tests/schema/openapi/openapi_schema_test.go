@@ -651,7 +651,7 @@ func testAuthSchema(t *testing.T) {
 	createUserResp, err := testutil.GetClient().Post("/open-api/v1/auth/users", map[string]interface{}{
 		"user_name": userName,
 		"password":  password,
-		"is_admin":  true,
+		"role":      "system_admin",
 	})
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, createUserResp)

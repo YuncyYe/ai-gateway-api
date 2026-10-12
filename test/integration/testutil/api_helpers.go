@@ -297,12 +297,17 @@ func CreateCertificate(certName string, isDefault bool) (string, error) {
 	return certName, nil
 }
 
-// CreateUser 创建用户
+// CreateUser 创建用户（默认系统管理员角色）
 func CreateUser(userName, password string) error {
+	return CreateUserWithRole(userName, password, "system_admin")
+}
+
+// CreateUserWithRole 创建指定角色的用户（system_admin / system_admin_readonly）
+func CreateUserWithRole(userName, password, role string) error {
 	resp, err := GetClient().Post("/open-api/v1/auth/users", map[string]interface{}{
 		"user_name": userName,
 		"password":  password,
-		"is_admin":  true,
+		"role":      role,
 	})
 	if err != nil {
 		return err
@@ -311,6 +316,29 @@ func CreateUser(userName, password string) error {
 		return fmt.Errorf("create user failed: %d %s", resp.ErrNum, resp.ErrMsg)
 	}
 	return nil
+}
+
+// LoginSessionKey 使用账号密码登录，返回 session key（可用于扮演该用户发请求）
+func LoginSessionKey(userName, password string) (string, error) {
+	resp, err := GetClient().Post("/open-api/v1/auth/session-keys", map[string]interface{}{
+		"user_name": userName,
+		"password":  password,
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.ErrNum != 200 {
+		return "", fmt.Errorf("login failed: %d %s", resp.ErrNum, resp.ErrMsg)
+	}
+	key, err := GetDataField(resp, "session_key")
+	if err != nil {
+		return "", err
+	}
+	sessionKey, ok := key.(string)
+	if !ok || sessionKey == "" {
+		return "", fmt.Errorf("session_key missing in login response")
+	}
+	return sessionKey, nil
 }
 
 // CreateToken 创建 Token，返回 token 值

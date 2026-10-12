@@ -95,6 +95,62 @@ func (v *Visitor) IsAdmin() bool {
 	return v.Token.IsAdmin()
 }
 
+// HasScope reports whether any of the visitor's scopes equals scope.
+func (v *Visitor) HasScope(scope string) bool {
+	for _, s := range v.GetScopes() {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSystemReadonly reports whether the visitor is the read-only system admin
+// (has SystemReadonly scope but is not a full admin). Response assembly uses
+// it to decide whether secret fields must be masked. Admin visitors are never
+// read-only, and Support tokens never reach read endpoints, so this is false
+// for both.
+func (v *Visitor) IsSystemReadonly() bool {
+	return !v.IsAdmin() && v.HasScope(ScopeSystemReadonly)
+}
+
+// Roles exposed by the OpenAPI. They are the API-level expression of the
+// internal scopes stored in users.scopes.
+const (
+	RoleSystemAdmin         = "system_admin"
+	RoleSystemAdminReadonly = "system_admin_readonly"
+)
+
+// RoleToScopes maps an API role to its backing scopes.
+func RoleToScopes(role string) ([]string, error) {
+	switch role {
+	case RoleSystemAdmin:
+		return []string{ScopeSystem}, nil
+	case RoleSystemAdminReadonly:
+		return []string{ScopeSystemReadonly}, nil
+	default:
+		return nil, xerror.WrapParamErrorWithMsg("role must be %s or %s", RoleSystemAdmin, RoleSystemAdminReadonly)
+	}
+}
+
+// ScopesToRole is the inverse of RoleToScopes, used when rendering user
+// responses. Falls back to the Admin flag for legacy/in-memory users whose
+// Scopes were never populated.
+func ScopesToRole(scopes []string, admin bool) string {
+	for _, s := range scopes {
+		if s == ScopeSystem {
+			return RoleSystemAdmin
+		}
+		if s == ScopeSystemReadonly {
+			return RoleSystemAdminReadonly
+		}
+	}
+	if admin {
+		return RoleSystemAdmin
+	}
+	return RoleSystemAdminReadonly
+}
+
 type User struct {
 	ID                 int64
 	Name               string
@@ -103,6 +159,11 @@ type User struct {
 	Password           string
 	SessionKey         string
 	SessionKeyCreateAt time.Time
+
+	// Scopes is the raw scope list parsed from users.scopes. It is the
+	// single source of truth for non-admin scopes such as SystemReadonly;
+	// Admin keeps meaning "has System scope" for the IsAdmin() short-circuit.
+	Scopes []string
 }
 
 func (u *User) GetName() string {
@@ -110,6 +171,13 @@ func (u *User) GetName() string {
 }
 
 func (u *User) GetScopes() []string {
+	if len(u.Scopes) > 0 {
+		return u.Scopes
+	}
+
+	// Fallback for legacy/in-memory users whose Scopes were never populated:
+	// keep the historical two-value derivation so existing paths behave the
+	// same as before User.Scopes existed.
 	if u.Admin {
 		return []string{ScopeSystem}
 	}

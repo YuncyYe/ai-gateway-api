@@ -28,7 +28,7 @@ import (
 type UserCreateParam struct {
 	UserName *string `json:"user_name" validate:"required,min=1"`
 	Password *string `json:"password" validate:"required,min=8"`
-	IsAdmin  bool    `json:"is_admin"`
+	Role     *string `json:"role" validate:"required"`
 }
 
 // Validate performs centralized business validation on the request parameters.
@@ -39,7 +39,10 @@ func (p *UserCreateParam) Validate() error {
 	if err := validate.Password(*p.Password, *p.UserName); err != nil {
 		return err
 	}
-	return validate.IsAdmin(p.IsAdmin)
+	if p.Role == nil {
+		return xerror.WrapParamErrorWithMsg("role is required")
+	}
+	return validate.Role(*p.Role)
 }
 
 // UserCreateRoute route
@@ -52,18 +55,21 @@ var UserCreateEndpoint = &xreq.Endpoint{
 
 // AUTO GEN BY ctrl, MODIFY AS U NEED
 func newUserCreateParam(req *http.Request) (*UserCreateParam, error) {
-	param := &UserCreateParam{
-		IsAdmin: true,
-	}
+	param := &UserCreateParam{}
 	err := xreq.BindJSON(req, param)
 	return param, err
 }
 
 func userCreateActionProcess(req *http.Request, param *UserCreateParam) error {
+	scopes, err := iauth.RoleToScopes(*param.Role)
+	if err != nil {
+		return err
+	}
+
 	return container.AuthenticateManager.CreateUser(req.Context(), &iauth.UserParam{
 		Name:     param.UserName,
 		Password: param.Password,
-		Scopes:   []string{iauth.ScopeSystem},
+		Scopes:   scopes,
 	})
 }
 

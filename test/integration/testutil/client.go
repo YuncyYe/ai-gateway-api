@@ -41,6 +41,9 @@ type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
 	Token      string
+	// Headers are extra request headers applied to every request, e.g.
+	// {"Authorization": "Session <session_key>"} to act as a specific user.
+	Headers map[string]string
 }
 
 var (
@@ -70,6 +73,25 @@ func SetServerURL(url string) {
 func SetToken(token string) {
 	client := GetClient()
 	client.Token = token
+}
+
+// SetHeader 设置所有后续请求都会携带的额外请求头（传 value 为空串可删除该头）。
+// 典型用法：SetHeader("Authorization", "Session "+sessionKey) 以特定用户身份发请求。
+func SetHeader(key, value string) {
+	client := GetClient()
+	if client.Headers == nil {
+		client.Headers = map[string]string{}
+	}
+	if value == "" {
+		delete(client.Headers, key)
+		return
+	}
+	client.Headers[key] = value
+}
+
+// ClearHeaders 清空通过 SetHeader 设置的全部额外请求头。
+func ClearHeaders() {
+	GetClient().Headers = nil
 }
 
 // Get 发送 GET 请求
@@ -262,6 +284,9 @@ func (c *Client) doRequest(method, url string, body interface{}) (*APIResponse, 
 	req.Header.Set("Content-Type", "application/json")
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := c.HTTPClient.Do(req)

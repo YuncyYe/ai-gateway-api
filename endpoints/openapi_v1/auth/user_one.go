@@ -63,14 +63,17 @@ func UserOneAction(req *http.Request) (interface{}, error) {
 // AUTO GEN BY ctrl, MODIFY AS U NEED
 type UserData struct {
 	UserName string `json:"user_name,omitempty"`
-	IsAdmin  bool   `json:"is_admin"`
+	Role     string `json:"role"`
 
+	// SessionKey is only ever populated for the login response of the user
+	// themselves; user list/detail responses must leave it empty so session
+	// keys never leak through user read APIs.
 	SessionKey string `json:"session_key,omitempty"`
 }
 
 func newUserData(user *iauth.User) *UserData {
 	return &UserData{
 		UserName: user.Name,
-		IsAdmin:  true,
+		Role:     iauth.ScopesToRole(user.Scopes, user.Admin),
 	}
 }

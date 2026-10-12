@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xmask"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
 
@@ -137,6 +138,12 @@ func ListAction(req *http.Request) (interface{}, error) {
 }
 
 func newResponse(ctx context.Context, list []*api_key.APIKeyParam) ([]*api_key.APIKeyParam, error) {
+	v, err := iauth.MustGetVisitor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	readonly := v.IsSystemReadonly()
+
 	for i, one := range list {
 		if one.Key != nil {
 			remainingQuota, err := api_key.GetRemainingQuota(ctx, container.QuotaCacheSingleton, one)
@@ -144,6 +151,9 @@ func newResponse(ctx context.Context, list []*api_key.APIKeyParam) ([]*api_key.A
 				return nil, err
 			}
 			list[i].RemainingQuota = remainingQuota
+			if readonly {
+				*list[i].Key = xmask.Secret(*one.Key)
+			}
 		}
 	}
 

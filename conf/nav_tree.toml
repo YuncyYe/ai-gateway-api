@@ -4,42 +4,42 @@ id = "root"
 [[children]]
 id = "resource.admin.list"
 text = "ResourceManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]
 children = [
-    { id = "AICluster.list", text = "AIClusterManage", allowed_roles = ["admin"] },
-    { id = "ModelPrice.list", text = "ModelPriceManage", allowed_roles = ["admin"] },
-    { id = "Provider.list", text = "ProviderManage", allowed_roles = ["admin"] },
-    { id = "EppPool.list", text = "EppPoolManage", allowed_roles = ["admin"] }
+    { id = "AICluster.list", text = "AIClusterManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "ModelPrice.list", text = "ModelPriceManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "Provider.list", text = "ProviderManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "EppPool.list", text = "EppPoolManage", allowed_roles = ["admin", "admin_readonly"] }
 ]
 
 [[children]]
 id = "route.admin.list"
 text = "RouteManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]
 children = [
-    { id = "AdvanceRouteRule.list", text = "AdvanceRouteRuleManage", allowed_roles = ["admin"] }
+    { id = "AdvanceRouteRule.list", text = "AdvanceRouteRuleManage", allowed_roles = ["admin", "admin_readonly"] }
 ]
 
 [[children]]
 id = "consumer.admin.list"
 text = "ConsumerManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]
 children = [
-    { id = "APIKey.list", text = "APIKeyManage", allowed_roles = ["admin"] },
-    { id = "Entity.list", text = "EntityManage", allowed_roles = ["admin"] }
+    { id = "APIKey.list", text = "APIKeyManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "Entity.list", text = "EntityManage", allowed_roles = ["admin", "admin_readonly"] }
 ]
 
 [[children]]
 id = "report.list"
 text = "ReportManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]
 
 [[children]]
 id = "user.list"
 text = "UserManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]
 
 [[children]]
 id = "OperationLog.list"
 text = "OperationLogManage"
-allowed_roles = ["admin"]
+allowed_roles = ["admin", "admin_readonly"]

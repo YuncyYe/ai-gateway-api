@@ -56,8 +56,9 @@ func TestAuth_ListUsers(t *testing.T) {
 	for _, item := range list {
 		user := item.(map[string]interface{})
 		assert.NotEmpty(t, user["user_name"])
-		assert.Equal(t, true, user["is_admin"])
+		assert.Contains(t, []interface{}{"system_admin", "system_admin_readonly"}, user["role"])
 		assert.NotContains(t, user, "products")
+		assert.NotContains(t, user, "session_key")
 	}
 
 	t.Cleanup(func() {

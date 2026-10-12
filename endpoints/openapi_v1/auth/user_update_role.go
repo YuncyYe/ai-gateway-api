@@ -24,42 +24,41 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
 )
 
-// UserUpdateIsAdminRoute route
+// UserUpdateRoleRoute route
 // AUTO GEN BY ctrl, MODIFY AS U NEED
-var UserUpdateIsAdminEndpoint = &xreq.Endpoint{
-	Path:       "/auth/users/{user_name}/is_admin",
+var UserUpdateRoleEndpoint = &xreq.Endpoint{
+	Path:       "/auth/users/{user_name}/role",
 	Method:     http.MethodPatch,
-	Handler:    xreq.Convert(UserUpdateIsAdminAction),
+	Handler:    xreq.Convert(UserUpdateRoleAction),
 	Authorizer: iauth.FA(iauth.FeatureUser, iauth.ActionUpdate),
 }
 
-// UserUpdateIsAdminParam Request Param
+// UserUpdateRoleParam Request Param
 // AUTO GEN BY ctrl, MODIFY AS U NEED
-type UserUpdateIsAdminParam struct {
+type UserUpdateRoleParam struct {
 	UserName *string `uri:"user_name" validate:"required,min=1"`
-	IsAdmin  bool    `json:"is_admin"`
+	Role     *string `json:"role" validate:"required"`
 }
 
 // Validate performs centralized business validation on the request parameters.
-func (p *UserUpdateIsAdminParam) Validate() error {
+func (p *UserUpdateRoleParam) Validate() error {
 	if err := validate.UserNameRef(*p.UserName); err != nil {
 		return err
 	}
-	return validate.IsAdmin(p.IsAdmin)
+	if p.Role == nil {
+		return xerror.WrapParamErrorWithMsg("role is required")
+	}
+	return validate.Role(*p.Role)
 }
 
 // AUTO GEN BY ctrl, MODIFY AS U NEED
-func newUserUpdateIsAdminParam(req *http.Request) (*UserUpdateIsAdminParam, error) {
-	param := &UserUpdateIsAdminParam{}
+func newUserUpdateRoleParam(req *http.Request) (*UserUpdateRoleParam, error) {
+	param := &UserUpdateRoleParam{}
 	err := xreq.Bind(req, param)
 	return param, err
 }
 
-func userUpdateIsAdminActionProcess(req *http.Request, param *UserUpdateIsAdminParam) error {
-	if !param.IsAdmin {
-		return xerror.WrapParamErrorWithMsg("is_admin must be true")
-	}
-
+func userUpdateRoleActionProcess(req *http.Request, param *UserUpdateRoleParam) error {
 	user, err := container.AuthenticateManager.FetchUser(req.Context(), &iauth.UserFilter{
 		Name: param.UserName,
 	})
@@ -69,18 +68,18 @@ func userUpdateIsAdminActionProcess(req *http.Request, param *UserUpdateIsAdminP
 	if user == nil {
 		return xerror.WrapRecordNotExist("User")
 	}
-	return container.AuthorizeManager.UpdateUserIsAdmin(req.Context(), user, true)
+	return container.AuthorizeManager.UpdateUserRole(req.Context(), user, *param.Role)
 }
 
-var _ xreq.Handler = UserUpdateIsAdminAction
+var _ xreq.Handler = UserUpdateRoleAction
 
-// UserUpdateIsAdminAction action
-// Admin update other user's password
-func UserUpdateIsAdminAction(req *http.Request) (interface{}, error) {
-	param, err := newUserUpdateIsAdminParam(req)
+// UserUpdateRoleAction action
+// Update a user's role (system_admin / system_admin_readonly).
+func UserUpdateRoleAction(req *http.Request) (interface{}, error) {
+	param, err := newUserUpdateRoleParam(req)
 	if err != nil {
 		return nil, err
 	}
 
-	return nil, userUpdateIsAdminActionProcess(req, param)
+	return nil, userUpdateRoleActionProcess(req, param)
 }
