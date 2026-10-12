@@ -172,7 +172,14 @@ func setByForm(value reflect.Value, field reflect.StructField, form map[string][
 		if len(vs) > 0 {
 			val = vs[0]
 		}
-		return true, setWithProperType(val, value, field)
+		if err := setWithProperType(val, value, field); err != nil {
+			// 转换失败产出字段感知文案（形如 "invalid stream: not-bool"），
+			// 不保留底层 strconv 错误链：xerror.Resolve 以 errors.Cause 作为
+			// 对外 Msg，保留链会把内部解析错误原文泄漏给调用方。
+			// 由 xreq.BindForm/Bind/BindURI 包装为 PARAM 参数错误（HTTP 422）。
+			return false, fmt.Errorf("invalid %s: %s", tagValue, val)
+		}
+		return true, nil
 	}
 }
 
