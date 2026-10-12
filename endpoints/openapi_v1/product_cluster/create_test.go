@@ -15,6 +15,7 @@
 package product_cluster
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
@@ -531,5 +532,28 @@ func TestUpsertParamValidate_BasicRanges(t *testing.T) {
 			},
 		}
 		assert.NoError(t, p.Validate())
+	})
+}
+
+func TestNormalizeEppRuntimeRaw(t *testing.T) {
+	raw := func(s string) *json.RawMessage {
+		r := json.RawMessage(s)
+		return &r
+	}
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		assert.Nil(t, normalizeEppRuntimeRaw(nil))
+	})
+
+	t.Run("empty/null/blank stay nil", func(t *testing.T) {
+		for _, s := range []string{"", "   ", "null", " null "} {
+			assert.Nil(t, normalizeEppRuntimeRaw(raw(s)), "s=%q", s)
+		}
+	})
+
+	t.Run("valid JSON trimmed and carried", func(t *testing.T) {
+		got := normalizeEppRuntimeRaw(raw(`  {"timeout":{"connect":"1s"}}  `))
+		require.NotNil(t, got)
+		assert.Equal(t, `{"timeout":{"connect":"1s"}}`, *got)
 	})
 }

@@ -90,6 +90,7 @@ CREATE TABLE clusters (
   llm_config TEXT,
   balance_mode TEXT NOT NULL DEFAULT 'WRR',
   epp_config TEXT,
+  epp_runtime TEXT,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (name)

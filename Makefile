@@ -106,6 +106,7 @@ package-bin:
 	cp -rf  static 		$(OUTDIR)/
 	cp -rf  docs 		$(OUTDIR)/
 	cp -rf  scripts 	$(OUTDIR)/
+	cp -rf  database 	$(OUTDIR)/
 	cp -rf  db_ddl.sql 	$(OUTDIR)/
 	cp -rf  db_ddl_sqlite.sql 	$(OUTDIR)/
 	cp -rf  db_ddl_report_mysql.sql 	$(OUTDIR)/

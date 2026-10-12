@@ -425,6 +425,15 @@ func testClusterSchema(t *testing.T) {
 				"enable_eviction":       false,
 			},
 		},
+		"epp_runtime": map[string]interface{}{
+			"check": map[string]interface{}{
+				"check_interval": "5s",
+				"fail_threshold": 4,
+			},
+			"timeout": map[string]interface{}{
+				"connect": "1s",
+			},
+		},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": eppProviderName,
@@ -460,12 +469,56 @@ func testClusterSchema(t *testing.T) {
 		},
 	})
 
+	// epp_runtime 原样回读（未携带的子字段在写入时按默认补齐后落盘）。
+	assertEppRuntimeEcho(t, eppOneResp.Data, map[string]interface{}{
+		"check": map[string]interface{}{
+			"disabled":          false,
+			"check_interval":    "5s",
+			"fail_threshold":    float64(4),
+			"cooldown":          "45s",
+			"success_threshold": float64(2),
+		},
+		"timeout": map[string]interface{}{
+			"connect": "1s",
+			"call":    "3s",
+		},
+	})
+
+	// epp_runtime 不接受 tls/breaker：未知字段 → 422，且不落盘。
+	badRuntimeResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+		"name":         testutil.UniqueClusterName(),
+		"balance_mode": "EPP",
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
+		"epp_runtime":  map[string]interface{}{"tls": map[string]interface{}{"plaintext": true}},
+		"llm_config": map[string]interface{}{
+			"models":   []string{"deepseek-chat"},
+			"provider": eppProviderName,
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, badRuntimeResp, 422)
+
+	// 非法 epp_runtime（阈值越界）→ 422。
+	badThresholdResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+		"name":         testutil.UniqueClusterName(),
+		"balance_mode": "EPP",
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
+		"epp_runtime":  map[string]interface{}{"check": map[string]interface{}{"fail_threshold": 0}},
+		"llm_config": map[string]interface{}{
+			"models":   []string{"deepseek-chat"},
+			"provider": eppProviderName,
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, badThresholdResp, 422)
+
 	// WRR 集群携带 epp_config（休眠保留）：创建成功且 GET 原样返回。
 	dormantClusterName := testutil.UniqueClusterName()
 	dormantResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         dormantClusterName,
 		"balance_mode": "WRR",
 		"epp_config":   map[string]interface{}{"load_profile": "kv-first"},
+		"epp_runtime":  map[string]interface{}{"timeout": map[string]interface{}{"call": "9s"}},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": eppProviderName,
@@ -481,6 +534,32 @@ func testClusterSchema(t *testing.T) {
 	testutil.AssertSchema(t, dormantOneResp, ClusterSchema)
 	assertEppConfigEcho(t, dormantOneResp.Data, map[string]interface{}{
 		"load_profile": "kv-first",
+	})
+	assertEppRuntimeEcho(t, dormantOneResp.Data, map[string]interface{}{
+		"timeout": map[string]interface{}{
+			"connect": "500ms",
+			"call":    "9s",
+		},
+	})
+
+	// PATCH 整体替换 epp_runtime → GET 校验替换生效。
+	patchRuntimeResp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+dormantClusterName, map[string]interface{}{
+		"epp_runtime": map[string]interface{}{"check": map[string]interface{}{"cooldown": "10s"}},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, patchRuntimeResp)
+
+	patchOneResp, err := testutil.GetClient().Get("/open-api/v1/clusters/" + dormantClusterName)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, patchOneResp)
+	assertEppRuntimeEcho(t, patchOneResp.Data, map[string]interface{}{
+		"check": map[string]interface{}{
+			"disabled":          false,
+			"check_interval":    "2s",
+			"fail_threshold":    float64(3),
+			"cooldown":          "10s",
+			"success_threshold": float64(2),
+		},
 	})
 
 	t.Cleanup(func() {
@@ -506,6 +585,21 @@ func assertEppConfigEcho(t *testing.T, data []byte, want map[string]interface{})
 	for key, wantVal := range want {
 		require.Equal(t, wantVal, eppConfig[key], "epp_config.%s echo mismatch", key)
 	}
+}
+
+// assertEppRuntimeEcho 校验 GET cluster 回读中 epp_runtime 与写入（含默认补齐）
+// 后的值一致。
+func assertEppRuntimeEcho(t *testing.T, data []byte, want map[string]interface{}) {
+	t.Helper()
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal cluster data: %v", err)
+	}
+	eppRuntime, ok := payload["epp_runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("epp_runtime is not an object: %v", payload["epp_runtime"])
+	}
+	require.Equal(t, want, eppRuntime)
 }
 
 // ---------- certificates ----------

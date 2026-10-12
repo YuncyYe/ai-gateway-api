@@ -22,6 +22,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/icluster_conf"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClusterModel2Control(t *testing.T) {
@@ -139,4 +140,61 @@ func TestClusterModel2Control_EPPFields(t *testing.T) {
 	assert.JSONEq(t,
 		`{"load_profile":"balanced","kv_cache_utilization_max":0.9}`,
 		string(rsp.EppConfig))
+}
+
+func TestClusterModel2Control_EppRuntimeFields(t *testing.T) {
+	baseCluster := func() *icluster_conf.Cluster {
+		return &icluster_conf.Cluster{
+			Name: "epp-cluster",
+			Basic: &icluster_conf.ClusterBasic{
+				Protocol: lib.PString("https"),
+				Connection: &icluster_conf.ClusterBasicConnection{
+					MaxIdleConnPerRs:    0,
+					CancelOnClientClose: false,
+				},
+				Retries: &icluster_conf.ClusterBasicRetries{
+					MaxRetryInSubcluster: 2,
+				},
+				Buffers: &icluster_conf.ClusterBasicBuffers{
+					ReqWriteBufferSize: 512,
+				},
+				Timeouts: &icluster_conf.ClusterBasicTimeouts{
+					TimeoutConnServ:        50000,
+					TimeoutResponseHeader:  50000,
+					TimeoutReadbodyClient:  30000,
+					TimeoutReadClientAgain: 30000,
+					TimeoutWriteClient:     60000,
+				},
+			},
+			StickySessions: &icluster_conf.ClusterStickySessions{
+				SessionSticky: false,
+				HashStrategy:  icluster_conf.ClusterHashStrategyClientIPOnlyI,
+			},
+			BalanceMode: icluster_conf.BalanceModeEPP,
+			EppConfig:   `{"load_profile":"balanced"}`,
+		}
+	}
+
+	t.Run("stored epp_runtime echoed verbatim", func(t *testing.T) {
+		cluster := baseCluster()
+		cluster.EppRuntime = `{"check":{"check_interval":"5s"},"timeout":{"call":"4s"}}`
+		rsp := clusterModel2Control(cluster)
+		assert.JSONEq(t,
+			`{"check":{"check_interval":"5s"},"timeout":{"call":"4s"}}`,
+			string(rsp.EppRuntime))
+
+		data, err := json.Marshal(rsp)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"epp_runtime":{"check":{"check_interval":"5s"},"timeout":{"call":"4s"}}`)
+	})
+
+	t.Run("unset epp_runtime marshals as null", func(t *testing.T) {
+		cluster := baseCluster()
+		rsp := clusterModel2Control(cluster)
+		assert.Nil(t, rsp.EppRuntime)
+
+		data, err := json.Marshal(rsp)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"epp_runtime":null`)
+	})
 }
