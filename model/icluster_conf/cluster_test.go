@@ -420,6 +420,12 @@ func newTestClusterEPP() *Cluster {
 	return c
 }
 
+func newTestClusterEPPEppRuntime(runtimeJSON string) *Cluster {
+	c := newTestClusterEPP()
+	c.EppRuntime = runtimeJSON
+	return c
+}
+
 func newTestClusterDomain() *Cluster {
 	c := newTestClusterBase()
 	c.SubClusters[0].InstancePool.Instances[0].Addr = "example.com"
@@ -1151,6 +1157,85 @@ func TestNewBfeClusterConf(t *testing.T) {
 		assert.Equal(t, []string{"10.0.0.1:9002", "10.0.0.2:9002"}, *cConf.GslbBasic.EPPAddr)
 		require.NotNil(t, cConf.GslbBasic.BalanceMode)
 		assert.Equal(t, BalanceModeEPP, *cConf.GslbBasic.BalanceMode)
+	})
+
+	t.Run("EPP with epp_runtime exports check/timeout plus fixed TLS and breaker", func(t *testing.T) {
+		resolver := &fakeEPPAssignmentResolver{
+			endpointsFn: func(ctx context.Context, clusterName string) ([]string, bool, error) {
+				return []string{"10.0.0.1:9002", "10.0.0.2:9002"}, true, nil
+			},
+		}
+		cluster := newTestClusterEPPEppRuntime(`{"check":{"disabled":true,"check_interval":"5s","fail_threshold":4,"cooldown":"30s","success_threshold":3},"timeout":{"connect":"1s","call":"4s"}}`)
+		conf, err := NewBfeClusterConf(context.Background(), "v1", []*Cluster{cluster}, nil, nil, nil, nil, nil, resolver)
+		assert.NoError(t, err)
+		g := (*conf.Config)["c1"].GslbBasic
+
+		require.NotNil(t, g.EPPTLS)
+		assert.True(t, g.EPPTLS.Plaintext)
+		require.NotNil(t, g.EPPBreaker)
+		assert.True(t, g.EPPBreaker.Disabled)
+		require.NotNil(t, g.EPPCheck)
+		assert.True(t, g.EPPCheck.Disabled)
+		assert.Equal(t, "5s", *g.EPPCheck.CheckInterval)
+		assert.Equal(t, 4, *g.EPPCheck.FailThreshold)
+		assert.Equal(t, "30s", *g.EPPCheck.Cooldown)
+		assert.Equal(t, 3, *g.EPPCheck.SuccessThreshold)
+		require.NotNil(t, g.EPPTimeout)
+		assert.Equal(t, "1s", *g.EPPTimeout.Connect)
+		assert.Equal(t, "4s", *g.EPPTimeout.Call)
+	})
+
+	t.Run("EPP without epp_runtime exports only fixed TLS and breaker", func(t *testing.T) {
+		resolver := &fakeEPPAssignmentResolver{
+			endpointsFn: func(ctx context.Context, clusterName string) ([]string, bool, error) {
+				return []string{"10.0.0.1:9002", "10.0.0.2:9002"}, true, nil
+			},
+		}
+		conf, err := NewBfeClusterConf(context.Background(), "v1", []*Cluster{newTestClusterEPP()}, nil, nil, nil, nil, nil, resolver)
+		assert.NoError(t, err)
+		g := (*conf.Config)["c1"].GslbBasic
+
+		require.NotNil(t, g.EPPTLS)
+		assert.True(t, g.EPPTLS.Plaintext)
+		require.NotNil(t, g.EPPBreaker)
+		assert.True(t, g.EPPBreaker.Disabled)
+		assert.Nil(t, g.EPPCheck)
+		assert.Nil(t, g.EPPTimeout)
+	})
+
+	t.Run("EPP without assignment exports no EPP runtime fields", func(t *testing.T) {
+		resolver := &fakeEPPAssignmentResolver{
+			endpointsFn: func(ctx context.Context, clusterName string) ([]string, bool, error) {
+				return nil, false, nil
+			},
+		}
+		cluster := newTestClusterEPPEppRuntime(`{"timeout":{"connect":"1s"}}`)
+		conf, err := NewBfeClusterConf(context.Background(), "v1", []*Cluster{cluster}, nil, nil, nil, nil, nil, resolver)
+		assert.NoError(t, err)
+		g := (*conf.Config)["c1"].GslbBasic
+
+		require.NotNil(t, g.BalanceMode)
+		assert.Equal(t, BalanceModeWRR, *g.BalanceMode)
+		assert.Nil(t, g.EPPTLS)
+		assert.Nil(t, g.EPPCheck)
+		assert.Nil(t, g.EPPTimeout)
+		assert.Nil(t, g.EPPBreaker)
+	})
+
+	t.Run("WRR never exports EPP runtime fields", func(t *testing.T) {
+		resolver := &fakeEPPAssignmentResolver{
+			endpointsFn: func(ctx context.Context, clusterName string) ([]string, bool, error) {
+				return []string{"10.0.0.1:9002"}, true, nil
+			},
+		}
+		conf, err := NewBfeClusterConf(context.Background(), "v1", []*Cluster{newTestClusterBase()}, nil, nil, nil, nil, nil, resolver)
+		assert.NoError(t, err)
+		g := (*conf.Config)["c1"].GslbBasic
+
+		assert.Nil(t, g.EPPTLS)
+		assert.Nil(t, g.EPPCheck)
+		assert.Nil(t, g.EPPTimeout)
+		assert.Nil(t, g.EPPBreaker)
 	})
 
 	t.Run("EPP without assignment degrades to WRR", func(t *testing.T) {

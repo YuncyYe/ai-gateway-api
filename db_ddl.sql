@@ -90,6 +90,7 @@ CREATE TABLE `clusters` (
   `llm_config` text,
   `balance_mode` varchar(16) NOT NULL DEFAULT 'WRR' COMMENT '均衡模式：WRR/EPP',
   `epp_config` text COMMENT 'EPP调度配置（简化用户形态JSON）',
+  `epp_runtime` text COMMENT 'EPP运行时配置(JSON: check/timeout)',
   `created_at` datetime NOT NULL,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

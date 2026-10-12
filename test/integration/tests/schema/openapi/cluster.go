@@ -212,6 +212,38 @@ var EppConfigSchema = &testutil.ObjectSchema{
 	},
 }
 
+// EppRuntimeCheckSchema epp_runtime.check schema（clusters.md 表：EPP运行时配置）
+var EppRuntimeCheckSchema = &testutil.ObjectSchema{
+	Optional: []string{"disabled", "check_interval", "fail_threshold", "cooldown", "success_threshold"},
+	Fields: map[string]testutil.FieldSpec{
+		"disabled":          {Type: testutil.TypeBool},
+		"check_interval":    {Type: testutil.TypeString},
+		"fail_threshold":    {Type: testutil.TypeInt},
+		"cooldown":          {Type: testutil.TypeString},
+		"success_threshold": {Type: testutil.TypeInt},
+	},
+}
+
+// EppRuntimeTimeoutSchema epp_runtime.timeout schema（clusters.md 表：EPP运行时配置）
+var EppRuntimeTimeoutSchema = &testutil.ObjectSchema{
+	Optional: []string{"connect", "call"},
+	Fields: map[string]testutil.FieldSpec{
+		"connect": {Type: testutil.TypeString},
+		"call":    {Type: testutil.TypeString},
+	},
+}
+
+// EppRuntimeSchema 集群 epp_runtime（BFE 侧 EPP 运行时参数）schema。
+// 存储保留用户原始 JSON（未显式携带的字段不落盘），且 balance_mode=WRR 时可为
+// null（休眠保留），故全部可选。
+var EppRuntimeSchema = &testutil.ObjectSchema{
+	Optional: []string{"check", "timeout"},
+	Fields: map[string]testutil.FieldSpec{
+		"check":   {Type: testutil.TypeObject, Nested: EppRuntimeCheckSchema},
+		"timeout": {Type: testutil.TypeObject, Nested: EppRuntimeTimeoutSchema},
+	},
+}
+
 // ClusterSchema Cluster 数据模型 schema
 // 通过 /clusters 接口创建的集群 llm_config 必填。
 // balance_mode 必返回（缺省 WRR）；epp_config 未配置时为 null（Optional 允许 null）。
@@ -221,7 +253,7 @@ var ClusterSchema = &testutil.ObjectSchema{
 		"basic", "sticky_sessions", "passive_health_check",
 		"balance_mode",
 	},
-	Optional: []string{"epp_config"},
+	Optional: []string{"epp_config", "epp_runtime"},
 	Fields: map[string]testutil.FieldSpec{
 		"name":                 {Type: testutil.TypeString},
 		"description":          {Type: testutil.TypeString},
@@ -231,5 +263,6 @@ var ClusterSchema = &testutil.ObjectSchema{
 		"llm_config":           {Type: testutil.TypeObject, Nested: LLMConfigSchema},
 		"balance_mode":         {Type: testutil.TypeString, Enum: []interface{}{"WRR", "EPP"}},
 		"epp_config":           {Type: testutil.TypeObject, Nested: EppConfigSchema},
+		"epp_runtime":          {Type: testutil.TypeObject, Nested: EppRuntimeSchema},
 	},
 }

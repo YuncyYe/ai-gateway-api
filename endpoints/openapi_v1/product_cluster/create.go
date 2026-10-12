@@ -61,6 +61,7 @@ type UpsertParam struct {
 	LLMConfig          *icluster_conf.LLMConfig `json:"llm_config"`
 	BalanceMode        *string                  `json:"balance_mode"`
 	EppConfig          *json.RawMessage         `json:"epp_config"`
+	EppRuntime         *json.RawMessage         `json:"epp_runtime"`
 }
 
 // ConnectionParam Request Param
@@ -248,6 +249,7 @@ func clusterParamControlModel(param *UpsertParam) *icluster_conf.ClusterParam {
 		LLMConfig:   normalizeLLMConfig(param.LLMConfig),
 		BalanceMode: param.BalanceMode,
 		EppConfig:   normalizeEppConfigRaw(param.EppConfig),
+		EppRuntime:  normalizeEppRuntimeRaw(param.EppRuntime),
 	}
 
 	basic := normalizeBasic(param.Basic)
@@ -400,6 +402,22 @@ func normalizePassiveHealthCheck(phc *PassiveHealthCheckParam) *PassiveHealthChe
 // JSON string pointer expected by the model layer. Absent or explicit null
 // stays nil (field not carried, stored value retained on update).
 func normalizeEppConfigRaw(raw *json.RawMessage) *string {
+	if raw == nil {
+		return nil
+	}
+	s := strings.TrimSpace(string(*raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	return &s
+}
+
+// normalizeEppRuntimeRaw converts the raw epp_runtime JSON body into the raw
+// JSON string pointer expected by the model layer. Absent or explicit null
+// stays nil (field not carried, stored value retained on update). Field-level
+// validation is performed by the model layer (validateClusterEppRuntime),
+// mirroring epp_config.
+func normalizeEppRuntimeRaw(raw *json.RawMessage) *string {
 	if raw == nil {
 		return nil
 	}

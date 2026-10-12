@@ -101,6 +101,11 @@ func clusterParamToMap(param *ClusterParam) map[string]interface{} {
 			m["epp_config"] = v
 		}
 	}
+	if param.EppRuntime != nil {
+		if v := eppRuntimeSnapshotValue(*param.EppRuntime); v != nil {
+			m["epp_runtime"] = v
+		}
+	}
 	return m
 }
 
@@ -131,6 +136,9 @@ func clusterToMap(cluster *Cluster) map[string]interface{} {
 	}
 	if v := eppConfigSnapshotValue(cluster.EppConfig); v != nil {
 		m["epp_config"] = v
+	}
+	if v := eppRuntimeSnapshotValue(cluster.EppRuntime); v != nil {
+		m["epp_runtime"] = v
 	}
 	return m
 }
@@ -329,6 +337,22 @@ func clusterPassiveHealthCheckToSnapshot(p *ClusterPassiveHealthCheck) map[strin
 // recurses map[string]interface{}/[]interface{} only, and embedding Go
 // structs or json.RawMessage would escape the masking pass.
 func eppConfigSnapshotValue(raw string) interface{} {
+	if raw == "" {
+		return nil
+	}
+
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	return v
+}
+
+// eppRuntimeSnapshotValue decodes the stored raw epp_runtime JSON into a plain
+// JSON value so the snapshot matches the API representation (GET /clusters
+// echoes epp_runtime as an object). Unset configs are omitted. Same masking
+// constraint as eppConfigSnapshotValue: values must stay plain JSON types.
+func eppRuntimeSnapshotValue(raw string) interface{} {
 	if raw == "" {
 		return nil
 	}

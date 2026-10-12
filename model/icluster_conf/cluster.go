@@ -154,6 +154,10 @@ type ClusterParam struct {
 	// configuration (user shape, unset keys not persisted). Non-empty values
 	// are validated regardless of BalanceMode; required when BalanceMode=EPP.
 	EppConfig *string
+	// EppRuntime is the raw JSON of the BFE-side EPP runtime parameters
+	// (check/timeout, unset keys not persisted). Non-empty values are validated
+	// regardless of BalanceMode; only exported when BalanceMode=EPP.
+	EppRuntime *string
 
 	// InstancePool auto-creates instance-pool and sub-cluster from these instances
 	InstancePool []Instance
@@ -315,6 +319,9 @@ type Cluster struct {
 	// EppConfig is the raw JSON of the simplified EPP scheduling configuration
 	// (empty means unset). Stored verbatim so GET round-trips the written value.
 	EppConfig string
+	// EppRuntime is the raw JSON of the BFE-side EPP runtime parameters
+	// (empty means unset). Stored verbatim so GET round-trips the written value.
+	EppRuntime string
 }
 
 func (cluster *Cluster) SubClusterNames() []string {
@@ -452,6 +459,16 @@ func (cm *ClusterManager) CreateCluster(ctx context.Context, product *ibasic.Pro
 	}
 	if param.EppConfig != nil {
 		*param.EppConfig = eppConfigRaw
+	}
+
+	eppRuntimeRaw, err := validateClusterEppRuntime(param.EppRuntime)
+	if err != nil {
+		return err
+	}
+	if eppRuntimeRaw == nil {
+		param.EppRuntime = nil
+	} else if param.EppRuntime != nil {
+		*param.EppRuntime = *eppRuntimeRaw
 	}
 
 	var clusterID int64
@@ -780,6 +797,17 @@ func (cm *ClusterManager) UpdateCluster(ctx context.Context, product *ibasic.Pro
 	}
 	if param.EppConfig != nil {
 		*param.EppConfig = eppConfigRaw
+	}
+
+	eppRuntimeRaw, err := validateClusterEppRuntime(param.EppRuntime)
+	if err != nil {
+		cm.recordClusterOperation(ctx, string(ioperlog.ActionUpdate), oldData.ID, oldData.Name, clusterToMap(oldData), clusterParamToMap(param), err)
+		return err
+	}
+	if eppRuntimeRaw == nil {
+		param.EppRuntime = nil
+	} else if param.EppRuntime != nil {
+		*param.EppRuntime = *eppRuntimeRaw
 	}
 
 	err = cm.txn.AtomExecute(ctx, func(ctx context.Context) error {
@@ -1304,6 +1332,36 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 			if addrs, ok := fetchEPPAssignmentAddrs(ctx, eppResolver, cluster.Name); ok {
 				clusterConf.GslbBasic.BalanceMode = lib.PString(BalanceModeEPP)
 				clusterConf.GslbBasic.EPPAddr = &addrs
+
+				// EPPTLS is fixed to plaintext and EPPBreaker is fixed disabled;
+				// neither is user-configurable (design-changes.md §5). They are
+				// emitted for every EPP cluster so BFE no longer falls back to the
+				// legacy insecure default.
+				clusterConf.GslbBasic.EPPTLS = &cluster_conf.EPPTLSConf{Plaintext: true}
+				clusterConf.GslbBasic.EPPBreaker = &cluster_conf.EPPBreakerConf{Disabled: true}
+
+				// check/timeout are exported only when epp_runtime is stored;
+				// otherwise they stay nil and BFE applies the same defaults at
+				// load time.
+				if cluster.EppRuntime != "" {
+					if rt, err := ParseEppRuntime(cluster.EppRuntime); err == nil && rt != nil {
+						if c := rt.Check; c != nil {
+							clusterConf.GslbBasic.EPPCheck = &cluster_conf.EPPCheckConf{
+								Disabled:         boolPtrValue(c.Disabled),
+								CheckInterval:    c.CheckInterval,
+								FailThreshold:    c.FailThreshold,
+								Cooldown:         c.Cooldown,
+								SuccessThreshold: c.SuccessThreshold,
+							}
+						}
+						if t := rt.Timeout; t != nil {
+							clusterConf.GslbBasic.EPPTimeout = &cluster_conf.EPPTimeoutConf{
+								Connect: t.Connect,
+								Call:    t.Call,
+							}
+						}
+					}
+				}
 			} else {
 				clusterConf.GslbBasic.BalanceMode = lib.PString(BalanceModeWRR)
 			}

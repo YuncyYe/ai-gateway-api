@@ -14,7 +14,9 @@
 
 1. 获取 API Server 可执行程序，参考 [部署说明](./deploy.md)
 2. 替换 ai-gateway-api 的可执行程序
-3. mysql 数据库表结构更新（ai-cache 语义缓存二期：规则加列 + 语义全局设置表单行表）
+3. mysql 数据库表结构更新
+
+> 完整的 v0.0.10 → v0.0.11 增量升级脚本见 `database/db_ddl_upgrade_to_0.0.11.sql`（覆盖 EPP runtime、api_key_hash、k8s 实例池、批量任务、ai-cache/context/mirror/intent 等全部 schema 变更；`api_key_hash` 回填等手动步骤见脚本末尾）。新装库请直接执行 `db_ddl.sql`。下面仅以 ai-cache 语义缓存二期为例给出存量加列语句。
 
 ```
 ALTER TABLE ai_cache_rules ADD COLUMN `enable_semantic_cache` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否启用语义缓存: 0-否, 1-是（二期）';

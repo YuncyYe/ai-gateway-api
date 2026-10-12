@@ -109,6 +109,10 @@ type ClusterData struct {
 	// scheduling configuration, returned verbatim (null when never set;
 	// retained verbatim while dormant under WRR).
 	EppConfig json.RawMessage `json:"epp_config"`
+	// EppRuntime is the raw stored JSON of the BFE-side EPP runtime parameters
+	// (check/timeout), returned verbatim (null when never set; retained
+	// verbatim while dormant under WRR).
+	EppRuntime json.RawMessage `json:"epp_runtime"`
 }
 
 type AutoLbMatrix struct {
@@ -165,6 +169,9 @@ func clusterModel2Control(cluster *icluster_conf.Cluster) *ClusterData {
 	}
 	if cluster.EppConfig != "" {
 		rsp.EppConfig = json.RawMessage(cluster.EppConfig)
+	}
+	if cluster.EppRuntime != "" {
+		rsp.EppRuntime = json.RawMessage(cluster.EppRuntime)
 	}
 
 	return rsp
