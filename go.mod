@@ -80,6 +80,6 @@ require (
 	modernc.org/sqlite v1.23.1 // indirect
 )
 
-replace github.com/bfenetworks/bfe => github.com/mileszhang2016/bfe v1.4.1-0.20261006053058-d12472ad13a3
+replace github.com/bfenetworks/bfe => github.com/mileszhang2016/bfe v1.4.1-0.20261014135930-831135f2bfa5
 
 // 本地联调时可临时切换：replace github.com/bfenetworks/bfe => ../bfe

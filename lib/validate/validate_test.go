@@ -331,10 +331,15 @@ func TestConditionExpression(t *testing.T) {
 		{"req_body_larger_than", "req_body_larger_than(8192)", false},
 		{"req_body_less_than", "req_body_less_than(2048)", false},
 		{"req_body_combined", "req_host_in(\"api.example.com\") && req_body_larger_than(8192)", false},
+		{"weekday_in with zone", "time_weekday_in(\"0|6\", \"H\")", false},
+		{"weekday_in default zone", "time_weekday_in(\"1\")", false},
+		{"weekday_in combined", "time_weekday_in(\"0|6\", \"H\") && bfe_periodic_time_range(\"090000H\", \"180000H\", \"\")", false},
 		{"missing quotes", "req_path_in(/v1, false)", true},
 		{"unknown function", "unknown_func()", true},
 		{"unmatched parenthesis", "default_t(", true},
 		{"empty string", "", true},
+		{"weekday_in invalid weekday", "time_weekday_in(\"7\")", true},
+		{"weekday_in invalid zone", "time_weekday_in(\"0\", \"QQ\")", true},
 	}
 
 	for _, tc := range cases {
