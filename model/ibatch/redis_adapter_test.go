@@ -36,6 +36,9 @@ func (f *fakeRawRedisClient) Setex(key string, value []byte, expire int) error {
 	return nil
 }
 func (f *fakeRawRedisClient) Get(key string) (interface{}, error) { return nil, nil }
+func (f *fakeRawRedisClient) HGetAll(key string) (map[string]string, error) {
+	return nil, nil
+}
 func (f *fakeRawRedisClient) Expire(key string, expire int) error { return nil }
 func (f *fakeRawRedisClient) Incr(key string) (int64, error)      { return 0, nil }
 func (f *fakeRawRedisClient) IncrAndExpire(key string, expire int) (int64, error) {

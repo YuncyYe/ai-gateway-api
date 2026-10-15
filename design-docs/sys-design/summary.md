@@ -44,6 +44,7 @@
 | 部分更新语义与 DAO 的 nil-skip 约定 | [details/部分更新语义与DAO-nil-skip约定.md](./details/部分更新语义与DAO-nil-skip约定.md) | 描述 PATCH"仅传需修改字段"契约的实现机制（DAO `struct2map` nil-skip）与 storager 层约束（不得把省略抹平为默认值）；各资源省略字段行为对照表（API-Key `models`/`subnet`、Entity `allow_models`/`block_models`、Provider 五字段）；Create/PATCH 默认值语义差异与"显式空数组不区分"的已知限制（issue #151、#147）。 |
 | 规则文件顶层全局块的合并导出模式 | [details/规则文件顶层全局块的合并导出模式.md](./details/规则文件顶层全局块的合并导出模式.md) | 沉淀 ai-cache `Semantic` 块与 ai-context `Defaults` 块两个落地实例，固化"单例设置表 + 生成器合并顶层键恒导出"模式：否决 imods 独立 topic 的三条理由、空表=默认（不预置默认行）、设置变更驱动 MD5 版本流、连接配置经 CopyFiles 不下发、二期字段前向兼容前提（数据面未知字段容忍），以及新模块复用清单与不适用边界。 |
 | 批量任务与对账 | [details/批量任务与对账.md](./details/批量任务与对账.md) | 描述批量与异步任务支持（一期）的控制面机制：`batch_tasks` / `batch_files` 实体与 OpenAI 状态机、Redis `BATCH_*` 五类键结构与 TTL、预留-结算-释放三态金额语义（1e-8 定点 RMB、允许透支 + `over_reserved`）、对账 job 五职责（Redis SCAN 同步、状态推进、兜底结算、对账巡检与日志补登、TTL 清理）、cancel 五步流程与两把幂等锁竞态收敛、多实例协调（named lock / 条件更新 / Redis Lua）、与报表后端解耦的理由（`[Report].Backend` 可插拔）及不出网部署的降级路径。 |
+| 条件原语校验与 BFE 依赖版本对齐 | [details/条件原语校验与BFE依赖版本对齐.md](./details/条件原语校验与BFE依赖版本对齐.md) | 描述控制面条件表达式校验的"无白名单"机制（编译交由 BFE `bfe_basic/condition`，避免两处原语清单漂移）：3 类编译入口清单（6 处调用点）、`replace` 指向 fork 提交的版本对齐口径（伪版本计算、新提交的 sumdb 404 与 `GOPRIVATE` 绕过、go.sum 写入后即稳定）、一次 bump 拖入接口漂移的实例（`redis_client.Client.HGetAll` 与 ibatch mock 的配套）、上线顺序与时区类原语的 UTC 缺省提醒、新增条件原语的 checklist。 |
 
 ---
 
