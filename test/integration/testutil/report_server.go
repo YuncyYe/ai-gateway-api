@@ -139,6 +139,7 @@ DBName = "%s"
 Addr = "%s"
 User = "%s"
 Passwd = %s
+Net = "tcp"
 MaxOpenConns = 10
 MaxIdleConns = 5
 
