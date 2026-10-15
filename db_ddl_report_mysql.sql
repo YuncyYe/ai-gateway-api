@@ -33,6 +33,26 @@
 --     ADD COLUMN mirror_hit TINYINT NOT NULL DEFAULT 0 AFTER ai_cache_status,
 --     ADD COLUMN ai_intent_answer VARCHAR(64) NOT NULL DEFAULT '' AFTER mirror_hit;
 --
+-- 存量表迁移（2026-10-13，issue #1417：幂等键补 logid，需重建唯一键）：
+--   ALTER TABLE bfe_ai_request_log
+--     MODIFY COLUMN logid BIGINT NOT NULL DEFAULT 0,
+--     DROP KEY uk_dedup,
+--     ADD UNIQUE KEY uk_dedup (hostid, log_time, ai_apikey_id, ai_requested_model, logid);
+--   说明：
+--     1) logid 由可空收紧为 NOT NULL DEFAULT 0——唯一键视 NULL 互不相等，可空会让缺
+--        id 的行逃出全部去重（同一行重放插入重复行），DEFAULT 0 与旧四元组覆盖行为等价；
+--     2) 迁移前统计并【回填】NULL 行：
+--        SELECT COUNT(*) FROM bfe_ai_request_log WHERE logid IS NULL;
+--        若 >0，必须先 UPDATE bfe_ai_request_log SET logid = 0 WHERE logid IS NULL;
+--        ——MySQL 默认严格模式下 MODIFY ... NOT NULL 遇到 NULL 行会直接报 Error 1138
+--        （Invalid use of NULL value；实测于 MySQL 8.4.9），不会静默补 0；失败是原子的，
+--        键与列属性保持原样（fail-fast，不留半成品）；
+--     3) 本表按天 RANGE 分区，唯一键必须包含分区列 log_time（新键已包含）；
+--     4) 建议低峰窗口执行：仓库内无在线 DDL 先例，先在实际版本的预发库量测耗时，
+--        必要时用 pt-online-schema-change；回滚为 DROP/ADD 回四列 uk；
+--     5) 生效前提：bfe 侧已修复 pb logid 恒 0（bfenetworks/bfe#1417），否则新行 logid 仍为 0；
+--        迁移后校验见 design-docs/modifications/2026-10-13-issue-1417-report-detail-dedup-key-logid/design-changes.md §5.3。
+--
 -- 账号权限（最小权限原则，详见报表库设计文档 §5）：
 --   - 写入账号（log-reader）：明细表 INSERT/UPDATE，无 DDL/DELETE；
 --   - 查询/维护账号（ai-gateway-api）：明细表/聚合表 SELECT、聚合表 INSERT/DELETE、
@@ -60,7 +80,10 @@ CREATE TABLE IF NOT EXISTS bfe_ai_request_log (
     log_time                DATETIME      NOT NULL,
     ai_apikey_id            VARCHAR(256)  DEFAULT NULL,
     ai_requested_model      VARCHAR(128)  DEFAULT NULL,
-    logid                   BIGINT        DEFAULT NULL,
+    -- logid：BFE 逐请求唯一标识（bfe#1417 起为非 0 十进制值）。
+    -- NOT NULL DEFAULT 0 而非可空：唯一键视 NULL 互不相等，可空会让缺 id 的行
+    -- 逃出全部去重（同一行重放插入重复行）；DEFAULT 0 与旧四元组覆盖行为逐行等价。
+    logid                   BIGINT        NOT NULL DEFAULT 0,
     product                 VARCHAR(64)   DEFAULT NULL,
     log_tag                 VARCHAR(64)   DEFAULT NULL,
     -- 客户端连接
@@ -167,10 +190,12 @@ CREATE TABLE IF NOT EXISTS bfe_ai_request_log (
     ai_intent_latency_us    BIGINT        DEFAULT NULL,
     ai_intent_cache_hit     TINYINT       DEFAULT NULL,
     ai_intent_questions_version VARCHAR(32) NOT NULL DEFAULT '',
-    -- 幂等键：与 Doris UNIQUE KEY 一致，log-reader 重发/-b 补读安全；
-    -- 唯一键长度 (256+256+128)*4+5 ≈ 2565 字节 < 3072 InnoDB 上限，无需前缀索引；
+    -- 幂等键：请求级判别列 logid 入键后，同秒同 Key 同模型的并发请求各自成行；
+    -- 只有同一请求重放（同 logid）才命中覆盖，重发/-b 补读仍幂等（issue #1417）。
+    -- 键长 (256+256+128)*4 + 长度字节 + 5(log_time) + 8(BIGINT) ≈ 2579 字节 < 3072
+    -- InnoDB 上限（DYNAMIC 行格式），无需前缀索引；
     -- 唯一键包含分区列 log_time（MySQL 分区表约束）
-    UNIQUE KEY uk_dedup (hostid, log_time, ai_apikey_id, ai_requested_model),
+    UNIQUE KEY uk_dedup (hostid, log_time, ai_apikey_id, ai_requested_model, logid),
     -- 索引服务于报表查询过滤维度：模型/API Key/提供商/Host/状态码 + 时间
     KEY idx_model_time (ai_target_model, log_time),
     KEY idx_apikey_time (ai_apikey_id, log_time),
