@@ -25,10 +25,10 @@ import (
 // epp_data export (epp_config + assignment, see design-changes.md §3).
 const ConfigTopicEppData = "epp_data"
 
-// AssignmentEntry is one cluster entry of the exported assignment section.
+// AssignmentEntry is one cluster entry of the exported assignment section:
+// the cluster to assigned-group mapping.
 type AssignmentEntry struct {
-	Primary string  `json:"primary"`
-	Standby *string `json:"standby"`
+	Group string `json:"group"`
 }
 
 // EppDataConfig is the Config body of the epp_data export.
@@ -92,17 +92,12 @@ func (m *EppPoolManager) EppDataGenerator(ctx context.Context) (*iversion_contro
 
 	view := buildAssignmentsView(pool, eppClusters, assignments)
 	for _, entry := range view.Clusters {
-		if entry.Primary == nil {
-			// Unassigned or degraded: no assignment entry (EPP side alarms locally).
+		if entry.Group == nil {
+			// Unassigned or dangling: no assignment entry (EPP side alarms locally).
 			continue
 		}
 
-		assignmentEntry := &AssignmentEntry{Primary: entry.Primary.ID}
-		if entry.Standby != nil {
-			standbyID := entry.Standby.ID
-			assignmentEntry.Standby = &standbyID
-		}
-		conf.Assignment[entry.Cluster] = assignmentEntry
+		conf.Assignment[entry.Cluster] = &AssignmentEntry{Group: *entry.Group}
 	}
 
 	rst := &ExportEppDataConfig{Config: conf}

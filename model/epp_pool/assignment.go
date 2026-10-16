@@ -23,8 +23,8 @@ import (
 
 // AssignCluster assigns an EPP instance group to the cluster. It is idempotent:
 // if a valid assignment already exists it is a no-op; otherwise the greedy
-// deterministic allocator (design-changes.md §4.2.2) picks a group and a
-// primary and upserts the assignment. It is called when a cluster is created
+// deterministic allocator (design-changes.md §4.2.2) picks a group and
+// upserts the assignment. It is called when a cluster is created
 // with balance_mode=EPP or switched from WRR to EPP.
 func (m *EppPoolManager) AssignCluster(ctx context.Context, clusterName string) error {
 	if clusterName == "" {
@@ -49,11 +49,11 @@ func (m *EppPoolManager) AssignCluster(ctx context.Context, clusterName string) 
 	return m.allocateAndUpsert(ctx, pool, assignments, clusterName)
 }
 
-// GetAssignmentEndpoints returns the ordered endpoint addresses of the
-// cluster's assignment as [primary, standby] (standby omitted for single
-// instance groups), joined by net.JoinHostPort. found is false when the
-// cluster has no valid assignment (no record or dangling); storager errors
-// are propagated. It is the read path behind the EPPAddr export
+// GetAssignmentEndpoints returns the endpoint addresses of the cluster's
+// assigned group (a single address in the current single-instance stage),
+// joined by net.JoinHostPort. found is false when the cluster has no valid
+// assignment (no record or the assigned group is gone/empty); storager
+// errors are propagated. It is the read path behind the EPPAddr export
 // (design-changes.md §4.3).
 func (m *EppPoolManager) GetAssignmentEndpoints(ctx context.Context, clusterName string) ([]string, bool, error) {
 	if clusterName == "" {
@@ -77,18 +77,13 @@ func (m *EppPoolManager) GetAssignmentEndpoints(ctx context.Context, clusterName
 	}
 
 	group := findGroup(pool, assignment.GroupName)
-	if group == nil {
+	if group == nil || len(group.Instances) == 0 {
 		return nil, false, nil
 	}
 
-	primary, standby := expandPrimaryAndStandby(group.Instances, assignment.PrimaryInstanceID)
-	if primary == nil {
-		return nil, false, nil
-	}
-
-	endpoints := []string{instanceAddress(primary.Host, primary.Port)}
-	if standby != nil {
-		endpoints = append(endpoints, instanceAddress(standby.Host, standby.Port))
+	endpoints := make([]string, 0, len(group.Instances))
+	for _, inst := range group.Instances {
+		endpoints = append(endpoints, instanceAddress(inst.Host, inst.Port))
 	}
 
 	return endpoints, true, nil
@@ -134,9 +129,7 @@ func (m *EppPoolManager) allocateAndUpsert(ctx context.Context, pool *EppPool, a
 
 // RepairDangling repairs assignments that became dangling after an
 // /epp-pool change (design-changes.md §4.2.1):
-//   - group still exists -> reselect the primary within the same group
-//     (no group change);
-//   - group gone -> cross-group reallocation (greedy);
+//   - assigned group gone or empty -> cross-group reallocation (greedy);
 //   - no candidate group left -> clear the assignment (unassigned state).
 func (m *EppPoolManager) RepairDangling(ctx context.Context) error {
 	instances, err := m.storager.FetchInstanceList(ctx, &InstanceFilter{})
@@ -159,7 +152,7 @@ func (m *EppPoolManager) RepairDangling(ctx context.Context) error {
 		switch action {
 		case repairKeep:
 			continue
-		case repairReselectSameGroup, repairReallocate:
+		case repairReallocate:
 			if err := m.txn.AtomExecute(ctx, func(ctx context.Context) error {
 				return m.storager.UpsertAssignment(ctx, repaired)
 			}); err != nil {
@@ -236,17 +229,14 @@ func (m *EppPoolManager) Reconcile(ctx context.Context) error {
 
 // OverrideAssignment manually overrides the assignment of one cluster
 // (operations fallback). The cluster must exist and be in EPP mode, the
-// group must exist in the pool and the primary instance must belong to that
-// group. The epp_data export is triggered after a successful upsert.
-func (m *EppPoolManager) OverrideAssignment(ctx context.Context, clusterName, groupName, primaryInstanceID string) (*ClusterAssignmentView, error) {
+// group must exist in the pool and be non-empty. The epp_data export is
+// triggered after a successful upsert.
+func (m *EppPoolManager) OverrideAssignment(ctx context.Context, clusterName, groupName string) (*ClusterAssignmentView, error) {
 	if clusterName == "" {
 		return nil, xerror.WrapParamErrorWithMsg("cluster name is empty")
 	}
 	if groupName == "" {
 		return nil, xerror.WrapParamErrorWithMsg("group_name is empty")
-	}
-	if primaryInstanceID == "" {
-		return nil, xerror.WrapParamErrorWithMsg("primary_instance_id is empty")
 	}
 
 	if m.clusterSource == nil {
@@ -272,25 +262,13 @@ func (m *EppPoolManager) OverrideAssignment(ctx context.Context, clusterName, gr
 		return nil, err
 	}
 	if len(instances) == 0 {
-		return nil, xerror.WrapParamErrorWithMsg("epp pool group %q does not exist", groupName)
-	}
-
-	found := false
-	for _, inst := range instances {
-		if inst.ID == primaryInstanceID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, xerror.WrapParamErrorWithMsg("primary_instance_id %q does not exist in group %q", primaryInstanceID, groupName)
+		return nil, xerror.WrapParamErrorWithMsg("epp pool group %q does not exist or is empty", groupName)
 	}
 
 	err = m.txn.AtomExecute(ctx, func(ctx context.Context) error {
 		return m.storager.UpsertAssignment(ctx, &AssignmentParam{
-			Cluster:           clusterName,
-			GroupName:         groupName,
-			PrimaryInstanceID: primaryInstanceID,
+			Cluster:   clusterName,
+			GroupName: groupName,
 		})
 	})
 	if err != nil {
@@ -302,18 +280,16 @@ func (m *EppPoolManager) OverrideAssignment(ctx context.Context, clusterName, gr
 	return m.GetAssignmentView(ctx, clusterName)
 }
 
-// ClusterAssignmentView is the per-cluster expanded assignment view
-// (api-changes.md §3.3.1).
+// ClusterAssignmentView is the per-cluster assignment view (api-changes.md
+// §3.3.1): the cluster name and its assigned group. Only validly assigned
+// clusters appear in the view.
 type ClusterAssignmentView struct {
-	Cluster  string         `json:"cluster"`
-	Group    *string        `json:"group"`
-	Primary  *InstanceParam `json:"primary"`
-	Standby  *InstanceParam `json:"standby"`
-	Degraded bool           `json:"degraded"`
+	Cluster string  `json:"cluster"`
+	Group   *string `json:"group"`
 }
 
-// AssignmentsView is the full assignment view: per-cluster expansion plus
-// the unassigned cluster list and the idle group list.
+// AssignmentsView is the full assignment view: valid per-cluster assignments
+// plus the unassigned cluster list and the idle group list.
 type AssignmentsView struct {
 	Clusters           []*ClusterAssignmentView `json:"clusters"`
 	UnassignedClusters []string                 `json:"unassigned_clusters"`
@@ -322,9 +298,9 @@ type AssignmentsView struct {
 
 // GetAssignmentsView builds the full assignment view (read-time join of
 // epp_assignments and epp_instances). Only balance_mode=EPP clusters are in
-// scope; EPP clusters without a valid assignment are listed in
-// UnassignedClusters and entries pointing to a removed instance/group are
-// marked Degraded.
+// scope; an assignment is valid when its group exists in the pool and is
+// non-empty, otherwise the cluster is listed in UnassignedClusters (the
+// periodic reconciler repairs dangling assignments).
 func (m *EppPoolManager) GetAssignmentsView(ctx context.Context) (*AssignmentsView, error) {
 	if m.clusterSource == nil {
 		return nil, xerror.WrapModelErrorWithMsg("epp pool: cluster source is not configured")
@@ -368,9 +344,9 @@ func (m *EppPoolManager) GetAssignmentView(ctx context.Context, clusterName stri
 
 // buildAssignmentsView is the pure view builder shared by manager methods and tests.
 func buildAssignmentsView(pool *EppPool, eppClusters []*EPPClusterInfo, assignments []*AssignmentParam) *AssignmentsView {
-	groupMap := map[string][]*InstanceParam{}
+	groupMap := map[string]*InstanceGroup{}
 	for _, group := range pool.Groups {
-		groupMap[group.Name] = group.Instances
+		groupMap[group.Name] = group
 	}
 
 	assignmentMap := map[string]*AssignmentParam{}
@@ -385,32 +361,24 @@ func buildAssignmentsView(pool *EppPool, eppClusters []*EPPClusterInfo, assignme
 	}
 
 	occupiedGroups := map[string]bool{}
-	validAssignedClusters := map[string]bool{}
 
 	sort.Slice(eppClusters, func(i, j int) bool { return eppClusters[i].Name < eppClusters[j].Name })
 	for _, cluster := range eppClusters {
-		entry := &ClusterAssignmentView{Cluster: cluster.Name}
-
 		assignment := assignmentMap[cluster.Name]
 		if assignment != nil {
-			groupName := assignment.GroupName
-			primary, standby := expandPrimaryAndStandby(groupMap[groupName], assignment.PrimaryInstanceID)
-			if primary != nil {
-				entry.Group = &groupName
-				entry.Primary = primary
-				entry.Standby = standby
+			if group := groupMap[assignment.GroupName]; group != nil && len(group.Instances) > 0 {
+				groupName := assignment.GroupName
+				view.Clusters = append(view.Clusters, &ClusterAssignmentView{
+					Cluster: cluster.Name,
+					Group:   &groupName,
+				})
 				occupiedGroups[groupName] = true
-				validAssignedClusters[cluster.Name] = true
-			} else {
-				// Assignment dangles: primary removed from the pool.
-				entry.Degraded = true
+				continue
 			}
 		}
 
-		view.Clusters = append(view.Clusters, entry)
-		if !validAssignedClusters[cluster.Name] {
-			view.UnassignedClusters = append(view.UnassignedClusters, cluster.Name)
-		}
+		// Unassigned or dangling assignment (group removed/empty).
+		view.UnassignedClusters = append(view.UnassignedClusters, cluster.Name)
 	}
 
 	for _, group := range pool.Groups {
@@ -423,25 +391,8 @@ func buildAssignmentsView(pool *EppPool, eppClusters []*EPPClusterInfo, assignme
 	return view
 }
 
-// expandPrimaryAndStandby resolves the primary instance and the standby
-// (first other instance of the group by id order). Nil primary means the
-// assigned instance is not in the pool anymore.
-func expandPrimaryAndStandby(instances []*InstanceParam, primaryID string) (*InstanceParam, *InstanceParam) {
-	var primary, standby *InstanceParam
-	for _, inst := range instances {
-		if inst.ID == primaryID {
-			primary = inst
-			continue
-		}
-		if standby == nil {
-			standby = inst
-		}
-	}
-	return primary, standby
-}
-
 // findValidAssignment returns the assignment of the cluster if it exists and
-// its primary instance is still present in the assigned group.
+// its assigned group is still present and non-empty in the pool.
 func findValidAssignment(pool *EppPool, assignments []*AssignmentParam, clusterName string) *AssignmentParam {
 	groupMap := map[string]*InstanceGroup{}
 	for _, group := range pool.Groups {
@@ -453,14 +404,10 @@ func findValidAssignment(pool *EppPool, assignments []*AssignmentParam, clusterN
 			continue
 		}
 		group := groupMap[assignment.GroupName]
-		if group == nil {
+		if group == nil || len(group.Instances) == 0 {
 			return nil
 		}
-		primary, _ := expandPrimaryAndStandby(group.Instances, assignment.PrimaryInstanceID)
-		if primary != nil {
-			return assignment
-		}
-		return nil
+		return assignment
 	}
 
 	return nil
@@ -470,32 +417,18 @@ type repairAction int
 
 const (
 	repairKeep repairAction = iota
-	repairReselectSameGroup
 	repairReallocate
 	repairClear
 )
 
 // repairOne decides the repair action for one dangling-or-valid assignment.
-// A valid assignment maps to repairKeep.
+// A valid assignment maps to repairKeep; a dangling one is cross-group
+// reallocated, or cleared when no candidate group remains.
 func repairOne(pool *EppPool, assignments []*AssignmentParam, assignment *AssignmentParam) (*AssignmentParam, repairAction) {
 	if findValidAssignment(pool, assignments, assignment.Cluster) != nil {
 		return assignment, repairKeep
 	}
 
-	group := findGroup(pool, assignment.GroupName)
-	if group != nil {
-		// Group still exists: reselect the primary within the same group.
-		primary := selectPrimaryInGroup(group.Instances, assignments)
-		if primary != nil {
-			return &AssignmentParam{
-				Cluster:           assignment.Cluster,
-				GroupName:         group.Name,
-				PrimaryInstanceID: primary.ID,
-			}, repairReselectSameGroup
-		}
-	}
-
-	// Group gone: cross-group reallocation; clear if impossible.
 	reallocated, err := allocateCluster(pool, assignments, assignment.Cluster)
 	if err != nil {
 		return nil, repairClear
@@ -504,89 +437,51 @@ func repairOne(pool *EppPool, assignments []*AssignmentParam, assignment *Assign
 }
 
 // allocateCluster implements the greedy deterministic allocator
-// (design-changes.md §4.2.2).
+// (design-changes.md §4.2.2). The allocation granularity is the group: it
+// selects the group with the smallest assignment load, tie-break by group
+// name.
 func allocateCluster(pool *EppPool, assignments []*AssignmentParam, clusterName string) (*AssignmentParam, error) {
 	candidates := candidateGroups(pool)
 	if len(candidates) == 0 {
 		return nil, xerror.WrapModelErrorWithMsg("epp pool has no assignable instance group")
 	}
 
-	primaryCount := countPrimaries(assignments)
+	loads := countGroupAssignments(assignments)
 
 	// Select the group with the smallest load; tie-break by group name.
 	selected := candidates[0]
-	selectedLoad := groupLoad(selected, primaryCount)
+	selectedLoad := loads[selected.Name]
 	for _, group := range candidates[1:] {
-		load := groupLoad(group, primaryCount)
+		load := loads[group.Name]
 		if load < selectedLoad || (load == selectedLoad && group.Name < selected.Name) {
 			selected = group
 			selectedLoad = load
 		}
 	}
 
-	// Select the primary: least loaded instance, tie-break by instance id.
-	primary := selectPrimaryInGroup(selected.Instances, assignments)
-	if primary == nil {
-		return nil, xerror.WrapModelErrorWithMsg("epp pool group %q has no assignable instance", selected.Name)
-	}
-
 	return &AssignmentParam{
-		Cluster:           clusterName,
-		GroupName:         selected.Name,
-		PrimaryInstanceID: primary.ID,
+		Cluster:   clusterName,
+		GroupName: selected.Name,
 	}, nil
 }
 
 // candidateGroups returns all pool groups ordered by group name for
 // determinism. Every group in the pool is a valid candidate: PATCH
-// validation rejects empty groups and groups with 3+ instances, so every
-// group holds 1-2 instances.
+// validation rejects empty groups, so every group holds exactly 1 instance.
 func candidateGroups(pool *EppPool) []*InstanceGroup {
 	candidates := append([]*InstanceGroup(nil), pool.Groups...)
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
 	return candidates
 }
 
-// countPrimaries counts, per instance id, in how many assignments the
-// instance acts as primary.
-func countPrimaries(assignments []*AssignmentParam) map[string]int {
+// countGroupAssignments counts, per group name, in how many assignments the
+// group is the assignment target.
+func countGroupAssignments(assignments []*AssignmentParam) map[string]int {
 	counts := map[string]int{}
 	for _, assignment := range assignments {
-		counts[assignment.PrimaryInstanceID]++
+		counts[assignment.GroupName]++
 	}
 	return counts
-}
-
-// groupLoad sums the primary counts of all instances of the group.
-func groupLoad(group *InstanceGroup, primaryCount map[string]int) int {
-	load := 0
-	for _, inst := range group.Instances {
-		load += primaryCount[inst.ID]
-	}
-	return load
-}
-
-// selectPrimaryInGroup picks the instance with the smallest primary count;
-// tie-break by instance id (instances must be id-ordered by the caller via
-// buildPool; sorted here defensively).
-func selectPrimaryInGroup(instances []*InstanceParam, assignments []*AssignmentParam) *InstanceParam {
-	if len(instances) == 0 {
-		return nil
-	}
-
-	ordered := make([]*InstanceParam, len(instances))
-	copy(ordered, instances)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
-
-	primaryCount := countPrimaries(assignments)
-
-	selected := ordered[0]
-	for _, inst := range ordered[1:] {
-		if primaryCount[inst.ID] < primaryCount[selected.ID] {
-			selected = inst
-		}
-	}
-	return selected
 }
 
 func findGroup(pool *EppPool, groupName string) *InstanceGroup {

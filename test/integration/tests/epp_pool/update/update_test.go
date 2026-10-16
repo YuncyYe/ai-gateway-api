@@ -53,14 +53,13 @@ func TestEppPool_Update(t *testing.T) {
 		check    func(t *testing.T, resp *testutil.APIResponse)
 	}{
 		{
-			name: "EP-2-001 全量替换两组（含单实例组）",
+			name: "EP-2-001 全量替换两组（单实例组）",
 			body: map[string]interface{}{
 				"groups": []interface{}{
 					map[string]interface{}{
 						"name": "g1",
 						"instances": []interface{}{
 							map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-							map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 						},
 					},
 					map[string]interface{}{
@@ -281,8 +280,8 @@ func TestEppPool_Update(t *testing.T) {
 	}
 }
 
-// TestEppPool_Update_GroupSize 验证统一组规模规则（每组 1~2 实例）的边界行为：
-// 3 实例组被拒绝且全量替换不生效，2 实例组（主+备）通过。
+// TestEppPool_Update_GroupSize 验证单实例组规模规则（每组恰 1 实例）的边界行为：
+// 2 个及以上实例的组被拒绝且全量替换不生效。
 func TestEppPool_Update_GroupSize(t *testing.T) {
 	t.Run("EP-2-014 三实例组拒绝且池内容不变", func(t *testing.T) {
 		base := map[string]interface{}{
@@ -324,7 +323,19 @@ func TestEppPool_Update_GroupSize(t *testing.T) {
 		assert.Equal(t, "epp-a", insts[0].(map[string]interface{})["id"])
 	})
 
-	t.Run("EP-2-015 双实例组（主+备）通过", func(t *testing.T) {
+	t.Run("EP-2-015 双实例组（主+备）拒绝且池内容不变", func(t *testing.T) {
+		base := map[string]interface{}{
+			"groups": []interface{}{
+				map[string]interface{}{
+					"name": "g1",
+					"instances": []interface{}{
+						map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
+					},
+				},
+			},
+		}
+		testutil.AssertSuccess(t, patchEppPool(t, base))
+
 		resp := patchEppPool(t, map[string]interface{}{
 			"groups": []interface{}{
 				map[string]interface{}{
@@ -336,6 +347,18 @@ func TestEppPool_Update_GroupSize(t *testing.T) {
 				},
 			},
 		})
-		testutil.AssertSuccess(t, resp)
+		testutil.AssertErrCode(t, resp, 422)
+
+		// 拒绝后池内容保持基线（全量替换未生效）。
+		getResp, err := testutil.GetClient().Get("/open-api/v1/epp-pool")
+		require.NoError(t, err)
+		testutil.AssertSuccess(t, getResp)
+		var data map[string]interface{}
+		require.NoError(t, json.Unmarshal(getResp.Data, &data))
+		groups := data["groups"].([]interface{})
+		require.Len(t, groups, 1)
+		insts := groups[0].(map[string]interface{})["instances"].([]interface{})
+		require.Len(t, insts, 1)
+		assert.Equal(t, "epp-a", insts[0].(map[string]interface{})["id"])
 	})
 }

@@ -1325,10 +1325,11 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 		}
 
 		if balanceMode := cluster.getBalanceMode(); balanceMode == BalanceModeEPP {
-			// EPPAddr is assignment-driven ([0]=primary, [1]=standby). Without a
-			// valid assignment the cluster degrades to WRR without EPPAddr and an
-			// error-level log is emitted; the rest of the export is unaffected
-			// (design-changes.md §4.3).
+			// EPPAddr is assignment-driven: the assigned group's instance
+			// addresses (a single address in the current single-instance
+			// stage). Without a valid assignment the cluster degrades to WRR
+			// without EPPAddr and an error-level log is emitted; the rest of
+			// the export is unaffected (design-changes.md §4.3).
 			if addrs, ok := fetchEPPAssignmentAddrs(ctx, eppResolver, cluster.Name); ok {
 				clusterConf.GslbBasic.BalanceMode = lib.PString(BalanceModeEPP)
 				clusterConf.GslbBasic.EPPAddr = &addrs

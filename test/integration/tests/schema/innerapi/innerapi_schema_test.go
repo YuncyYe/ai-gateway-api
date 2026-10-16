@@ -16,7 +16,6 @@ package innerapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -1119,7 +1118,6 @@ func patchEppPoolForSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 		},
@@ -1168,7 +1166,7 @@ func testEppDataSchema(t *testing.T) {
 	testutil.AssertSchema(t, resp, EppDataSchema)
 
 	// 定向断言（epp-data.md §3.2/§3.3）：
-	// assignment 含该 cluster 条目且 primary 非空；epp_config 编译产物关键字段存在。
+	// assignment 含该 cluster 条目且 group 非空；epp_config 编译产物关键字段存在。
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal(resp.Data, &payload))
 	config := payload["Config"].(map[string]interface{})
@@ -1176,9 +1174,9 @@ func testEppDataSchema(t *testing.T) {
 	assignment := config["assignment"].(map[string]interface{})
 	entry, ok := assignment[clusterName].(map[string]interface{})
 	require.True(t, ok, "assignment should contain cluster %s", clusterName)
-	primary, ok := entry["primary"].(string)
-	require.True(t, ok, "assignment.primary should be a string")
-	require.NotEmpty(t, primary)
+	group, ok := entry["group"].(string)
+	require.True(t, ok, "assignment.group should be a string")
+	require.NotEmpty(t, group)
 
 	eppConfig := config["epp_config"].(map[string]interface{})
 	compiled, ok := eppConfig[clusterName].(map[string]interface{})
@@ -1236,7 +1234,8 @@ func testServerDataConfEppSchema(t *testing.T) {
 	testutil.AssertSuccess(t, resp)
 	testutil.AssertSchema(t, resp, ServerDataConfSchema)
 
-	// EPP cluster：BalanceMode=EPP 且 EPPAddr 有序 [主, 备]（server-data-conf.md §3.3）。
+	// EPP cluster：BalanceMode=EPP 且 EPPAddr 为分配的组实例地址（单元素，
+	// server-data-conf.md §3.3）。
 	assignResp, err := testutil.GetClient().Get("/open-api/v1/epp-assignments", map[string]string{
 		"cluster": eppClusterName,
 	})
@@ -1246,12 +1245,9 @@ func testServerDataConfEppSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(assignResp.Data, &assignView))
 	entries := assignView["clusters"].([]interface{})
 	entry := entries[0].(map[string]interface{})
-	primary := entry["primary"].(map[string]interface{})
-	standby := entry["standby"].(map[string]interface{})
-	expectedAddrs := []interface{}{
-		fmt.Sprintf("%s:%v", primary["host"], int(primary["port"].(float64))),
-		fmt.Sprintf("%s:%v", standby["host"], int(standby["port"].(float64))),
-	}
+	group := entry["group"].(string)
+	require.NotEmpty(t, group)
+	expectedAddrs := []interface{}{"10.0.0.1:9002"}
 	assertServerDataConfEpp(t, resp.Data, eppClusterName, "EPP", expectedAddrs)
 
 	// WRR cluster：BalanceMode=WRR 且无 EPPAddr。
@@ -1259,7 +1255,7 @@ func testServerDataConfEppSchema(t *testing.T) {
 }
 
 // assertServerDataConfEpp 校验导出结果中指定 cluster 的 GslbBasic.BalanceMode / EPPAddr
-// （server-data-conf.md §3.3：EPPAddr 有序 [主, 备]，WRR 时为 null）。
+// （server-data-conf.md §3.3：EPPAddr 为分配的组实例地址、恒单元素，WRR 时为 null）。
 func assertServerDataConfEpp(t *testing.T, data []byte, clusterName, wantMode string, wantEPPAddr []interface{}) {
 	t.Helper()
 	var payload map[string]interface{}
@@ -1285,5 +1281,5 @@ func assertServerDataConfEpp(t *testing.T, data []byte, clusterName, wantMode st
 	if !assert.True(t, ok, "EPPAddr should be an array for cluster %s", clusterName) {
 		return
 	}
-	assert.Equal(t, wantEPPAddr, eppAddr, "EPPAddr should be ordered [primary, standby]")
+	assert.Equal(t, wantEPPAddr, eppAddr, "EPPAddr should be the assigned group's instance addresses")
 }

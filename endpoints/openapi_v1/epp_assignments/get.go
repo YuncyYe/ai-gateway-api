@@ -67,12 +67,13 @@ func GetAction(req *http.Request) (interface{}, error) {
 			continue
 		}
 		filtered.Clusters = append(filtered.Clusters, entry)
-		for _, unassigned := range data.UnassignedClusters {
-			if unassigned == param.Cluster {
-				filtered.UnassignedClusters = append(filtered.UnassignedClusters, unassigned)
-			}
-		}
 		return filtered, nil
+	}
+	for _, unassigned := range data.UnassignedClusters {
+		if unassigned == param.Cluster {
+			filtered.UnassignedClusters = append(filtered.UnassignedClusters, unassigned)
+			return filtered, nil
+		}
 	}
 
 	return nil, xerror.WrapRecordNotExist("epp assignment", param.Cluster)

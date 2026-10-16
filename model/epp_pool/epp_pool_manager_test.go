@@ -73,11 +73,13 @@ func TestPatchPool_FullReplace(t *testing.T) {
 	pool, err := m.PatchPool(ctx, []*InstanceGroup{
 		{Name: "g1", Instances: []*InstanceParam{
 			{ID: "epp-a", Host: "10.0.0.1", Port: 9002},
+		}},
+		{Name: "g2", Instances: []*InstanceParam{
 			{ID: "epp-b", Host: "10.0.0.2", Port: 9002},
 		}},
 	})
 	require.NoError(t, err)
-	require.Len(t, pool.Groups, 1)
+	require.Len(t, pool.Groups, 2)
 	assert.Equal(t, "g1", pool.Groups[0].Name)
 
 	// Old instances fully replaced.
@@ -86,7 +88,6 @@ func TestPatchPool_FullReplace(t *testing.T) {
 	require.Len(t, instances, 2)
 	for _, one := range instances {
 		assert.NotEqual(t, "epp-old", one.ID)
-		assert.Equal(t, "g1", one.GroupName)
 	}
 }
 
@@ -96,7 +97,6 @@ func TestPatchPool_Validation(t *testing.T) {
 	validGroup := func() *InstanceGroup {
 		return &InstanceGroup{Name: "g1", Instances: []*InstanceParam{
 			{ID: "epp-a", Host: "10.0.0.1", Port: 9002},
-			{ID: "epp-b", Host: "10.0.0.2", Port: 9002},
 		}}
 	}
 
@@ -107,15 +107,22 @@ func TestPatchPool_Validation(t *testing.T) {
 		{"empty groups", nil},
 		{"empty group name", []*InstanceGroup{{Name: "", Instances: validGroup().Instances}}},
 		{"duplicated group name", []*InstanceGroup{validGroup(), validGroup()}},
-		{"empty instance id", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "", Host: "10.0.0.1", Port: 9002}, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}}}}},
-		{"duplicated instance id", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}, {ID: "epp-a", Host: "10.0.0.2", Port: 9002}}}}},
-		{"duplicated address", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}, {ID: "epp-b", Host: "10.0.0.1", Port: 9002}}}}},
-		{"bad host", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "-bad", Port: 9002}, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}}}}},
-		{"bad port", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 0}, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}}}}},
+		{"empty instance id", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "", Host: "10.0.0.1", Port: 9002}}}}},
+		{"duplicated instance id", []*InstanceGroup{
+			{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}}},
+			{Name: "g2", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.2", Port: 9002}}},
+		}},
+		{"duplicated address", []*InstanceGroup{
+			{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}}},
+			{Name: "g2", Instances: []*InstanceParam{{ID: "epp-b", Host: "10.0.0.1", Port: 9002}}},
+		}},
+		{"bad host", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "-bad", Port: 9002}}}}},
+		{"bad port", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 0}}}}},
+		{"two instances rejected", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}}}}},
 		{"three instances rejected", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{{ID: "epp-a", Host: "10.0.0.1", Port: 9002}, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}, {ID: "epp-c", Host: "10.0.0.3", Port: 9002}}}}},
 		{"empty group rejected", []*InstanceGroup{{Name: "g1", Instances: nil}}},
 		{"nil group", []*InstanceGroup{nil}},
-		{"nil instance", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{nil, {ID: "epp-b", Host: "10.0.0.2", Port: 9002}}}}},
+		{"nil instance", []*InstanceGroup{{Name: "g1", Instances: []*InstanceParam{nil}}}},
 	}
 
 	for _, tc := range cases {
@@ -144,9 +151,7 @@ func TestAssignCluster(t *testing.T) {
 		store := newMemoryEppPoolStorager()
 		store.seedInstances(
 			inst("epp-a", "g1", "10.0.0.1", 9002),
-			inst("epp-b", "g1", "10.0.0.2", 9002),
 			inst("epp-c", "g2", "10.0.0.3", 9002),
-			inst("epp-d", "g2", "10.0.0.4", 9002),
 		)
 		return testManager(store, &fakeClusterSource{}), store
 	}
@@ -159,7 +164,6 @@ func TestAssignCluster(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, assignment)
 		assert.Equal(t, "g1", assignment.GroupName)
-		assert.Equal(t, "epp-a", assignment.PrimaryInstanceID)
 	})
 
 	t.Run("idempotent on valid existing assignment", func(t *testing.T) {
@@ -172,12 +176,12 @@ func TestAssignCluster(t *testing.T) {
 
 		assignment, err := store.FetchAssignment(ctx, "cluster-a")
 		require.NoError(t, err)
-		assert.Equal(t, "epp-a", assignment.PrimaryInstanceID)
+		assert.Equal(t, "g1", assignment.GroupName)
 	})
 
 	t.Run("reassigns dangling assignment", func(t *testing.T) {
 		m, store := setup()
-		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g9", PrimaryInstanceID: "epp-x"})
+		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g9"})
 
 		require.NoError(t, m.AssignCluster(ctx, "cluster-a"))
 
@@ -197,7 +201,6 @@ func TestAssignCluster_UpsertConflictRetry(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	m := testManager(store, &fakeClusterSource{})
 
@@ -208,7 +211,7 @@ func TestAssignCluster_UpsertConflictRetry(t *testing.T) {
 	assignment, err := store.FetchAssignment(ctx, "cluster-a")
 	require.NoError(t, err)
 	require.NotNil(t, assignment)
-	assert.Equal(t, "epp-a", assignment.PrimaryInstanceID)
+	assert.Equal(t, "g1", assignment.GroupName)
 }
 
 func TestRepairDangling(t *testing.T) {
@@ -218,29 +221,15 @@ func TestRepairDangling(t *testing.T) {
 		store := newMemoryEppPoolStorager()
 		store.seedInstances(
 			inst("epp-a", "g1", "10.0.0.1", 9002),
-			inst("epp-b", "g1", "10.0.0.2", 9002),
 			inst("epp-c", "g2", "10.0.0.3", 9002),
-			inst("epp-d", "g2", "10.0.0.4", 9002),
 		)
 		return testManager(store, &fakeClusterSource{}), store
 	}
 
-	t.Run("same group reselect", func(t *testing.T) {
-		m, store := setup()
-		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-x"})
-
-		require.NoError(t, m.RepairDangling(ctx))
-
-		assignment, err := store.FetchAssignment(ctx, "cluster-a")
-		require.NoError(t, err)
-		assert.Equal(t, "g1", assignment.GroupName)
-		assert.Equal(t, "epp-a", assignment.PrimaryInstanceID)
-	})
-
 	t.Run("cross group reallocate", func(t *testing.T) {
 		m, store := setup()
 		// g9 removed from pool entirely.
-		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g9", PrimaryInstanceID: "epp-x"})
+		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g9"})
 
 		require.NoError(t, m.RepairDangling(ctx))
 
@@ -251,7 +240,7 @@ func TestRepairDangling(t *testing.T) {
 
 	t.Run("clear when pool has no candidate groups", func(t *testing.T) {
 		store := newMemoryEppPoolStorager()
-		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 		m := testManager(store, &fakeClusterSource{})
 
 		require.NoError(t, m.RepairDangling(ctx))
@@ -263,13 +252,13 @@ func TestRepairDangling(t *testing.T) {
 
 	t.Run("valid assignments untouched", func(t *testing.T) {
 		m, store := setup()
-		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g2", PrimaryInstanceID: "epp-c"})
+		store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g2"})
 
 		require.NoError(t, m.RepairDangling(ctx))
 
 		assignment, err := store.FetchAssignment(ctx, "cluster-a")
 		require.NoError(t, err)
-		assert.Equal(t, "epp-c", assignment.PrimaryInstanceID)
+		assert.Equal(t, "g2", assignment.GroupName)
 	})
 }
 
@@ -278,33 +267,26 @@ func TestOverrideAssignment(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
+		inst("epp-b", "g2", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a"}}}
 	m := testManager(store, source)
 
 	t.Run("valid override", func(t *testing.T) {
-		view, err := m.OverrideAssignment(ctx, "cluster-a", "g1", "epp-b")
+		view, err := m.OverrideAssignment(ctx, "cluster-a", "g2")
 		require.NoError(t, err)
 		require.NotNil(t, view)
 		assert.Equal(t, "cluster-a", view.Cluster)
-		assert.Equal(t, "epp-b", view.Primary.ID)
-		require.NotNil(t, view.Standby)
-		assert.Equal(t, "epp-a", view.Standby.ID)
-		assert.False(t, view.Degraded)
+		require.NotNil(t, view.Group)
+		assert.Equal(t, "g2", *view.Group)
 
 		assignment, err := store.FetchAssignment(ctx, "cluster-a")
 		require.NoError(t, err)
-		assert.Equal(t, "epp-b", assignment.PrimaryInstanceID)
+		assert.Equal(t, "g2", assignment.GroupName)
 	})
 
 	t.Run("unknown group", func(t *testing.T) {
-		_, err := m.OverrideAssignment(ctx, "cluster-a", "g9", "epp-a")
-		require.Error(t, err)
-	})
-
-	t.Run("primary not in group", func(t *testing.T) {
-		_, err := m.OverrideAssignment(ctx, "cluster-a", "g1", "epp-x")
+		_, err := m.OverrideAssignment(ctx, "cluster-a", "g9")
 		require.Error(t, err)
 	})
 
@@ -312,7 +294,7 @@ func TestOverrideAssignment(t *testing.T) {
 		// cluster-x is unknown and cluster-wrr is not in the EPP cluster list:
 		// both resolve to the record-not-exist error and must not upsert.
 		for _, cluster := range []string{"cluster-x", "cluster-wrr"} {
-			_, err := m.OverrideAssignment(ctx, cluster, "g1", "epp-a")
+			_, err := m.OverrideAssignment(ctx, cluster, "g1")
 			require.Error(t, err, cluster)
 			assert.Equal(t, 404, xerror.Resolve(err).ErrNo, cluster)
 
@@ -324,16 +306,14 @@ func TestOverrideAssignment(t *testing.T) {
 
 	t.Run("cluster source not configured", func(t *testing.T) {
 		m := testManager(store, nil)
-		_, err := m.OverrideAssignment(ctx, "cluster-a", "g1", "epp-a")
+		_, err := m.OverrideAssignment(ctx, "cluster-a", "g1")
 		require.Error(t, err)
 	})
 
 	t.Run("empty args", func(t *testing.T) {
-		_, err := m.OverrideAssignment(ctx, "", "g1", "epp-a")
+		_, err := m.OverrideAssignment(ctx, "", "g1")
 		require.Error(t, err)
-		_, err = m.OverrideAssignment(ctx, "cluster-a", "", "epp-a")
-		require.Error(t, err)
-		_, err = m.OverrideAssignment(ctx, "cluster-a", "g1", "")
+		_, err = m.OverrideAssignment(ctx, "cluster-a", "")
 		require.Error(t, err)
 	})
 }
@@ -343,21 +323,21 @@ func TestGetAssignmentsView(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a"},
 		{Name: "cluster-b"},
 	}}
-	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 
 	m := testManager(store, source)
 
 	t.Run("full view", func(t *testing.T) {
 		view, err := m.GetAssignmentsView(ctx)
 		require.NoError(t, err)
-		require.Len(t, view.Clusters, 2)
-		assert.Equal(t, "epp-a", view.Clusters[0].Primary.ID)
+		require.Len(t, view.Clusters, 1)
+		require.NotNil(t, view.Clusters[0].Group)
+		assert.Equal(t, "g1", *view.Clusters[0].Group)
 		assert.Equal(t, []string{"cluster-b"}, view.UnassignedClusters)
 		assert.Empty(t, view.IdleGroups)
 	})
@@ -365,7 +345,8 @@ func TestGetAssignmentsView(t *testing.T) {
 	t.Run("single cluster view", func(t *testing.T) {
 		entry, err := m.GetAssignmentView(ctx, "cluster-a")
 		require.NoError(t, err)
-		assert.Equal(t, "epp-a", entry.Primary.ID)
+		require.NotNil(t, entry.Group)
+		assert.Equal(t, "g1", *entry.Group)
 
 		_, err = m.GetAssignmentView(ctx, "cluster-x")
 		require.Error(t, err)
@@ -383,7 +364,6 @@ func TestReconcile_BackfillsMissingAssignments(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a"},

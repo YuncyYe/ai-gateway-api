@@ -51,7 +51,6 @@ CREATE TABLE epp_instances (
 CREATE TABLE epp_assignments (
   cluster TEXT NOT NULL PRIMARY KEY,
   group_name TEXT NOT NULL,
-  primary_instance_id TEXT NOT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`)
@@ -104,25 +103,25 @@ func TestEppPoolStorager_Assignments(t *testing.T) {
 
 	// Upsert inserts when absent.
 	err := s.UpsertAssignment(ctx, &epp_pool.AssignmentParam{
-		Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a",
+		Cluster: "cluster-a", GroupName: "g1",
 	})
 	require.NoError(t, err)
 
 	assignment, err := s.FetchAssignment(ctx, "cluster-a")
 	require.NoError(t, err)
 	require.NotNil(t, assignment)
-	assert.Equal(t, "epp-a", assignment.PrimaryInstanceID)
+	assert.Equal(t, "g1", assignment.GroupName)
 
 	// Upsert updates when present.
 	err = s.UpsertAssignment(ctx, &epp_pool.AssignmentParam{
-		Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-b",
+		Cluster: "cluster-a", GroupName: "g2",
 	})
 	require.NoError(t, err)
 
 	list, err := s.FetchAssignmentList(ctx)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	assert.Equal(t, "epp-b", list[0].PrimaryInstanceID)
+	assert.Equal(t, "g2", list[0].GroupName)
 
 	require.NoError(t, s.DeleteAssignment(ctx, "cluster-a"))
 	assignment, err = s.FetchAssignment(ctx, "cluster-a")

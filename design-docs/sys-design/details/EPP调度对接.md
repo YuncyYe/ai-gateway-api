@@ -45,10 +45,10 @@ id, host, port, group_name, 创建/更新时间
 cluster→实例组分配，**只存主**：
 
 ```
-cluster（唯一键）, group_name, primary_instance_id
+cluster（唯一键）, group_name（分配粒度为组）
 ```
 
-- standby 不存储：读时展开为同组除 primary 外的实例，避免双写不一致。
+- 实例由组派生：视图/导出按分配记录取组，组内实例（当前阶段每组恰 1 个）来自 `epp_instances`，不冗余存储。
 - 分配由**分配器自动生成**（§4），`PUT /api/v1/epp-assignments/{cluster}` 手工覆写作为运维兜底。
 - `EPP → WRR` 后分配记录**休眠保留**（不进导出），切回 EPP 继续生效。
 
@@ -79,13 +79,13 @@ api 导出时把简化配置**确定性编译**为完整 `EndpointPickerConfig`�
 
 - **单例池**，池名由配置项 `RunTime.DefaultEPPInstancePoolName` 提供（默认 `EPP.pool`）；`GET` 详情 + `PATCH` 全量替换。
 - 实例列表是**部署事实**：部署流程在扩缩容/换机后 reconcile PATCH，天然幂等；api 侧无心跳续约、失联阈值等存活管理负担。
-- 组规模校验：每组 1~2 实例（1=仅主，2=主+备），拒绝空组与 3 个及以上实例的组。
+- 组规模校验：每组恰好 1 实例（单实例部署阶段），拒绝空组与 2 个及以上实例的组；`instances` 保留数组形态为扩容预留。
 
 ### 4.2 分配器：贪心 + 确定性 tie-break
 
 ```
 输入：实例池（组→实例列表）、现有分配（epp_assignments）、目标 cluster
-1. 候选组：池中全部组（PATCH 校验保证每组 1~2 实例，无空组），按组名排序
+1. 候选组：池中全部组（PATCH 校验保证每组恰 1 实例，无空组），按组名排序
 2. 选组：组负载 = 组内各实例"作为 primary 承担的 cluster 数"之和
         → 最小者优先，并列取组名字典序最小
 3. 选主：组内"作为 primary 承担的 cluster 数最少"的实例
@@ -93,7 +93,7 @@ api 导出时把简化配置**确定性编译**为完整 `EndpointPickerConfig`�
 4. upsert epp_assignments
 ```
 
-全程确定性、可重放、可单测。互为主备是合法输出（同组两实例在不同 cluster 间互为主备）；不做组↔cluster 一对一约束。
+全程确定性、可重放、可单测。多个 cluster 分配到同一组是合法输出；不做组↔cluster 一对一约束。
 
 ### 4.3 触发时机
 
@@ -106,8 +106,8 @@ api 导出时把简化配置**确定性编译**为完整 `EndpointPickerConfig`�
 
 ### 4.4 查询与手工覆写
 
-- `GET /api/v1/epp-assignments`：分配全量视图——`epp_assignments` 与 `epp_instances` 的**读时 join**（不引入冗余存储），per-cluster 展开 `{group, primary, standby}`；不一致标记 `degraded`；汇总 `unassigned_clusters` 与 `idle_groups` 便于巡检。
-- `PUT /api/v1/epp-assignments/{cluster}`：手工覆写 `{group_name, primary_instance_id}`（运维干预入口），触发 server_data_conf version bump。
+- `GET /api/v1/epp-assignments`：分配全量视图——只含有效分配的 `{cluster, group}` 列表（未分配/悬空由 `unassigned_clusters` 枚举，reconciler 自愈）；汇总 `unassigned_clusters` 与 `idle_groups` 便于巡检。
+- `PUT /api/v1/epp-assignments/{cluster}`：手工覆写 `{group_name}`（分配粒度为组，运维干预入口），触发 epp_data / server_data_conf version bump。
 
 ---
 
@@ -121,7 +121,7 @@ api 导出时把简化配置**确定性编译**为完整 `EndpointPickerConfig`�
 ### 5.2 epp_data → EPP（新 topic，两段合并单端点）
 
 - **端点**：`GET /inner-api/v1/configs/epp_data/config?version=...`；topic `ConfigTopicEppData`，复用 `ExportConfig` 框架（MD5 签名、version 单调递增、未变化返回 `Data: null`）。
-- **形状**：`{ "epp_config": { cluster → 编译后 EndpointPickerConfig }, "assignment": { cluster → {primary, standby} } }`。
+- **形状**：`{ "epp_config": { cluster → 编译后 EndpointPickerConfig }, "assignment": { cluster → {group} } }`（cluster → 分配的实例组）。
 - assignment 为**全量视图**：所有 EPP 实例返回完全相同内容，EPP 以自身 `-instance-id` 逐 cluster 匹配得出角色；未命中跳过。单 topic 保证两段配置同一 version 原子快照，消除角色/配置错配窗口。
 - 实例池变更不直接 bump 该 topic（cluster→role 映射未变），仅分配变化时经 server_data_conf 导出间接体现。
 

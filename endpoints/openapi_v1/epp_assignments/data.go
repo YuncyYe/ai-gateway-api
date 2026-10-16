@@ -18,26 +18,17 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/epp_pool"
 )
 
-// InstanceData is one EPP instance as exposed by the OpenAPI
-// (same shape as the /epp-pool instance: id/host/port only).
-type InstanceData struct {
-	ID   string `json:"id"`
-	Host string `json:"host"`
-	Port int    `json:"port"`
-}
-
-// ClusterAssignmentData is the per-cluster expanded assignment view
-// (epp-assignments.md §2.1 clusters[] element).
+// ClusterAssignmentData is one validly assigned cluster of the full
+// assignment view (epp-assignments.md §2.1): the cluster and its assigned
+// EPP group. The serving instance is derived from the pool (/epp-pool) by
+// group name.
 type ClusterAssignmentData struct {
-	Cluster  string        `json:"cluster"`
-	Group    *string       `json:"group"`
-	Primary  *InstanceData `json:"primary"`
-	Standby  *InstanceData `json:"standby"`
-	Degraded bool          `json:"degraded"`
+	Cluster string `json:"cluster"`
+	Group   string `json:"group"`
 }
 
-// AssignmentsData is the full assignment view: per-cluster expansion plus
-// the unassigned cluster list and the idle group list.
+// AssignmentsData is the full assignment view: valid per-cluster assignments
+// plus the unassigned cluster list and the idle group list.
 type AssignmentsData struct {
 	Clusters           []*ClusterAssignmentData `json:"clusters"`
 	UnassignedClusters []string                 `json:"unassigned_clusters"`
@@ -45,33 +36,16 @@ type AssignmentsData struct {
 }
 
 // ClusterAssignmentOverrideData is the response of the manual override
-// (epp-assignments.md §2.2): the cluster assignment view without the
-// degraded marker.
+// (epp-assignments.md §2.2): the cluster and its newly assigned group.
 type ClusterAssignmentOverrideData struct {
-	Cluster string        `json:"cluster"`
-	Group   *string       `json:"group"`
-	Primary *InstanceData `json:"primary"`
-	Standby *InstanceData `json:"standby"`
-}
-
-func newInstanceData(inst *epp_pool.InstanceParam) *InstanceData {
-	if inst == nil {
-		return nil
-	}
-	return &InstanceData{
-		ID:   inst.ID,
-		Host: inst.Host,
-		Port: inst.Port,
-	}
+	Cluster string `json:"cluster"`
+	Group   string `json:"group"`
 }
 
 func newClusterAssignmentData(view *epp_pool.ClusterAssignmentView) *ClusterAssignmentData {
 	return &ClusterAssignmentData{
-		Cluster:  view.Cluster,
-		Group:    view.Group,
-		Primary:  newInstanceData(view.Primary),
-		Standby:  newInstanceData(view.Standby),
-		Degraded: view.Degraded,
+		Cluster: view.Cluster,
+		Group:   *view.Group,
 	}
 }
 
@@ -90,8 +64,6 @@ func newAssignmentsData(view *epp_pool.AssignmentsView) *AssignmentsData {
 func newClusterAssignmentOverrideData(view *epp_pool.ClusterAssignmentView) *ClusterAssignmentOverrideData {
 	return &ClusterAssignmentOverrideData{
 		Cluster: view.Cluster,
-		Group:   view.Group,
-		Primary: newInstanceData(view.Primary),
-		Standby: newInstanceData(view.Standby),
+		Group:   *view.Group,
 	}
 }

@@ -16,7 +16,6 @@ package innerapi_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -89,7 +88,7 @@ func findAssignmentEntry(t *testing.T, data map[string]interface{}, cluster stri
 	return nil
 }
 
-func waitAssignmentPrimary(t *testing.T, cluster string, timeout time.Duration) map[string]interface{} {
+func waitAssignmentGroup(t *testing.T, cluster string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -102,8 +101,8 @@ func waitAssignmentPrimary(t *testing.T, cluster string, timeout time.Duration) 
 			if err := json.Unmarshal(resp.Data, &data); err == nil {
 				entry := findAssignmentEntry(t, data, cluster)
 				if entry != nil {
-					if primary, ok := entry["primary"].(map[string]interface{}); ok {
-						return primary
+					if group, ok := entry["group"].(string); ok && group != "" {
+						return group
 					}
 				}
 			}
@@ -111,14 +110,14 @@ func waitAssignmentPrimary(t *testing.T, cluster string, timeout time.Duration) 
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("cluster %s not assigned within %v", cluster, timeout)
-	return nil
+	return ""
 }
 
 func TestInnerAPI_EppData(t *testing.T) {
 	pt := t
-	// degradeCluster 在空池上创建，进入未分配态；degradePrimary 在恢复后赋值。
+	// degradeCluster 在空池上创建，进入未分配态；degradeGroup 在恢复后赋值。
 	var degradeCluster string
-	var degradePrimary map[string]interface{}
+	var degradeGroup string
 
 	t.Run("IN-EPP-001 空池创建 EPP 集群进入未分配态并降级导出", func(t *testing.T) {
 		degradeCluster = testutil.UniqueClusterName()
@@ -145,7 +144,7 @@ func TestInnerAPI_EppData(t *testing.T) {
 		testutil.AssertSuccess(t, resp)
 		pt.Cleanup(func() { testutil.DeleteCluster(degradeCluster) })
 
-		// 分配视图：未分配，primary 为 null
+		// 分配视图：未分配（clusters[] 只含有效分配，该 cluster 不出现）
 		view, err := testutil.GetClient().Get("/open-api/v1/epp-assignments", map[string]string{"cluster": degradeCluster})
 		if err != nil {
 			t.Fatalf("get assignments failed: %v", err)
@@ -154,8 +153,7 @@ func TestInnerAPI_EppData(t *testing.T) {
 		var viewData map[string]interface{}
 		json.Unmarshal(view.Data, &viewData)
 		entry := findAssignmentEntry(t, viewData, degradeCluster)
-		require.NotNil(t, entry)
-		assert.Nil(t, entry["primary"])
+		assert.Nil(t, entry, "unassigned cluster should not appear in clusters[]")
 		assert.Contains(t, viewData["unassigned_clusters"], degradeCluster)
 
 		// server_data_conf 降级导出：BalanceMode=WRR，无 EPPAddr
@@ -173,7 +171,6 @@ func TestInnerAPI_EppData(t *testing.T) {
 					"name": "g1",
 					"instances": []interface{}{
 						map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-						map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 					},
 				},
 			},
@@ -184,22 +181,20 @@ func TestInnerAPI_EppData(t *testing.T) {
 		testutil.AssertSuccess(t, resp)
 
 		// reconciler 周期 1s（测试配置），轮询等待自动分配
-		degradePrimary = waitAssignmentPrimary(t, degradeCluster, 15*time.Second)
-		assert.Contains(t, []string{"epp-a", "epp-b"}, degradePrimary["id"])
+		degradeGroup = waitAssignmentGroup(t, degradeCluster, 15*time.Second)
+		assert.Equal(t, "g1", degradeGroup)
 
 		cluster := getServerDataConfCluster(t, degradeCluster)
 		gslbBasic := cluster["GslbBasic"].(map[string]interface{})
 		assert.Equal(t, "EPP", gslbBasic["BalanceMode"])
 		eppAddr, ok := gslbBasic["EPPAddr"].([]interface{})
 		require.True(t, ok, "EPPAddr should be exported after assignment")
-		require.Len(t, eppAddr, 2, "two-instance group exports [primary, standby]")
-		expectedPrimary := fmt.Sprintf("%s:%v", degradePrimary["host"], int(degradePrimary["port"].(float64)))
-		assert.Equal(t, expectedPrimary, eppAddr[0], "EPPAddr[0] should be primary")
-		assert.NotEqual(t, eppAddr[0], eppAddr[1])
+		require.Len(t, eppAddr, 1, "single-instance group exports exactly one address")
+		assert.Equal(t, "10.0.0.1:9002", eppAddr[0])
 	})
 
 	var fullCluster string
-	var fullPrimary, fullStandby map[string]interface{}
+	var fullGroup string
 	var firstVersion string
 
 	t.Run("IN-EPP-003 epp_data 导出含编译后 epp_config 与 assignment 两段", func(t *testing.T) {
@@ -242,18 +237,8 @@ func TestInnerAPI_EppData(t *testing.T) {
 		testutil.AssertSuccess(t, resp)
 		pt.Cleanup(func() { testutil.DeleteCluster(fullCluster) })
 
-		// 自动分配：与 degradeCluster 共享 g1，allocator 选负载低的实例
-		fullPrimary = waitAssignmentPrimary(t, fullCluster, 15*time.Second)
-
-		viewResp, err := testutil.GetClient().Get("/open-api/v1/epp-assignments", map[string]string{"cluster": fullCluster})
-		if err != nil {
-			t.Fatalf("get assignments failed: %v", err)
-		}
-		var viewData map[string]interface{}
-		json.Unmarshal(viewResp.Data, &viewData)
-		entry := findAssignmentEntry(t, viewData, fullCluster)
-		require.NotNil(t, entry)
-		fullStandby = entry["standby"].(map[string]interface{})
+		// 自动分配：与 degradeCluster 共享 g1（分配粒度为组）
+		fullGroup = waitAssignmentGroup(t, fullCluster, 15*time.Second)
 
 		exportResp := getEppData(t, "")
 		testutil.AssertDataNotEmpty(t, exportResp)
@@ -351,16 +336,15 @@ func TestInnerAPI_EppData(t *testing.T) {
 		assert.Equal(t, 1.0, weights["prefix-scorer"])
 		assert.Equal(t, 1.0, weights["session-scorer"])
 
-		// assignment 段：全量视图，primary/standby 与分配视图一致
+		// assignment 段：cluster → 分配的组
 		assignment := config["assignment"].(map[string]interface{})
 		entry1, ok := assignment[fullCluster].(map[string]interface{})
 		require.True(t, ok, "assignment should contain the cluster")
-		assert.Equal(t, fullPrimary["id"], entry1["primary"])
-		assert.Equal(t, fullStandby["id"], entry1["standby"])
+		assert.Equal(t, fullGroup, entry1["group"])
 
 		entry2, ok := assignment[degradeCluster].(map[string]interface{})
-		require.True(t, ok, "assignment should contain all EPP clusters")
-		assert.NotEmpty(t, entry2["primary"])
+		require.True(t, ok, "assignment should contain all assigned EPP clusters")
+		assert.NotEmpty(t, entry2["group"])
 	})
 
 	t.Run("IN-EPP-004 epp_data 增量拉取同版本返回 Data null", func(t *testing.T) {
@@ -369,10 +353,30 @@ func TestInnerAPI_EppData(t *testing.T) {
 	})
 
 	t.Run("IN-EPP-005 手工覆写后版本推进且 assignment 更新", func(t *testing.T) {
-		newPrimaryID := fullStandby["id"].(string)
+		// 先扩容池增加 g2（epp-c），使覆写产生真实的分配变化。
+		patchResp, err := testutil.GetClient().Patch("/open-api/v1/epp-pool", map[string]interface{}{
+			"groups": []interface{}{
+				map[string]interface{}{
+					"name": "g1",
+					"instances": []interface{}{
+						map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
+					},
+				},
+				map[string]interface{}{
+					"name": "g2",
+					"instances": []interface{}{
+						map[string]interface{}{"id": "epp-c", "host": "10.0.0.3", "port": 9002},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("patch epp pool failed: %v", err)
+		}
+		testutil.AssertSuccess(t, patchResp)
+
 		resp, err := testutil.GetClient().Put("/open-api/v1/epp-assignments/"+fullCluster, map[string]interface{}{
-			"group_name":          "g1",
-			"primary_instance_id": newPrimaryID,
+			"group_name": "g2",
 		})
 		if err != nil {
 			t.Fatalf("override failed: %v", err)
@@ -384,7 +388,7 @@ func TestInnerAPI_EppData(t *testing.T) {
 		configVal, _ := testutil.GetDataField(exportResp, "Config")
 		assignment := configVal.(map[string]interface{})["assignment"].(map[string]interface{})
 		entry := assignment[fullCluster].(map[string]interface{})
-		assert.Equal(t, newPrimaryID, entry["primary"])
+		assert.Equal(t, "g2", entry["group"])
 
 		// 新版本再次拉取返回 null
 		newVersionVal, _ := testutil.GetDataField(exportResp, "Version")
