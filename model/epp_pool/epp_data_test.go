@@ -30,7 +30,6 @@ func TestEppDataGenerator(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`},
@@ -38,9 +37,9 @@ func TestEppDataGenerator(t *testing.T) {
 		{Name: "cluster-c", EppConfigJSON: `{"prefix_cache_affinity":true}`},
 	}}
 	store.seedAssignments(
-		&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"},
+		&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"},
 		// Dangling: cluster-b unassigned in the export.
-		&AssignmentParam{Cluster: "cluster-b", GroupName: "g9", PrimaryInstanceID: "epp-x"},
+		&AssignmentParam{Cluster: "cluster-b", GroupName: "g9"},
 	)
 
 	m := testManager(store, source)
@@ -62,13 +61,11 @@ func TestEppDataGenerator(t *testing.T) {
 	require.NotNil(t, findProfilePlugin(t, compiledB, pluginNameQueueScorer))
 	assert.Equal(t, 1.0, *findProfilePlugin(t, compiledB, pluginNameQueueScorer).Weight)
 
-	// assignment section: only validly assigned clusters.
+	// assignment section: only validly assigned clusters, mapped to groups.
 	require.Len(t, conf.Config.Assignment, 1)
 	entry := conf.Config.Assignment["cluster-a"]
 	require.NotNil(t, entry)
-	assert.Equal(t, "epp-a", entry.Primary)
-	require.NotNil(t, entry.Standby)
-	assert.Equal(t, "epp-b", *entry.Standby)
+	assert.Equal(t, "g1", entry.Group)
 	_, hasB := conf.Config.Assignment["cluster-b"]
 	assert.False(t, hasB)
 
@@ -77,14 +74,14 @@ func TestEppDataGenerator(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestEppDataGenerator_SingleInstanceStandbyNull(t *testing.T) {
+func TestEppDataGenerator_SingleInstanceGroup(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(inst("epp-a", "g1", "10.0.0.1", 9002))
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{}`},
 	}}
-	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 
 	m := NewEppPoolManager(&fakeTxn{}, store, source, nil, nil)
 
@@ -94,8 +91,7 @@ func TestEppDataGenerator_SingleInstanceStandbyNull(t *testing.T) {
 
 	entry := conf.Config.Assignment["cluster-a"]
 	require.NotNil(t, entry)
-	assert.Equal(t, "epp-a", entry.Primary)
-	assert.Nil(t, entry.Standby)
+	assert.Equal(t, "g1", entry.Group)
 }
 
 func TestEppDataGenerator_Errors(t *testing.T) {
@@ -134,12 +130,11 @@ func TestExportEppData_VersionSemantics(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
-	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 
 	vcStore := &fakeVersionControlStorager{}
 	vc := iversion_control.NewVersionControllerManager(&fakeTxn{}, vcStore)
@@ -172,7 +167,7 @@ func TestOverrideAssignment_TriggersExport(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
+		inst("epp-b", "g2", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
@@ -188,7 +183,7 @@ func TestOverrideAssignment_TriggersExport(t *testing.T) {
 	vc := iversion_control.NewVersionControllerManager(&fakeTxn{}, vcStore)
 	m := NewEppPoolManager(&fakeTxn{}, store, source, vc, &ManagerOptions{})
 
-	_, err := m.OverrideAssignment(ctx, "cluster-a", "g1", "epp-b")
+	_, err := m.OverrideAssignment(ctx, "cluster-a", "g2")
 	require.NoError(t, err)
 	require.NotEmpty(t, exported)
 	assert.Equal(t, ConfigTopicEppData, exported[0].Topic)

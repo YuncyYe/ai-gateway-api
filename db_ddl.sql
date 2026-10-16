@@ -111,12 +111,11 @@ CREATE TABLE `epp_instances` (
   UNIQUE KEY `uk_host_port` (`host`, `port`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='EPP实例池表';
 
--- create epp_assignments (EPP分配表，只存主)
+-- create epp_assignments (EPP分配表，分配粒度为实例组)
 DROP TABLE IF EXISTS `epp_assignments`;
 CREATE TABLE `epp_assignments` (
   `cluster` varchar(255) NOT NULL COMMENT 'cluster名',
   `group_name` varchar(128) NOT NULL COMMENT '实例组名',
-  `primary_instance_id` varchar(128) NOT NULL COMMENT '主实例id',
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`cluster`)

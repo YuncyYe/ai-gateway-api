@@ -1198,7 +1198,6 @@ func testEppPoolSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -1229,7 +1228,7 @@ func testEppPoolSchema(t *testing.T) {
 	g1 := groups[0].(map[string]interface{})
 	require.Equal(t, "g1", g1["name"])
 	insts := g1["instances"].([]interface{})
-	require.Len(t, insts, 2)
+	require.Len(t, insts, 1)
 	inst0 := insts[0].(map[string]interface{})
 	require.Equal(t, "epp-a", inst0["id"])
 	require.Equal(t, "10.0.0.1", inst0["host"])
@@ -1246,7 +1245,6 @@ func testEppAssignmentsSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -1288,7 +1286,7 @@ func testEppAssignmentsSchema(t *testing.T) {
 	testutil.AssertSuccess(t, viewResp)
 	testutil.AssertSchema(t, viewResp, EppAssignmentsViewSchema)
 
-	assertAssignmentEntry(t, viewResp.Data, clusterName, false)
+	assertAssignmentEntry(t, viewResp.Data, clusterName)
 
 	idleVal, err := testutil.GetDataField(viewResp, "idle_groups")
 	require.NoError(t, err)
@@ -1304,22 +1302,25 @@ func testEppAssignmentsSchema(t *testing.T) {
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, oneResp)
 	testutil.AssertSchema(t, oneResp, EppAssignmentsViewSchema)
-	assertAssignmentEntry(t, oneResp.Data, clusterName, false)
+	assertAssignmentEntry(t, oneResp.Data, clusterName)
 
-	// 手工覆写后单条响应结构（standby 换为另一实例）。
+	// 手工覆写到另一组后单条响应结构。
 	entry := findAssignmentEntry(t, oneResp.Data, clusterName)
-	standby := entry["standby"].(map[string]interface{})
+	origGroup := entry["group"].(string)
+	target := "g2"
+	if origGroup == "g2" {
+		target = "g1"
+	}
 	putResp, err := testutil.GetClient().Put("/open-api/v1/epp-assignments/"+clusterName, map[string]interface{}{
-		"group_name":          "g1",
-		"primary_instance_id": standby["id"],
+		"group_name": target,
 	})
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, putResp)
 	testutil.AssertSchema(t, putResp, EppClusterAssignmentOverrideSchema)
 
-	putPrimary, err := testutil.GetDataField(putResp, "primary")
+	putGroup, err := testutil.GetDataField(putResp, "group")
 	require.NoError(t, err)
-	require.Equal(t, standby["id"], putPrimary.(map[string]interface{})["id"])
+	require.Equal(t, target, putGroup)
 }
 
 // findAssignmentEntry 从全量视图中取出指定 cluster 的分配条目。
@@ -1340,21 +1341,15 @@ func findAssignmentEntry(t *testing.T, data []byte, clusterName string) map[stri
 	return nil
 }
 
-// assertAssignmentEntry 定向断言指定 cluster 已分配（group/primary/standby 非空）。
-func assertAssignmentEntry(t *testing.T, data []byte, clusterName string, unassigned bool) {
+// assertAssignmentEntry 定向断言指定 cluster 已分配（group 非空，视图中
+// 不含 primary/standby/instances/degraded 字段）。
+func assertAssignmentEntry(t *testing.T, data []byte, clusterName string) {
 	t.Helper()
 	entry := findAssignmentEntry(t, data, clusterName)
-	require.Equal(t, unassigned, entry["degraded"].(bool))
-	if unassigned {
-		require.Nil(t, entry["primary"])
-		return
-	}
 	require.NotNil(t, entry["group"])
-	primary, ok := entry["primary"].(map[string]interface{})
-	require.True(t, ok, "primary should be an object")
-	require.NotEmpty(t, primary["id"])
-	require.NotEmpty(t, primary["host"])
-	require.NotNil(t, entry["standby"])
+	for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+		require.NotContains(t, entry, legacy)
+	}
 }
 
 // ---------- intent-config ----------

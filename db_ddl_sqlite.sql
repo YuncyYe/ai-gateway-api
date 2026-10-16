@@ -117,7 +117,6 @@ DROP TABLE IF EXISTS epp_assignments;
 CREATE TABLE epp_assignments (
   cluster TEXT NOT NULL PRIMARY KEY,
   group_name TEXT NOT NULL,
-  primary_instance_id TEXT NOT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

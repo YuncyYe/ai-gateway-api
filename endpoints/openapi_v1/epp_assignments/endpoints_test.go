@@ -16,6 +16,7 @@ package epp_assignments
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -179,9 +180,8 @@ func setupManager(t *testing.T) (*fakeEppPoolStorager, func()) {
 		&epp_pool.InstanceParam{ID: "epp-c", Host: "10.0.0.3", Port: 9002, GroupName: "g2"},
 	)
 	storager.seedAssignments(&epp_pool.AssignmentParam{
-		Cluster:           "cluster-a",
-		GroupName:         "g1",
-		PrimaryInstanceID: "epp-a",
+		Cluster:   "cluster-a",
+		GroupName: "g1",
 	})
 	clusterSource := &fakeClusterSource{clusters: []*epp_pool.EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
@@ -228,25 +228,23 @@ func TestGetAction(t *testing.T) {
 
 	view, ok := data.(*AssignmentsData)
 	require.True(t, ok)
-	require.Len(t, view.Clusters, 2)
+	require.Len(t, view.Clusters, 1)
 
 	assert.Equal(t, "cluster-a", view.Clusters[0].Cluster)
-	require.NotNil(t, view.Clusters[0].Group)
-	assert.Equal(t, "g1", *view.Clusters[0].Group)
-	require.NotNil(t, view.Clusters[0].Primary)
-	assert.Equal(t, "epp-a", view.Clusters[0].Primary.ID)
-	require.NotNil(t, view.Clusters[0].Standby)
-	assert.Equal(t, "epp-b", view.Clusters[0].Standby.ID)
-	assert.False(t, view.Clusters[0].Degraded)
+	assert.Equal(t, "g1", view.Clusters[0].Group)
 
 	// cluster-b is in EPP mode but has no assignment.
-	assert.Equal(t, "cluster-b", view.Clusters[1].Cluster)
-	assert.Nil(t, view.Clusters[1].Group)
-	assert.Nil(t, view.Clusters[1].Primary)
-	assert.Contains(t, view.UnassignedClusters, "cluster-b")
+	assert.Equal(t, []string{"cluster-b"}, view.UnassignedClusters)
 
-	// g2 has no primary occupation (standby roles do not occupy).
+	// g2 carries no assignment.
 	assert.Equal(t, []string{"g2"}, view.IdleGroups)
+
+	// The response marshals without any legacy primary/standby key.
+	raw, err := json.Marshal(view)
+	require.NoError(t, err)
+	for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+		assert.NotContains(t, string(raw), "\""+legacy+"\"")
+	}
 }
 
 func TestGetAction_ByCluster(t *testing.T) {
@@ -267,14 +265,15 @@ func TestGetAction_ByClusterUnassigned(t *testing.T) {
 	_, teardown := setupManager(t)
 	defer teardown()
 
+	// An unassigned cluster filters to an empty clusters list with the
+	// cluster listed in unassigned_clusters.
 	data, err := GetAction(newGetRequest("/epp-assignments?cluster=cluster-b"))
 	require.NoError(t, err)
 
 	view, ok := data.(*AssignmentsData)
 	require.True(t, ok)
-	require.Len(t, view.Clusters, 1)
-	assert.Equal(t, "cluster-b", view.Clusters[0].Cluster)
-	assert.Contains(t, view.UnassignedClusters, "cluster-b")
+	require.Empty(t, view.Clusters)
+	assert.Equal(t, []string{"cluster-b"}, view.UnassignedClusters)
 }
 
 func TestGetAction_ClusterNotEPP(t *testing.T) {
@@ -293,30 +292,30 @@ func TestOverrideAction(t *testing.T) {
 	storager, teardown := setupManager(t)
 	defer teardown()
 
-	data, err := OverrideAction(newPutRequest("cluster-a", `{"group_name":"g1","primary_instance_id":"epp-b"}`))
+	data, err := OverrideAction(newPutRequest("cluster-a", `{"group_name":"g2"}`))
 	require.NoError(t, err)
 
 	view, ok := data.(*ClusterAssignmentOverrideData)
 	require.True(t, ok)
 	assert.Equal(t, "cluster-a", view.Cluster)
-	require.NotNil(t, view.Group)
-	assert.Equal(t, "g1", *view.Group)
-	require.NotNil(t, view.Primary)
-	assert.Equal(t, "epp-b", view.Primary.ID)
-	require.NotNil(t, view.Standby)
-	assert.Equal(t, "epp-a", view.Standby.ID)
+	assert.Equal(t, "g2", view.Group)
+
+	raw, err := json.Marshal(view)
+	require.NoError(t, err)
+	for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+		assert.NotContains(t, string(raw), "\""+legacy+"\"")
+	}
 
 	stored := storager.fetchAssignment("cluster-a")
 	require.NotNil(t, stored)
-	assert.Equal(t, "g1", stored.GroupName)
-	assert.Equal(t, "epp-b", stored.PrimaryInstanceID)
+	assert.Equal(t, "g2", stored.GroupName)
 }
 
 func TestOverrideAction_ClusterNotEPP(t *testing.T) {
 	_, teardown := setupManager(t)
 	defer teardown()
 
-	_, err := OverrideAction(newPutRequest("cluster-x", `{"group_name":"g1","primary_instance_id":"epp-a"}`))
+	_, err := OverrideAction(newPutRequest("cluster-x", `{"group_name":"g1"}`))
 	require.Error(t, err)
 	assert.Equal(t, 404, xerror.Resolve(err).ErrNo)
 }
@@ -330,10 +329,8 @@ func TestOverrideAction_ValidationErrors(t *testing.T) {
 		body  string
 		errNo int
 	}{
-		{"group not exist", `{"group_name":"gx","primary_instance_id":"epp-a"}`, 422},
-		{"primary not in group", `{"group_name":"g1","primary_instance_id":"epp-c"}`, 422},
-		{"group name empty", `{"group_name":"","primary_instance_id":"epp-a"}`, 422},
-		{"primary empty", `{"group_name":"g1","primary_instance_id":""}`, 422},
+		{"group not exist", `{"group_name":"gx"}`, 422},
+		{"group name empty", `{"group_name":""}`, 422},
 		{"body empty", `{}`, 422},
 		{"body not json", `{`, 422},
 	}
@@ -345,20 +342,4 @@ func TestOverrideAction_ValidationErrors(t *testing.T) {
 			assert.Equal(t, tc.errNo, xerror.Resolve(err).ErrNo)
 		})
 	}
-}
-
-func TestOverrideAction_SingleInstanceGroup(t *testing.T) {
-	_, teardown := setupManager(t)
-	defer teardown()
-
-	// cluster-b is assigned to g2 whose only instance is epp-c: no standby.
-	data, err := OverrideAction(newPutRequest("cluster-b", `{"group_name":"g2","primary_instance_id":"epp-c"}`))
-	require.NoError(t, err)
-
-	view, ok := data.(*ClusterAssignmentOverrideData)
-	require.True(t, ok)
-	assert.Equal(t, "cluster-b", view.Cluster)
-	require.NotNil(t, view.Primary)
-	assert.Equal(t, "epp-c", view.Primary.ID)
-	assert.Nil(t, view.Standby)
 }

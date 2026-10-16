@@ -239,6 +239,27 @@ CREATE TABLE IF NOT EXISTS `batch_tasks` (
 -- 存量库若仍为明文 'admin'，无需在此处理：应用登录时按需惰性重哈希
 -- （见 lib/xcrypto/password.go CheckPassword 的 needMigrate）。
 
+-- ---------------------------------------------------------------------------
+-- 4. 删除列（EPP 单实例化，见 design-docs/modifications/2026-10-14-epp-single-instance/）
+-- ---------------------------------------------------------------------------
+
+-- 4.1 epp_assignments：删除主实例 id 列（分配粒度收敛为实例组，实例由组派生）
+-- 建议升级前先将 EPP 实例池收敛为单实例组（旧版本最后一次 PATCH /epp-pool
+-- 写入单实例组）；未收敛时组内实例按 id 序派生，可能出现一次指向切换。
+ALTER TABLE `epp_assignments` DROP COLUMN `primary_instance_id`;
+
+-- 回滚（仅供应急回滚 v0.0.11 该变更；回滚后应用按旧契约运行，列值需先回填，
+-- 否则 UpsertAssignment 写入会报错）：
+-- ALTER TABLE `epp_assignments`
+--   ADD COLUMN `primary_instance_id` varchar(128) NOT NULL DEFAULT '' COMMENT '主实例id';
+-- 回填方式（按"分配的组内 id 序第一条实例"恢复语义）：
+--   UPDATE `epp_assignments` AS a
+--   JOIN (
+--     SELECT group_name, MIN(id) AS first_id
+--     FROM `epp_instances` GROUP BY group_name
+--   ) AS g ON a.group_name = g.group_name
+--   SET a.primary_instance_id = g.first_id;
+
 -- ===========================================================================
 -- 升级完成。完整新装 schema 见 db_ddl.sql。
 -- ===========================================================================

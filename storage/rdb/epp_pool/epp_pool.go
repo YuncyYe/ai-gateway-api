@@ -142,8 +142,7 @@ func (s *EppPoolStorager) UpsertAssignment(ctx context.Context, param *epp_pool.
 	}
 
 	val := &dao.TEppAssignmentParam{
-		GroupName:         &param.GroupName,
-		PrimaryInstanceID: &param.PrimaryInstanceID,
+		GroupName: &param.GroupName,
 	}
 	where := &dao.TEppAssignmentParam{Cluster: &param.Cluster}
 
@@ -156,9 +155,8 @@ func (s *EppPoolStorager) UpsertAssignment(ctx context.Context, param *epp_pool.
 	}
 
 	_, err = dao.TEppAssignmentCreate(dbCtx, &dao.TEppAssignmentParam{
-		Cluster:           &param.Cluster,
-		GroupName:         &param.GroupName,
-		PrimaryInstanceID: &param.PrimaryInstanceID,
+		Cluster:   &param.Cluster,
+		GroupName: &param.GroupName,
 	})
 	if err != nil {
 		// Unique-key conflict fallback: the row appeared concurrently, update it.
@@ -215,8 +213,7 @@ func eppInstanceToDAO(param *epp_pool.InstanceParam) *dao.TEppInstanceParam {
 
 func eppAssignmentToParam(one *dao.TEppAssignment) *epp_pool.AssignmentParam {
 	return &epp_pool.AssignmentParam{
-		Cluster:           one.Cluster,
-		GroupName:         one.GroupName,
-		PrimaryInstanceID: one.PrimaryInstanceID,
+		Cluster:   one.Cluster,
+		GroupName: one.GroupName,
 	}
 }

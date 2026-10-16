@@ -73,9 +73,9 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/epp_data/config?version
                 }
             },
             "assignment": {
-                "cluster-a": { "primary": "epp-a", "standby": "epp-b" },
-                "cluster-b": { "primary": "epp-b", "standby": "epp-a" },
-                "cluster-c": { "primary": "epp-c", "standby": null }
+                "cluster-a": { "group": "g1" },
+                "cluster-b": { "group": "g1" },
+                "cluster-c": { "group": "g2" }
             }
         }
     },
@@ -111,16 +111,15 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/epp_data/config?version
 
 > **兼容性**：`saturation-detector` 为 llm-d 内建 filter，向后兼容；EPP 侧需能消费 `flowControl.saturationDetector`（或确认忽略该字段不影响启动）。`assignment` 段不受本次优化影响。
 
-### 3.3 Config.assignment 段（全量视图）
+### 3.3 Config.assignment 段（cluster → group 映射）
 
-`assignment` 为 `map[cluster名]{primary, standby}`，**所有 EPP 实例返回完全相同的内容**（同一 version 快照）。
+`assignment` 为 `map[cluster名]{group}`，**所有 EPP 实例返回完全相同的内容**（同一 version 快照）。分配粒度为实例组（见 `design-docs/modifications/2026-10-14-epp-single-instance/`）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| \<cluster名\>.primary | string | 主实例 id，为 `/epp-pool` 中配置的实例 id |
-| \<cluster名\>.standby | string \| null | 备实例 id；单实例组（无备）时为 `null` |
+| \<cluster名\>.group | string | 分配的 EPP 实例组名（`/epp-pool` 中的组名） |
 
-**EPP 侧消费方式**：以自身 `-instance-id`（须与 `/epp-pool` 中某实例 id 一致）逐 cluster 匹配——`primary == 本实例 id` → 本实例为该 cluster 的 primary；`standby == 本实例 id` → standby；均未命中 → 跳过该 cluster。全量视图的附带收益：EPP 可获知同组 peer 实例 id（如备 Cell 建联、双活跃自检）。
+**EPP 侧消费方式**：以自身所属组名（`-group-name` / `AI_GATEWAY_EPP_GROUP_NAME`，见 ai-gateway-epp 配置）逐 cluster 匹配——`group == 本实例所属组` → 本实例承担该 cluster；均未命中 → 跳过该 cluster。实例地址解析不属于本契约（EPP 与网关侧均通过组名关联 `/epp-pool` 导出的地址）。
 
 **异常态**：`epp_config` 中存在但 `assignment` 中无条目的 cluster = 未分配。EPP 侧应本地告警、不为该 cluster 建 cell；api 侧导出 server_data_conf 时该 cluster 降级为 `WRR` 并输出 error 日志（见 [server-data-conf.md](./server-data-conf.md) §3.3）。
 

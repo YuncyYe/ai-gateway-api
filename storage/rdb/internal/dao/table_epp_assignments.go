@@ -25,11 +25,10 @@ import (
 const tEppAssignmentTableName = "epp_assignments"
 
 type TEppAssignment struct {
-	Cluster           string    `db:"cluster"`
-	GroupName         string    `db:"group_name"`
-	PrimaryInstanceID string    `db:"primary_instance_id"`
-	CreateTime        time.Time `db:"create_time"`
-	UpdateTime        time.Time `db:"update_time"`
+	Cluster    string    `db:"cluster"`
+	GroupName  string    `db:"group_name"`
+	CreateTime time.Time `db:"create_time"`
+	UpdateTime time.Time `db:"update_time"`
 }
 
 // TEppAssignmentOne Query One
@@ -60,11 +59,10 @@ func TEppAssignmentList(dbCtx lib.DBContexter, where *TEppAssignmentParam) ([]*T
 }
 
 type TEppAssignmentParam struct {
-	Cluster           *string    `db:"cluster"`
-	GroupName         *string    `db:"group_name"`
-	PrimaryInstanceID *string    `db:"primary_instance_id"`
-	CreateTime        *time.Time `db:"create_time"`
-	UpdateTime        *time.Time `db:"update_time"`
+	Cluster    *string    `db:"cluster"`
+	GroupName  *string    `db:"group_name"`
+	CreateTime *time.Time `db:"create_time"`
+	UpdateTime *time.Time `db:"update_time"`
 
 	OrderBy *string `db:"_orderby"`
 }

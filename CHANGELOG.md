@@ -9,6 +9,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Changed
+- **Breaking** `PATCH /epp-pool`: tighten group-size validation to exactly 1 instance per group (backup/standby pairs are no longer accepted); the `instances` field keeps its array form reserved for future multi-instance expansion.
+- **Breaking** `/epp-assignments`: assignment granularity is now the EPP group, not a single instance. The view is reduced to `{cluster, group}` (`primary`/`standby`/`instances`/`degraded` removed; instance details are derived from `/epp-pool` by group name); the PUT body is now `{"group_name"}` only. Clusters without a valid assignment (never assigned or dangling) are enumerated in `unassigned_clusters` and repaired by the periodic reconciler.
+- **Breaking** InnerAPI `GET /configs/epp_data/config`: `assignment[cluster]` entry changed from `{primary, standby}` to `{group}`. ai-gateway-epp ships in the same release with group-based identity matching (`-group-name`); no cross-version compatibility — mixed versions fail loudly via `ai_epp_assignment_no_match`; see `design-docs/modifications/2026-10-14-epp-single-instance/`.
+- **Breaking** schema: drop the `epp_assignments.primary_instance_id` column (appended to `database/db_ddl_upgrade_to_0.0.11.sql` §4, with rollback notes; converge existing pools to single-instance groups before upgrading).
+- `server_data_conf` `GslbBasic.EPPAddr` is now always a single-element list (the assigned group's instance addresses); no BFE change required.
+
 ## [0.0.10] - 2026-09-24
 
 ### Added
