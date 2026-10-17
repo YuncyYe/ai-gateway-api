@@ -37,12 +37,12 @@ v0.0.7 起，`llm_config` 支持多 API-Key：
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 创建集群 | 28 |
+| 创建集群 | 31 |
 | 查询集群列表 | 1 |
 | 查询集群详情 | 1 |
-| 更新集群 | 11 |
+| 更新集群 | 15 |
 | 删除集群 | 8 |
-| **合计** | **49** |
+| **合计** | **56** |
 
 ## 4. 认证方式
 
@@ -86,7 +86,7 @@ clusters/
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | name | string | Y | 集群名，全局唯一 | 长度 1-64；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；全局唯一；不能包含空白字符 |
-| description | string | N | 集群描述 | 长度 ≤256；不能包含控制字符 |
+| description | string | N | 集群描述 | 长度 ≤256 字节（按 UTF-8 字节计）；不能包含控制字符 |
 | instance_pool | []Instance | Y | 实例列表 | ≥1 个元素；(hostname, ip) 组合唯一；至少一个实例 weight>0 |
 | instance_pool[].hostname | string | Y | 实例主机名 | 符合 Hostname 类型 |
 | instance_pool[].ip | string | Y | 实例 IP 地址 | 符合 IP Address 类型 |
@@ -194,6 +194,9 @@ clusters/
 | CL-1-042 | basic.timeouts.timeout_conn_serv 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-1-043 | basic 边界合法值 | 正常参数 | max_idle=0/max_retry=0/buffer=1/timeout=1 创建成功且回显正确 |
 | CL-1-044 | basic 空对象 | 正常参数 | 验证默认值填充（0/2/512/50000 等） |
+| CL-1-045 | description 恰好 256 字节 | 边界值（issue #244 / SC2101-TC024） | 合法上界，创建成功且 GET 回读一致 |
+| CL-1-046 | description 257 字节 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422，报错含 `description length must be <= 256` |
+| CL-1-047 | description 含控制字符 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422，报错含 `control characters` |
 
 ### 6.4 测试场景详细设计
 
@@ -1622,6 +1625,112 @@ clusters/
 
 ---
 
+#### 6.4.45 CL-1-045：description 恰好 256 字节（边界值，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1/§2.1 规定 `description` 长度 0-256 字节。256 是合法上界，必须被接受并原样落库（与 CL-1-046 构成上界两侧）。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 256 个 ASCII 字符（= 256 字节）。
+2. 验证返回 200 且 `Data.description` 与提交值一致。
+3. GET 回读，验证 `description` 仍与提交值一致。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "<256 个字节的字符串>",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 256 字节字符串 | Equals |
+| description（GET 回读） | 提交的 256 字节字符串 | Equals |
+
+---
+
+#### 6.4.46 CL-1-046：description 257 字节（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+修复前 `/clusters` 对 `description` 无任何长度校验，257 字节会被接受并落库（`SC2101-TC024` 的失败摘要 `Cluster description length 257 code=200`）。本用例钉住修复后的拒绝行为。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 257 个 ASCII 字符。
+2. 验证返回 422，且报错信息包含长度上限。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "<257 个字节的字符串>",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `description length must be <= 256`  
+**Data**：null
+
+---
+
+#### 6.4.47 CL-1-047：description 含控制字符（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1 要求"不能包含控制字符"。修复前该规则在集群路径上完全缺失（`\x01` 会被接受），本用例钉住新增拦截。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 `"abc\u0001def"`。
+2. 验证返回 422，且报错信息指向控制字符。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "abc\u0001def",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `control characters`  
+**Data**：null
+
+---
+
 ## 7. 查询集群列表
 
 ### 7.1 接口信息
@@ -1848,6 +1957,10 @@ URI：`c`
 | CL-4-021 | PATCH basic.buffers.req_write_buffer_size 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-4-022 | PATCH basic.timeouts.timeout_conn_serv 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-4-023 | PATCH 非法 basic 不污染存量配置 | 业务规则（issue #173） | 非法 PATCH 被拒后 GET 回读，存量 basic 配置保持不变 |
+| CL-4-024 | description 恰好 256 字节 | 边界值（issue #244 / SC2101-TC024） | 合法上界，返回 200 且 GET 回读一致 |
+| CL-4-025 | description 257 字节 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422（修复前为 200，SC2101-TC024 的失败臂） |
+| CL-4-026 | description 含控制字符 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422 且旧值保留 |
+| CL-4-027 | PATCH 非法 description 不污染存量值 | 原子性 | 257 字节被拒后 GET 回读，存量 description 保持不变 |
 
 ### 9.4 测试场景详细设计
 
@@ -2370,6 +2483,133 @@ URI：`cluster_update_key_affinity`
 | llm_config.key_affinity.ttl | 1200 | Equals |
 | llm_config.key_affinity.redis_prefix | "bfe:ai:key_affinity:v2" | Equals |
 | llm_config.key_affinity.penalty_enable | false | Equals |
+
+---
+
+#### 9.4.24 CL-4-024：description 恰好 256 字节（边界值，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1/§2.1 规定 `description` 长度 0-256 字节；256 是合法上界，PATCH 必须接受并原样落库（与 CL-4-025 构成上界两侧）。
+
+##### 前提数据准备
+
+已存在可用集群。
+
+##### 执行步骤
+
+1. PATCH `description` 为 256 个 ASCII 字符（= 256 字节），验证 200 且 `Data.description` 一致。
+2. GET 回读，验证 `description` 仍一致。
+
+##### 请求参数
+
+```json
+{ "description": "<256 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 256 字节字符串 | Equals |
+| description（GET 回读） | 提交的 256 字节字符串 | Equals |
+
+---
+
+#### 9.4.25 CL-4-025：description 257 字节被拒绝（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+修复前 PATCH `description` 257 字节返回 200 并改写库值（`SC2101-TC024` 的失败臂）；修复后必须 422。
+
+##### 前提数据准备
+
+已存在可用集群。
+
+##### 执行步骤
+
+1. PATCH `description` 为 257 个 ASCII 字符。
+2. 验证返回 422。
+
+##### 请求参数
+
+```json
+{ "description": "<257 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `description length must be <= 256`  
+**Data**：null
+
+---
+
+#### 9.4.26 CL-4-026：description 含控制字符被拒绝且旧值保留（合法性条件）
+
+##### 设计思路
+
+`clusters.md` §1 要求"不能包含控制字符"；修复前该路径无此校验。同时验证被拒请求不改写存量值。
+
+##### 前提数据准备
+
+已存在可用集群，并 PATCH 一个已知基线描述。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述。
+2. PATCH 提交含 `\u0001` 的 `description`，验证 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{ "description": "abc\u0001def" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `control characters`  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
+
+---
+
+#### 9.4.27 CL-4-027：PATCH 非法 description 不污染存量值（原子性）
+
+##### 设计思路
+
+校验发生在 `xreq.Bind` 阶段、早于 `UpdateCluster`；被拒请求不得改写库中既存描述（与 CL-4-104 同模式）。
+
+##### 前提数据准备
+
+已存在可用集群，并 PATCH 一个已知基线描述。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述。
+2. PATCH 提交 257 字节 `description`，验证 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{ "description": "<257 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
 
 ---
 

@@ -16,6 +16,7 @@ package entity_type_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
@@ -37,6 +38,7 @@ func TestMain(m *testing.M) {
 func TestEntityType_Create(t *testing.T) {
 	typeName := testutil.UniqueEntityTypeName()
 	typeName2 := testutil.UniqueEntityTypeName()
+	typeName3 := testutil.UniqueEntityTypeName()
 
 	tests := []struct {
 		name     string
@@ -111,6 +113,16 @@ func TestEntityType_Create(t *testing.T) {
 			},
 			wantCode: 422,
 		},
+		{
+			// entity-types.md §1/§2.1：0-255 字节，恰好 256 必须被拒绝
+			name: "ET-1-010 description 恰好 256 字节",
+			body: map[string]interface{}{
+				"type_name":   testutil.UniqueEntityTypeName(),
+				"description": strings.Repeat("a", 256),
+				"level":       1,
+			},
+			wantCode: 422,
+		},
 	}
 
 	for _, tt := range tests {
@@ -128,8 +140,30 @@ func TestEntityType_Create(t *testing.T) {
 		})
 	}
 
+	t.Run("ET-1-011 description 恰好 255 字节（合法边界）", func(t *testing.T) {
+		desc := strings.Repeat("b", 255)
+		resp, err := testutil.GetClient().Post("/open-api/v1/entity-types", map[string]interface{}{
+			"type_name":   typeName3,
+			"description": desc,
+			"level":       1,
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		testutil.AssertDataFieldEquals(t, resp, "description", desc)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/entity-types/" + typeName3)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", desc)
+	})
+
 	t.Cleanup(func() {
 		testutil.DeleteEntityType(typeName)
 		testutil.DeleteEntityType(typeName2)
+		testutil.DeleteEntityType(typeName3)
 	})
 }

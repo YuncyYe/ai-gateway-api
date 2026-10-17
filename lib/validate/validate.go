@@ -46,17 +46,24 @@ var (
 )
 
 const (
-	MaxUserNameLength          = 64
-	MaxTokenNameLength         = 64
-	MaxClusterNameLength       = 64
-	MaxCertNameLength          = 64
-	MaxEntityTypeNameLength    = 32
-	MaxEntityNameLength        = 64
-	MaxDescriptionLength       = 256
+	MaxUserNameLength       = 64
+	MaxTokenNameLength      = 64
+	MaxClusterNameLength    = 64
+	MaxCertNameLength       = 64
+	MaxEntityTypeNameLength = 32
+	MaxEntityNameLength     = 64
+	// MaxEntityTypeDescriptionLength 是 /entity-types 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/entity-types.md §1/§2.1：0-255。
+	MaxEntityTypeDescriptionLength = 255
+	// MaxEntityDescriptionLength 是 /entities 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/entities.md §1：0-255。
 	MaxEntityDescriptionLength = 255
-	MaxAPIDescriptionLength    = 512
-	MaxLLMKeyLength            = 512
-	MaxRateLimitNameLength     = 128
+	// MaxClusterDescriptionLength 是 /clusters 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/clusters.md §1/§2.1：0-256。
+	MaxClusterDescriptionLength = 256
+	MaxAPIDescriptionLength     = 512
+	MaxLLMKeyLength             = 512
+	MaxRateLimitNameLength      = 128
 )
 
 var reservedUserNames = map[string]bool{
@@ -332,6 +339,8 @@ func EntityTypeName(s string) error {
 }
 
 // Description validates a description string: no control chars, length <= max.
+// The length is counted in bytes (UTF-8), matching the "字节（按 UTF-8 字节计）"
+// wording of entity-types.md / entities.md / clusters.md.
 func Description(s string, maxLen int, name string) error {
 	if len(s) > maxLen {
 		return xerror.WrapParamErrorWithMsg("%s length must be <= %d", name, maxLen)

@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 - `GET /open-api/v1/batches/{batch_id}` now returns the task object itself at the `Data` top level with the associated files in `batch_files` (shape per `batches.md` §3.2), instead of the `{task, files}` wrapper; file entries follow the documented metadata shape and no longer expose internal fields (`id`/`direction`/`key_name`/…). This fixes the batch task detail page rendering empty panels in the dashboard (issue #249).
+- `/entity-types` `description` now rejects values longer than 255 bytes on both create and partial update (`422`); previously the limit was mis-set to 256, so a 256-byte description was accepted and stored. Matches `entity-types.md` §1/§2.1 (0-255 bytes) — issue #244, unblocking SC1203-TC011/TC015/TC017.
+- `/clusters` `description` is now validated on create and partial update: length must be ≤ 256 bytes and control characters are rejected (`422`). Previously the field had no validation at all, so any length (e.g. 257 bytes) and control characters were accepted and stored. Matches `clusters.md` §1/§2.1 (0-256 bytes, no control characters) — SC2101-TC024.
+- `description` length limits for `/entity-types`, `/entities` and `/clusters` are documented and counted in UTF-8 bytes, and the limit constants are now named per domain (`MaxEntityTypeDescriptionLength` / `MaxEntityDescriptionLength` / `MaxClusterDescriptionLength`) instead of the ambiguous shared `MaxDescriptionLength`; see `design-docs/modifications/2026-10-17-issue-244-description-length-validation/`.
 
 ## [0.0.10] - 2026-09-24
 

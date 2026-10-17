@@ -65,7 +65,7 @@ func EntityTypeUpdateAction(req *http.Request) (interface{}, error) {
 		}
 	}
 	if param.Description != nil {
-		if err := validate.Description(*param.Description, validate.MaxDescriptionLength, "description"); err != nil {
+		if err := validate.Description(*param.Description, validate.MaxEntityTypeDescriptionLength, "description"); err != nil {
 			return nil, err
 		}
 	}

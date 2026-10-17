@@ -17,6 +17,7 @@ package clusters_test
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
@@ -108,6 +109,84 @@ func TestClusters_Update(t *testing.T) {
 			t.Fatalf("request failed: %v", err)
 		}
 		testutil.AssertErrCode(t, resp, 404)
+	})
+
+	t.Run("CL-4-024 更新 description 恰好 256 字节（合法边界）", func(t *testing.T) {
+		// clusters.md §1/§2.1：0-256 字节，256 是合法上界
+		desc := strings.Repeat("b", 256)
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": desc,
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		testutil.AssertDataFieldEquals(t, resp, "description", desc)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", desc)
+	})
+
+	t.Run("CL-4-025 更新 description 257 字节被拒绝", func(t *testing.T) {
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": strings.Repeat("c", 257),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+	})
+
+	t.Run("CL-4-026 更新 description 含控制字符被拒绝且旧值保留", func(t *testing.T) {
+		baseline := "控制字符基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": "abc\x01def",
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
+	})
+
+	t.Run("CL-4-027 非法 description 不污染存量值（原子性）", func(t *testing.T) {
+		baseline := "原子性基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": strings.Repeat("d", 257),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
 	})
 
 	t.Run("CL-4-006 更新 keys（全量替换）", func(t *testing.T) {

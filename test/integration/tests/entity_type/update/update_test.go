@@ -80,14 +80,86 @@ func TestEntityType_Update(t *testing.T) {
 	})
 
 	t.Run("ET-4-004 更新 description 超过最大长度", func(t *testing.T) {
-		longDesc := strings.Repeat("a", 300)
+		// entity-types.md §1：0-255 字节。恰好 256 是契约边界（必须拒绝），
+		// 300 为"远超限"臂，保留既有覆盖。
+		for _, n := range []int{256, 300} {
+			resp, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
+				"description": strings.Repeat("a", n),
+			})
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			if resp.ErrNum != 422 {
+				t.Errorf("len=%d: expected ErrNum=422, got ErrNum=%d, ErrMsg=%s", n, resp.ErrNum, resp.ErrMsg)
+			}
+		}
+	})
+
+	t.Run("ET-4-005 更新 description 恰好 255 字节（合法边界）", func(t *testing.T) {
+		desc := strings.Repeat("b", 255)
 		resp, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
-			"description": longDesc,
+			"description": desc,
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		testutil.AssertDataFieldEquals(t, resp, "description", desc)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/entity-types/" + typeName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", desc)
+	})
+
+	t.Run("ET-4-006 更新 description 含控制字符被拒绝且旧值保留", func(t *testing.T) {
+		baseline := "控制字符基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
+			"description": "abc\x01def",
 		})
 		if err != nil {
 			t.Fatalf("request failed: %v", err)
 		}
 		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/entity-types/" + typeName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
+	})
+
+	t.Run("ET-4-007 非法 description 不污染存量值（原子性）", func(t *testing.T) {
+		baseline := "原子性基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/entity-types/"+typeName, map[string]interface{}{
+			"description": strings.Repeat("c", 256),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/entity-types/" + typeName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
 	})
 
 	t.Cleanup(func() {

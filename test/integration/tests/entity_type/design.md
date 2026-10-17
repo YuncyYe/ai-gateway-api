@@ -18,12 +18,12 @@ Entity-Type 模块用于定义 Entity 的类型及层级级别，是创建 Entit
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 创建 Entity-Type | 9 |
+| 创建 Entity-Type | 11 |
 | 查询 Entity-Type 列表 | 2 |
 | 查询单个 Entity-Type | 2 |
-| 更新 Entity-Type | 4 |
+| 更新 Entity-Type | 7 |
 | 删除 Entity-Type | 2 |
-| **合计** | **18** |
+| **合计** | **23** |
 
 ## 4. 认证方式
 
@@ -67,7 +67,7 @@ entity_type/
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | type_name | string | Y | 类型名，全局唯一 | 长度 1-32；仅允许小写字母、数字、`_`、`-`；不能以 `-`、`_` 开头或结尾；全局唯一；不能包含空白字符 |
-| description | string | N | 类型描述 | 长度 ≤255；不能包含控制字符 |
+| description | string | N | 类型描述 | 长度 ≤255 字节（按 UTF-8 字节计）；不能包含控制字符 |
 | level | int | Y | 层级级别 | 取值范围 1-5 |
 
 #### 6.2.2 返回数据字段
@@ -92,6 +92,8 @@ entity_type/
 | ET-1-007 | type_name 包含大写字母 | 合法性条件 | 验证 ErrNum=422 |
 | ET-1-008 | type_name 以 `-` 开头 | 合法性条件 | 验证 ErrNum=422 |
 | ET-1-009 | type_name 包含空白 | 合法性条件 | 验证 ErrNum=422 |
+| ET-1-010 | description 恰好 256 字节 | 边界值 | 契约 0-255 字节，验证 ErrNum=422 |
+| ET-1-011 | description 恰好 255 字节 | 边界值 | 合法边界，返回 200 且 GET 回读一致 |
 
 ### 6.4 测试场景详细设计
 
@@ -397,6 +399,79 @@ entity_type/
 
 ---
 
+#### 6.4.10 ET-1-010：description 恰好 256 字节（边界值）
+
+##### 设计思路
+
+`entity-types.md` §1/§2.1 规定 `description` 长度 0-255 字节；恰好 256 字节落在上限之外，必须被拒绝（issue #244 的越界臂）。
+
+##### 前提数据准备
+
+无（使用随机唯一 type_name，避免与既有数据冲突）。
+
+##### 执行步骤
+
+1. 发送 POST 请求，`description` 为 256 个 ASCII 字符（= 256 字节）。
+2. 验证返回错误码为 422。
+
+##### 请求参数
+
+```json
+{
+    "type_name": "<随机唯一类型名>",
+    "description": "<256 个字节的字符串>",
+    "level": 1
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 description 长度非法的错误信息（`description length must be <= 255`）  
+**Data**：null
+
+---
+
+#### 6.4.11 ET-1-011：description 恰好 255 字节（合法边界）
+
+##### 设计思路
+
+255 字节是契约内的最大合法值，必须被接受并原样落库（与 ET-1-010 构成上界的两侧锁定）。
+
+##### 前提数据准备
+
+无（使用随机唯一 type_name）。
+
+##### 执行步骤
+
+1. 发送 POST 请求，`description` 为 255 个 ASCII 字符（= 255 字节）。
+2. 验证返回 200 且 `Data.description` 与提交值一致。
+3. 发送 GET 请求查询同一 type_name，验证 `description` 仍与提交值一致。
+
+##### 请求参数
+
+```json
+{
+    "type_name": "<随机唯一类型名>",
+    "description": "<255 个字节的字符串>",
+    "level": 1
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 255 字节字符串 | Equals |
+| description（GET 回读） | 提交的 255 字节字符串 | Equals |
+
+---
+
 ## 7. 查询 Entity-Type 列表
 
 ### 7.1 接口信息
@@ -654,7 +729,10 @@ URI：`non_existent`
 | ET-4-001 | 更新 Entity-Type 描述 | 正常参数 | description 更新，其余不变 |
 | ET-4-002 | 更新后查询一致性 | 返回数据 | PATCH 后立即 GET，验证数据一致 |
 | ET-4-003 | 更新不存在的 Entity-Type | 异常参数 | 验证 ErrNum=404 |
-| ET-4-004 | 更新 description 超过最大长度 | 合法性条件 | 验证 ErrNum=422 |
+| ET-4-004 | 更新 description 超过最大长度 | 边界值 | 恰好 256 与 300 字节，验证 ErrNum=422 |
+| ET-4-005 | description 恰好 255 字节 | 边界值 | 合法边界，返回 200 且 GET 回读一致 |
+| ET-4-006 | description 含控制字符 | 合法性条件 | 验证 ErrNum=422 且旧值保留 |
+| ET-4-007 | 非法 description 不污染存量值 | 原子性 | 256 字节被拒后 GET 回读仍为上一次的值 |
 
 ### 9.4 测试场景详细设计
 
@@ -766,11 +844,11 @@ Body：
 
 ---
 
-#### 9.4.4 ET-4-004：更新 description 超过最大长度（合法性条件）
+#### 9.4.4 ET-4-004：更新 description 超过最大长度（边界值）
 
 ##### 设计思路
 
-验证更新 `description` 时长度不能超过允许的最大值。
+`entity-types.md` §1 规定 `description` 长度 0-255 字节。既有用例只覆盖了 300 字节（"远超限"臂，256/255 两种上限下都拒绝），无法暴露边界差一；本用例补上**恰好 256 字节**这一契约边界（issue #244 的失败臂）。
 
 ##### 前提数据准备
 
@@ -778,22 +856,127 @@ Body：
 
 ##### 执行步骤
 
-1. 发送 PATCH 请求，`description` 为 300 个字符。
-2. 验证返回错误码。
+1. 发送 PATCH 请求，`description` 为 256 个 ASCII 字符（= 256 字节），验证返回 422。
+2. 发送 PATCH 请求，`description` 为 300 个 ASCII 字符，验证返回 422（保留原有覆盖）。
 
 ##### 请求参数
 
 ```json
 {
-    "description": "<300 个字符的字符串>"
+    "description": "<256 个字节的字符串>"
 }
 ```
 
 ##### 预期返回结果
 
 **ErrNum**：422  
-**ErrMsg**：包含 description 长度非法的错误信息  
+**ErrMsg**：包含 description 长度非法的错误信息（`description length must be <= 255`）  
 **Data**：null
+
+---
+
+#### 9.4.5 ET-4-005：description 恰好 255 字节（边界值）
+
+##### 设计思路
+
+锁定合法边界：255 字节必须通过且被原样落库，与 ET-4-004 构成上界两侧。
+
+##### 前提数据准备
+
+已创建 `department`。
+
+##### 执行步骤
+
+1. 发送 PATCH 请求，`description` 为 255 个 ASCII 字符（= 255 字节）。
+2. 验证返回 200 且 `Data.description` 与提交值一致。
+3. 发送 GET 请求，验证回读值仍与提交值一致。
+
+##### 请求参数
+
+```json
+{
+    "description": "<255 个字节的字符串>"
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 255 字节字符串 | Equals |
+| description（GET 回读） | 提交的 255 字节字符串 | Equals |
+
+---
+
+#### 9.4.6 ET-4-006：description 含控制字符（合法性条件）
+
+##### 设计思路
+
+`entity-types.md` §1 要求"不能包含控制字符"。该臂在 issue #244 的 E2E 中因长度臂先失败而未触达，需单独钉住；同时验证被拒请求不改写存量值。
+
+##### 前提数据准备
+
+已创建 `department`，并将 `description` PATCH 为已知基线值。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述。
+2. PATCH 提交含 `\x01` 的 `description`，验证返回 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{
+    "description": "abc\u0001def"
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含控制字符非法的错误信息（`string contains control characters`）  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
+
+---
+
+#### 9.4.7 ET-4-007：非法 description 不污染存量值（原子性）
+
+##### 设计思路
+
+对应 `SC1203-TC017` 的 invalid-description-atomicity：参数校验在写路径之前，被拒请求不得改写库中既存描述。
+
+##### 前提数据准备
+
+已创建 `department`，并将 `description` PATCH 为已知基线值。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述并 GET 确认。
+2. PATCH 提交 256 字节的 `description`，验证返回 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{
+    "description": "<256 个字节的字符串>"
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
 
 ---
 
