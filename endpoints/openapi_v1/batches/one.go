@@ -24,13 +24,10 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
 )
 
-type batchTaskDetailResponse struct {
-	Task  *ibatch.BatchTask   `json:"task"`
-	Files []*ibatch.BatchFile `json:"files"`
-}
-
 // BatchTaskOneAction GET /open-api/v1/batches/{batch_id}：DB 优先，miss
 // 回源 Redis BATCH_TASK（覆盖对账 job 落库前窗口），再 miss 404。
+// 返回 *ibatch.BatchTask：Data 顶层即任务字段，关联文件填充 batch_files
+//（batches.md §3.2，元素形状 §2.2）。
 func BatchTaskOneAction(req *http.Request) (interface{}, error) {
 	product, err := resolveProduct(req.Context())
 	if err != nil {
@@ -50,7 +47,7 @@ func BatchTaskOneAction(req *http.Request) (interface{}, error) {
 	}
 
 	// 关联 batch_files（输入/输出），best-effort：缺失不阻塞详情。
-	files := make([]*ibatch.BatchFile, 0, 2)
+	task.BatchFiles = make([]*ibatch.BatchFileMeta, 0, 2)
 	for _, fileID := range []string{task.InputFileID, task.OutputFileID} {
 		if fileID == "" {
 			continue
@@ -59,8 +56,8 @@ func BatchTaskOneAction(req *http.Request) (interface{}, error) {
 		if err != nil || file == nil {
 			continue
 		}
-		files = append(files, file)
+		task.BatchFiles = append(task.BatchFiles, file.ToMeta())
 	}
 
-	return &batchTaskDetailResponse{Task: task, Files: files}, nil
+	return task, nil
 }

@@ -58,8 +58,12 @@ func TestBatchDetail_NotFound(t *testing.T) {
 	testutil.AssertErrCode(t, resp, 404)
 }
 
-// ---------- BT-2-002 直写一行 → 200 且字段完整 ----------
+// ---------- BT-2-002 直写一行 → 200 且字段完整（合同形状锁定，issue #249） ----------
 
+// TestBatchDetail_FullFields 按 batches.md §3.2 合同断言：Data 顶层即任务字段
+//（无 task/files 包装层），关联文件在 batch_files（§2.2 形状）。
+// 反面模式 #5 警示：本用例曾按实现现状断言 task/files 包装与内部 direction
+// 字段，把缺陷固化成通行证；修复后以合同为唯一断言依据。
 func TestBatchDetail_FullFields(t *testing.T) {
 	helper.RequireBatchAPI(t)
 	db := helper.OpenDB(t, sm)
@@ -102,26 +106,30 @@ func TestBatchDetail_FullFields(t *testing.T) {
 
 	var data map[string]interface{}
 	require.NoError(t, json.Unmarshal(resp.Data, &data))
-	task, ok := data["task"].(map[string]interface{})
-	require.True(t, ok, "Data.task must exist")
 
-	assert.Equal(t, tag, task["batch_id"])
-	assert.Equal(t, tag+"-ak", task["api_key_id"])
-	assert.Equal(t, helper.TestProductName, task["product_name"])
-	assert.Equal(t, tag+"-entity", task["entity_id"])
-	assert.Equal(t, "deepseek", task["provider"])
-	assert.Equal(t, "key-primary", task["key_name"])
-	assert.Equal(t, "/v1/batches", task["endpoint"])
-	assert.Equal(t, tag+"-in", task["input_file_id"])
-	assert.Equal(t, tag+"-out", task["output_file_id"])
-	assert.Equal(t, "in_progress", task["status"])
-	assert.Equal(t, "reserved", task["settle_status"])
-	assert.Equal(t, true, task["over_reserved"])
-	assert.Equal(t, "log", task["sync_source"])
+	// 顶层形状锁（家族11：防包装层回归——Data 必须是任务对象本身）。
+	_, hasTask := data["task"]
+	_, hasFiles := data["files"]
+	assert.False(t, hasTask, "Data.task wrapper must not exist (batches.md §3.2)")
+	assert.False(t, hasFiles, "Data.files wrapper must not exist (batches.md §3.2)")
+
+	// 任务字段在 Data 顶层（§2.1）。
+	assert.Equal(t, tag, data["batch_id"])
+	assert.Equal(t, tag+"-ak", data["api_key_id"])
+	assert.Equal(t, helper.TestProductName, data["product_name"])
+	assert.Equal(t, tag+"-entity", data["entity_id"])
+	assert.Equal(t, "deepseek", data["provider"])
+	assert.Equal(t, "/v1/batches", data["endpoint"])
+	assert.Equal(t, tag+"-in", data["input_file_id"])
+	assert.Equal(t, tag+"-out", data["output_file_id"])
+	assert.Equal(t, "in_progress", data["status"])
+	assert.Equal(t, "reserved", data["settle_status"])
+	assert.Equal(t, true, data["over_reserved"])
+	assert.Equal(t, "log", data["sync_source"])
 
 	// reserve_units 必须按 1e-8 定点整数输出：值为 250000000 且
 	// 原始报文 token 无小数点/科学计数法（不做 ÷1e8 换算）。
-	assert.Equal(t, float64(250000000), task["reserve_units"])
+	assert.Equal(t, float64(250000000), data["reserve_units"])
 	needle := strconv.Quote("reserve_units") + ":"
 	idx := strings.LastIndex(string(resp.RawBody), needle)
 	require.NotEqual(t, -1, idx)
@@ -131,20 +139,63 @@ func TestBatchDetail_FullFields(t *testing.T) {
 	token := strings.TrimSpace(rest[:end])
 	assert.Equal(t, "250000000", token, "reserve_units must serialize as integer token")
 
-	// 关联 batch_files（输入/输出）必须组装在 files 中
-	files, ok := data["files"].([]interface{})
-	require.True(t, ok, "Data.files must exist")
+	// 关联 batch_files（输入/输出）按 §2.2 形状组装在 Data 顶层。
+	filesVal, ok := data["batch_files"]
+	require.True(t, ok, "Data.batch_files must exist")
+	files, ok := filesVal.([]interface{})
+	require.True(t, ok, "Data.batch_files must be array")
 	require.Equal(t, 2, len(files))
 	byID := map[string]map[string]interface{}{}
 	for _, item := range files {
-		f := item.(map[string]interface{})
+		f, ok := item.(map[string]interface{})
+		require.True(t, ok, "batch_files element must be object")
+		// 键集合精确锁：恰为 §2.2 六字段中的实际输出五键
+		//（filename 一期留空被 omitempty 省略），不得泄漏内部字段
+		//（id/direction/lines/key_name/api_key_id/product_name/first_seen_at/...）。
+		keys := make([]string, 0, len(f))
+		for k := range f {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t,
+			[]string{"file_id", "provider", "purpose", "bytes", "created_at"}, keys,
+			"batch_files element keys must exactly match contract (batches.md §2.2)")
 		byID[f["file_id"].(string)] = f
 	}
 	require.Contains(t, byID, tag+"-in")
 	require.Contains(t, byID, tag+"-out")
-	assert.Equal(t, "input", byID[tag+"-in"]["direction"])
-	assert.Equal(t, "output", byID[tag+"-out"]["direction"])
+	assert.Equal(t, "batch_input", byID[tag+"-in"]["purpose"])
+	assert.Equal(t, "batch_output", byID[tag+"-out"]["purpose"])
 	assert.Equal(t, float64(1024), byID[tag+"-in"]["bytes"])
+	assert.Equal(t, float64(2048), byID[tag+"-out"]["bytes"])
+
+	// 原始报文不得出现文件内部字段（direction 为一期直出缺陷的典型泄漏键）。
+	assert.NotContains(t, string(resp.RawBody), `"direction"`)
+	assert.NotContains(t, string(resp.RawBody), `"first_seen_at"`)
+}
+
+// ---------- BT-2-004 无关联文件 → 200 且 batch_files 键缺席（omitempty） ----------
+
+func TestBatchDetail_NoFiles(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-004")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "queued", SettleStatus: "reserved",
+		SyncSource: "redis", IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	assert.Equal(t, tag, data["batch_id"])
+	_, hasFiles := data["batch_files"]
+	assert.False(t, hasFiles, "batch_files must be omitted when no associated files (omitempty)")
 }
 
 // ---------- BT-2-003 产品线隔离：其它产品线的任务按不存在处理 ----------

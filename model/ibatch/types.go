@@ -108,6 +108,39 @@ type BatchTask struct {
 	CreatedAt         time.Time        `json:"created_at"`
 	UpdatedAt         time.Time        `json:"updated_at"`
 	TerminalAt        *time.Time       `json:"terminal_at,omitempty"`
+
+	// BatchFiles 为详情接口对外组装的关联文件元数据视图（batches.md
+	// §3.2，元素形状见 §2.2）。非持久化字段，DAO 不读写；列表接口不填充
+	//（§3.1 示例不含 batch_files）。
+	BatchFiles []*BatchFileMeta `json:"batch_files,omitempty"`
+}
+
+// BatchFileMeta 是批量文件元数据的对外视图（batches.md §2.2）：只映射
+// 契约字段，内部字段（id / key_name / api_key_id / product_name /
+// direction / lines / first_seen_at / last_seen_at / updated_at）不外泄。
+// filename 一期不落库（batch_files 表无该列），固定为空、序列化时省略。
+type BatchFileMeta struct {
+	FileID    string    `json:"file_id"`
+	Provider  string    `json:"provider"`
+	Purpose   string    `json:"purpose,omitempty"`
+	Filename  string    `json:"filename,omitempty"`
+	Bytes     int64     `json:"bytes,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ToMeta 将文件实体转换为对外视图。
+func (f *BatchFile) ToMeta() *BatchFileMeta {
+	if f == nil {
+		return nil
+	}
+	return &BatchFileMeta{
+		FileID:    f.FileID,
+		Provider:  f.Provider,
+		Purpose:   f.Purpose,
+		Filename:  "",
+		Bytes:     f.Bytes,
+		CreatedAt: f.CreatedAt,
+	}
 }
 
 // 文件实体（batch_files 行）。表内不存文件内容。

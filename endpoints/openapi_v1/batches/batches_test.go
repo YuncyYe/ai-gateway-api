@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
@@ -233,7 +234,12 @@ func TestBatchTaskOneAction(t *testing.T) {
 				}, nil
 			},
 			fetchFileFn: func(ctx context.Context, fileID, provider, productName string, allowRedisFallback bool) (*ibatch.BatchFile, error) {
-				return &ibatch.BatchFile{FileID: fileID, Provider: provider}, nil
+				return &ibatch.BatchFile{
+					FileID: fileID, Provider: provider,
+					KeyName: "key-1", APIKeyID: "ak-1", ProductName: productName,
+					Direction: "input", Purpose: "batch_input", Lines: 10, Bytes: 4224,
+					CreatedAt: time.Date(2026, 10, 6, 9, 55, 0, 0, time.UTC),
+				}, nil
 			},
 		}
 		defer setupBatchManager(m)()
@@ -241,10 +247,38 @@ func TestBatchTaskOneAction(t *testing.T) {
 		req := withPathVars(newProductRequest(t, http.MethodGet, "/batches/b-1"), map[string]string{"batch_id": "b-1"})
 		data, err := BatchTaskOneAction(req)
 		require.NoError(t, err)
-		resp := data.(*batchTaskDetailResponse)
-		require.NotNil(t, resp.Task)
-		assert.Equal(t, "b-1", resp.Task.BatchID)
-		assert.Equal(t, 2, len(resp.Files))
+		// 契约（batches.md §3.2）：Data 顶层即任务字段，关联文件在 batch_files。
+		task := data.(*ibatch.BatchTask)
+		assert.Equal(t, "b-1", task.BatchID)
+		require.Len(t, task.BatchFiles, 2)
+		meta := task.BatchFiles[0]
+		assert.Equal(t, "f-in", meta.FileID)
+		assert.Equal(t, "openai", meta.Provider)
+		assert.Equal(t, "batch_input", meta.Purpose)
+		assert.Equal(t, int64(4224), meta.Bytes)
+		assert.False(t, meta.CreatedAt.IsZero())
+	})
+
+	t.Run("输出文件缺失不阻塞详情", func(t *testing.T) {
+		m := &fakeBatchManager{
+			fetchTaskFn: func(ctx context.Context, batchID, productName string, allowRedisFallback bool) (*ibatch.BatchTask, error) {
+				return &ibatch.BatchTask{
+					BatchID: "b-2", Status: "in_progress",
+					InputFileID: "f-in", Provider: "deepseek",
+				}, nil
+			},
+			fetchFileFn: func(ctx context.Context, fileID, provider, productName string, allowRedisFallback bool) (*ibatch.BatchFile, error) {
+				return &ibatch.BatchFile{FileID: fileID, Provider: provider}, nil
+			},
+		}
+		defer setupBatchManager(m)()
+
+		req := withPathVars(newProductRequest(t, http.MethodGet, "/batches/b-2"), map[string]string{"batch_id": "b-2"})
+		data, err := BatchTaskOneAction(req)
+		require.NoError(t, err)
+		task := data.(*ibatch.BatchTask)
+		require.Len(t, task.BatchFiles, 1)
+		assert.Equal(t, "f-in", task.BatchFiles[0].FileID)
 	})
 
 	t.Run("未命中 404", func(t *testing.T) {
