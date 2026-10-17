@@ -87,5 +87,12 @@ func CreateAction(req *http.Request) (interface{}, error) {
 		return nil, err
 	}
 
+	// certificates.md §1/§2.1：description 必填、长度 2-256 字节、不能包含控制字符。
+	// 必填与下限由 CreateParam 的 `required,min=2` tag 承担，此处补齐上限与控制字符；
+	// 校验位于 createActionProcess 之前，被拒请求不落库、不触发默认证书切换。
+	if err := validate.Description(*param.Description, validate.MaxCertificateDescriptionLength, "description"); err != nil {
+		return nil, err
+	}
+
 	return createActionProcess(req, param)
 }

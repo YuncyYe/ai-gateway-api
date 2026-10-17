@@ -177,16 +177,23 @@ func TestDescription(t *testing.T) {
 		assert.Error(t, Description(strings.Repeat("a", 257), MaxClusterDescriptionLength, "description"))
 	})
 
+	t.Run("certificate boundary is 256", func(t *testing.T) {
+		assert.NoError(t, Description(strings.Repeat("a", 256), MaxCertificateDescriptionLength, "description"))
+		assert.Error(t, Description(strings.Repeat("a", 257), MaxCertificateDescriptionLength, "description"))
+	})
+
 	t.Run("empty string is allowed", func(t *testing.T) {
 		assert.NoError(t, Description("", MaxEntityTypeDescriptionLength, "description"))
 		assert.NoError(t, Description("", MaxEntityDescriptionLength, "description"))
 		assert.NoError(t, Description("", MaxClusterDescriptionLength, "description"))
+		assert.NoError(t, Description("", MaxCertificateDescriptionLength, "description"))
 	})
 
 	t.Run("control characters are rejected", func(t *testing.T) {
 		for _, s := range []string{"abc\x01def", "abc\ndef", "abc\x7fdef", "\x00"} {
 			assert.Error(t, Description(s, MaxEntityTypeDescriptionLength, "description"), "%q must be rejected", s)
 			assert.Error(t, Description(s, MaxClusterDescriptionLength, "description"), "%q must be rejected", s)
+			assert.Error(t, Description(s, MaxCertificateDescriptionLength, "description"), "%q must be rejected", s)
 		}
 	})
 
@@ -200,6 +207,7 @@ func TestDescription(t *testing.T) {
 		assert.Equal(t, 255, MaxEntityTypeDescriptionLength, "entity-types.md §1/§2.1: 0-255")
 		assert.Equal(t, 255, MaxEntityDescriptionLength, "entities.md §1: 0-255")
 		assert.Equal(t, 256, MaxClusterDescriptionLength, "clusters.md §1/§2.1: 0-256")
+		assert.Equal(t, 256, MaxCertificateDescriptionLength, "certificates.md §1/§2.1: 必填 2-256")
 	})
 }
 

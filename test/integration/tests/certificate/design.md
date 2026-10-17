@@ -19,13 +19,13 @@ Certificate 模块负责 TLS 证书的管理，包括创建、列表、详情、
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 创建证书 | 13 |
+| 创建证书 | 17 |
 | 证书列表 | 1 |
 | 证书详情（按名称） | 2 |
 | 证书详情（按 ID 或名称） | 2 |
 | 设为默认证书 | 1 |
 | 删除证书 | 2 |
-| **合计** | **21** |
+| **合计** | **25** |
 
 ## 4. 认证方式
 
@@ -71,7 +71,7 @@ certificate/
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | cert_name | string | Y | 证书名，必须唯一 | 长度 2-64；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；全局唯一；不能包含空白字符 |
-| description | string | Y | 证书描述 | 必填；长度 2-256；不能包含控制字符 |
+| description | string | Y | 证书描述 | 必填；长度 2-256 字节（按 UTF-8 字节计）；不能包含控制字符 |
 | is_default | bool | Y | 是否是默认证书 | 必填 |
 | cert_file_name | string | Y | 主证书文件名 | - |
 | cert_file_content | string | Y | 主证书文件内容 | 必填；须为合法 PEM X.509 证书 |
@@ -109,6 +109,10 @@ certificate/
 | CERT-1-011 | cert_name 以 `-` 开头 | 异常参数 | 验证 ErrNum=422 |
 | CERT-1-012 | cert_name 以 `_` 结尾 | 异常参数 | 验证 ErrNum=422 |
 | CERT-1-013 | cert_name 含 `.`（合法） | 正常参数 | 验证含点证书名创建成功（Issue #133） |
+| CERT-1-014 | description 恰好 256 字节 | 边界值 | 合法上界，创建成功且 GET 回读一致 |
+| CERT-1-015 | description 257 字节 | 合法性条件 | 验证 ErrNum=422，且证书未创建（GET → 404） |
+| CERT-1-016 | description 含控制字符 | 合法性条件 | 验证 ErrNum=422，且证书未创建（GET → 404） |
+| CERT-1-017 | description 长度为 1 | 合法性条件 | 验证 ErrNum=422（tag `min=2`），且证书未创建 |
 
 ### 6.4 测试场景详细设计
 
@@ -325,6 +329,46 @@ certificate/
 | cert_name | 与请求一致 | Equals |
 | cert_file_content | 不存在 | NotExists |
 | key_file_content | 不存在 | NotExists |
+
+---
+
+#### 6.4.14 CERT-1-014 ~ CERT-1-017：description 合法性条件（边界值 + 异常参数）
+
+##### 设计思路
+
+`certificates.md` §1/§2.1 规定 `description`：必填、长度 2-256 字节、不能包含控制字符。
+修复前实现只有 tag `required,min=2`（无上限、无控制字符检查），257 字节与含 `\x01` 的描述会被接受并落库
+（实测：修复前两条均返回 `ErrNum=200` 且证书已创建）。本组用例按合同钉住上限两侧与拒绝后的零副作用。
+
+##### 前提数据准备
+
+无（每条用例使用随机唯一 `cert_name`，证书内容由 `testutil.GenerateTestCert` 现场生成）。
+
+##### 执行步骤
+
+| 用例 | description | 期望 |
+|------|-------------|------|
+| CERT-1-014 | 256 个 ASCII 字符（= 256 字节） | 200，`Data.description` 与提交值一致，且 GET 回读一致 |
+| CERT-1-015 | 257 个 ASCII 字符 | 422，且 `GET /certificates/{cert_name}` → 404（未创建） |
+| CERT-1-016 | `"abc\u0001def"` | 422，且 GET → 404（未创建） |
+| CERT-1-017 | `"x"`（长度 1） | 422（tag `min=2`），且 GET → 404（未创建） |
+
+##### 请求参数
+
+```json
+{
+    "cert_name": "<随机唯一证书名>",
+    "description": "<见上表>",
+    "is_default": false,
+    "cert_file_content": "-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----",
+    "key_file_content": "-----BEGIN RSA PRIVATE KEY-----...-----END RSA PRIVATE KEY-----"
+}
+```
+
+##### 预期返回结果
+
+**CERT-1-014**：`ErrNum=200`，`Data.description == 提交值`（POST 响应与 GET 回读一致）  
+**CERT-1-015 / 016 / 017**：`ErrNum=422`，`Data=null`，且该 `cert_name` 查询返回 404（拒绝即零副作用）
 
 ---
 

@@ -304,7 +304,7 @@ if p.Description != nil {
    （c）`ALTER TABLE entity_types MODIFY COLUMN description VARCHAR(255) DEFAULT '' COMMENT '类型描述';`
    （d）按既有约定追加到 `database/db_ddl_upgrade_to_0.0.11.sql`（该脚本要求不含 DROP、破坏性步骤写入手动步骤章节），并同步更新 `db_ddl.sql` / `design-docs/sys-design/数据库设计文档.md` §6.3；
    Cluster 侧列宽 1024 宽于契约 0-256，收窄收益更低，不建议纳入；
-3. **同类缺口的观察（未纳入本期）**：`certificates.md` §1/§2.1 要求 `description`"必填；长度 2-256 字符；不能包含控制字符"，而 `endpoints/openapi_v1/certificate/create.go:41` 只有 tag `validate:"required,min=2"`（**无 256 上限、无控制字符检查**），与 B 属同一形态的缺校验。本期按 owner 指定范围只并入 Cluster，证书域建议另开 issue 或在下一批一并处理；
+3. **同类缺口的观察（未纳入本期）**：`certificates.md` §1/§2.1 要求 `description`"必填；长度 2-256 字符；不能包含控制字符"，而 `endpoints/openapi_v1/certificate/create.go:41` 只有 tag `validate:"required,min=2"`（**无 256 上限、无控制字符检查**），与 B 属同一形态的缺校验。本期按 owner 指定范围只并入 Cluster ⇒ **已单独出方案**：`design-docs/modifications/2026-10-17-cert-description-validation/`（2026-10-17，方案阶段，代码与文档尚未落地）；
 4. **邻仓副本的同步情况（跨仓边界，本期未改）**：
    - `ai-gateway-web/design-docs/api-define/OpenAPI接口定义/{entity-types.md,entities.md}` 是本次改动文件的**逐字镜像**（改动前与本仓版本 byte-identical；`diff` 现有差异恰为本次替换的 3 处 / 5 处）⇒ 需要其 owner 用同措辞同步这两份，否则前端侧合同文本仍写"字符"；
    - `ai-gateway-web/.../clusters.md` **不是镜像**：与本仓版本已有 138 行历史差异（`epp_runtime`、`load_profile`/`affinity`、`normalize_upstream_error` 等前端侧尚未跟进的变更），本期不适用"逐字同步"，该文件的整体对齐属前端文档的独立任务；

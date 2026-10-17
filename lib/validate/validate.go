@@ -61,9 +61,13 @@ const (
 	// MaxClusterDescriptionLength 是 /clusters 的 description 上限，
 	// 依据 design-docs/api-define/OpenAPI接口定义/clusters.md §1/§2.1：0-256。
 	MaxClusterDescriptionLength = 256
-	MaxAPIDescriptionLength     = 512
-	MaxLLMKeyLength             = 512
-	MaxRateLimitNameLength      = 128
+	// MaxCertificateDescriptionLength 是 /certificates 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/certificates.md §1/§2.1：必填 2-256。
+	// 下限（必填、≥2）由 CreateParam 的 `required,min=2` tag 承担。
+	MaxCertificateDescriptionLength = 256
+	MaxAPIDescriptionLength         = 512
+	MaxLLMKeyLength                 = 512
+	MaxRateLimitNameLength          = 128
 )
 
 var reservedUserNames = map[string]bool{
