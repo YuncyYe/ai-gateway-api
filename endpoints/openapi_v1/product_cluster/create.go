@@ -113,6 +113,11 @@ func (p *UpsertParam) Validate() error {
 	if err := validate.ClusterName(*p.Name); err != nil {
 		return err
 	}
+	if p.Description != nil {
+		if err := validate.Description(*p.Description, validate.MaxClusterDescriptionLength, "description"); err != nil {
+			return err
+		}
+	}
 	if err := validateBasicRanges(p.Basic); err != nil {
 		return err
 	}

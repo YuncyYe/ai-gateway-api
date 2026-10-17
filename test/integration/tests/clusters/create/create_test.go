@@ -17,6 +17,7 @@ package clusters_test
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
@@ -73,6 +74,7 @@ func TestClusters_Create(t *testing.T) {
 	clusterMin := testutil.UniqueClusterName()
 	clusterFull := testutil.UniqueClusterName()
 	clusterDup := testutil.UniqueClusterName()
+	clusterDescBoundary := testutil.UniqueClusterName()
 
 	providerFull := testutil.UniqueProviderName()
 	providerKeys := testutil.UniqueProviderName()
@@ -681,6 +683,46 @@ func TestClusters_Create(t *testing.T) {
 				}
 			},
 		},
+		{
+			// clusters.md §1/§2.1：description 长度 0-256 字节，256 是合法上界
+			name: "CL-1-045 description 恰好 256 字节",
+			body: func() map[string]interface{} {
+				b := minClusterBody(clusterDescBoundary, providerFull)
+				b["description"] = strings.Repeat("b", 256)
+				return b
+			}(),
+			wantCode: 200,
+			check: func(t *testing.T, resp *testutil.APIResponse) {
+				testutil.AssertDataFieldEquals(t, resp, "description", strings.Repeat("b", 256))
+
+				got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterDescBoundary)
+				if err != nil {
+					t.Fatalf("request failed: %v", err)
+				}
+				testutil.AssertSuccess(t, got)
+				testutil.AssertDataFieldEquals(t, got, "description", strings.Repeat("b", 256))
+			},
+		},
+		{
+			name: "CL-1-046 description 257 字节被拒绝",
+			body: func() map[string]interface{} {
+				b := minClusterBody(testutil.UniqueClusterName(), providerFull)
+				b["description"] = strings.Repeat("c", 257)
+				return b
+			}(),
+			wantCode: 422,
+			wantMsg:  "description length must be <= 256",
+		},
+		{
+			name: "CL-1-047 description 含控制字符被拒绝",
+			body: func() map[string]interface{} {
+				b := minClusterBody(testutil.UniqueClusterName(), providerFull)
+				b["description"] = "abc\x01def"
+				return b
+			}(),
+			wantCode: 422,
+			wantMsg:  "control characters",
+		},
 	}
 
 	// 预先创建重复集群
@@ -713,6 +755,7 @@ func TestClusters_Create(t *testing.T) {
 		testutil.DeleteCluster(clusterMin)
 		testutil.DeleteCluster(clusterFull)
 		testutil.DeleteCluster(clusterDup)
+		testutil.DeleteCluster(clusterDescBoundary)
 		testutil.DeleteProvider(providerFull)
 		testutil.DeleteProvider(providerKeys)
 		testutil.DeleteProvider(providerPrefix)
