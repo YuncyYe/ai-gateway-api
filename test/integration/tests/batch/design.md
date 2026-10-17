@@ -19,7 +19,7 @@ Batch 模块覆盖"批量与异步任务支持（一期）"的控制面管控 Op
 | 目标 | 说明 |
 |------|------|
 | 列表 | 空表返回空数组 + `next_cursor`；status/provider/api_key_id 过滤生效；产品线隔离；limit >200 钳制为 200；cursor 翻页不重复不遗漏 |
-| 详情 | 不存在 → 404（BATCH_NOT_FOUND）；直写一行 → 200 且字段完整（settle_status / reserve_units 定点整数 / over_reserved / sync_source）；关联 batch_files 组装 |
+| 详情 | 不存在 → 404（BATCH_NOT_FOUND）；直写一行 → 200 且字段完整（settle_status / reserve_units 定点整数 / over_reserved / sync_source）；关联 batch_files 按 §2.2 形状组装在 Data 顶层（无 task/files 包装层，issue #249 合同锁定） |
 | 取消 | 不存在 → 404；已终态（completed）→ 409；cancelling（受理中）→ 409；非终态但 provider 不可达 → 502；provider 记录缺失 → 500（实现语义，见 §4.3）；成功 → 200 cancelling + operation_logs 审计 |
 | 文件 | 直写 batch_files → 200 字段正确；不存在 → 404；provider 缺失 → 422；产品线隔离 |
 
@@ -62,7 +62,7 @@ batch/
 ├── list/
 │   └── list_test.go         # BT-1-000 ~ BT-1-004
 ├── detail/
-│   └── detail_test.go       # BT-2-000 ~ BT-2-003
+│   └── detail_test.go       # BT-2-000 ~ BT-2-004
 ├── cancel/
 │   └── cancel_test.go       # BT-3-000 ~ BT-3-007（BT-3-007 为 MySQL 并发用例）
 └── file/
@@ -94,8 +94,22 @@ batch/
 |------|------|---------|---------|------|
 | BT-2-000 | 可达性冒烟（ghost → 404 业务语义） | 冒烟 | - | 404 |
 | BT-2-001 | 任务不存在 | 异常参数 | - | 404 |
-| BT-2-002 | 直写一行 → 字段完整 | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行 | 200；task 全字段匹配；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`files` 含输入/输出两条 |
+| BT-2-002 | 直写一行 → 字段完整（**2026-10-16 按合同重写**，issue #249） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行 | 200；Data 顶层即任务字段（§2.1，无 task/files 包装层）；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`batch_files` 恰含输入/输出两条，元素键集合精确为 §2.2（file_id/provider/purpose/bytes/created_at，filename 一期留空被省略），原始报文无 direction 等内部字段 |
 | BT-2-003 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 行 1 行 | 404（按不存在处理） |
+| BT-2-004 | 无关联文件 | 返回数据 | 直写任务 1 行（无输入/输出文件 ID） | 200；`batch_files` 键缺席（omitempty，无文件不输出空数组） |
+
+**断言要点（BT-2-002，合同锁定）**
+
+- 顶层形状锁：`Data.task` / `Data.files` 必须**不存在**——合同（batches.md
+  §3.2）规定 Data 即 BatchTask 对象本身（家族11：防包装层回归，客户端按
+  单对象解码静默得到全零值）
+- 任务字段全部在 Data 顶层取值；`key_name` 属内部字段，合同 §2.1 未列出，
+  不作为断言依据
+- `batch_files` 元素键集合用 ElementsMatch 精确锁（防 #201 幻影键）；
+  `direction`/`lines`/`key_name` 等内部字段曾随实现直出（缺陷形态），
+  原始报文断言 `"direction"` 不得出现
+- 历史教训：本用例初版按实现现状断言 task/files 包装与 direction 字段，
+  把缺陷固化成"通行证"（反面模式 #5）；2026-10-16 服务端修复后按合同重写
 
 ### 4.3 取消（BT-3）
 

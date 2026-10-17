@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Breaking** schema: drop the `epp_assignments.primary_instance_id` column (appended to `database/db_ddl_upgrade_to_0.0.11.sql` §4, with rollback notes; converge existing pools to single-instance groups before upgrading).
 - `server_data_conf` `GslbBasic.EPPAddr` is now always a single-element list (the assigned group's instance addresses); no BFE change required.
 
+### Fixed
+- `GET /open-api/v1/batches/{batch_id}` now returns the task object itself at the `Data` top level with the associated files in `batch_files` (shape per `batches.md` §3.2), instead of the `{task, files}` wrapper; file entries follow the documented metadata shape and no longer expose internal fields (`id`/`direction`/`key_name`/…). This fixes the batch task detail page rendering empty panels in the dashboard (issue #249).
+
 ## [0.0.10] - 2026-09-24
 
 ### Added

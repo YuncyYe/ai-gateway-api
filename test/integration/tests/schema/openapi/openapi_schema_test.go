@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
+	helper "github.com/rainway-ai-gateway/ai-gateway-api/integration/tests/batch/helper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +60,7 @@ func TestOpenAPI_Schema(t *testing.T) {
 	t.Run("epp_pool", testEppPoolSchema)
 	t.Run("epp_assignments", testEppAssignmentsSchema)
 	t.Run("security_reencrypt_sweeps", testSecuritySchema)
+	t.Run("batch_task_detail", testBatchSchema)
 }
 
 // ---------- entity-types ----------
@@ -1509,6 +1511,69 @@ func keysOfMap(m map[string]interface{}) []string {
 	}
 	return keys
 }
+
+// ---------- batches ----------
+
+// testBatchSchema 覆盖批量任务详情端点（batches.md §3.2）：Data 即任务对象
+// 本身（无 task/files 包装层），关联 batch_files 为 §2.2 视图形状。
+// 定向断言：batch_files 元素键集合精确锁（防内部字段泄漏回归，issue #249）；
+// 无关联文件时 batch_files 键缺席（omitempty）。
+func testBatchSchema(t *testing.T) {
+	db := helper.OpenDB(t, sm)
+
+	// 带输入/输出文件的任务。
+	tag := helper.Unique("schema-bt")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Endpoint: "/v1/batches",
+		InputFileID: tag + "-in", OutputFileID: tag + "-out",
+		Status: "in_progress", SettleStatus: "reserved", SyncSource: "log",
+		IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+	helper.InsertBatchFile(t, db, helper.BatchFileRow{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input", Bytes: 1024,
+	})
+	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	testutil.AssertSchema(t, resp, BatchTaskDetailSchema)
+
+	payload := mustUnmarshalMap(t, resp.Data)
+	_, hasTask := payload["task"]
+	_, hasFiles := payload["files"]
+	assert.False(t, hasTask, "Data.task wrapper must not exist (batches.md §3.2)")
+	assert.False(t, hasFiles, "Data.files wrapper must not exist (batches.md §3.2)")
+
+	filesVal, ok := payload["batch_files"].([]interface{})
+	require.True(t, ok, "batch_files should be array")
+	require.Len(t, filesVal, 1)
+	elem, ok := filesVal[0].(map[string]interface{})
+	require.True(t, ok, "batch_files[0] should be object")
+	assert.ElementsMatch(t,
+		[]string{"file_id", "provider", "purpose", "bytes", "created_at"}, keysOfMap(elem),
+		"batch_files element keys must exactly match contract (batches.md §2.2, no internal fields)")
+
+	// 无关联文件的任务：batch_files 键缺席（omitempty）。
+	bareTag := helper.Unique("schema-bt-bare")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: bareTag, APIKeyID: bareTag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "queued", SettleStatus: "reserved",
+		SyncSource: "redis", IdemKey: bareTag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, bareTag)
+
+	bareResp, err := testutil.GetClient().Get("/open-api/v1/batches/" + bareTag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, bareResp)
+	testutil.AssertSchema(t, bareResp, BatchTaskDetailSchema)
+	_, hasBatchFiles := mustUnmarshalMap(t, bareResp.Data)["batch_files"]
+	assert.False(t, hasBatchFiles, "batch_files must be omitted when no associated files")
+}
+
 
 // ---------- security/reencrypt-sweeps ----------
 
