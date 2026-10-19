@@ -21,12 +21,32 @@ children = [
 ]
 
 [[children]]
+id = "FeatureEnhance.list"
+text = "FeatureEnhanceManage"
+allowed_roles = ["admin", "admin_readonly"]
+children = [
+    { id = "AICacheRule.list", text = "AICacheRuleManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "TrafficMirrorRule.list", text = "TrafficMirrorRuleManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "IntentConfig.list", text = "IntentConfigManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "AIContextRule.list", text = "AIContextRuleManage", allowed_roles = ["admin", "admin_readonly"] }
+]
+
+[[children]]
 id = "consumer.admin.list"
 text = "ConsumerManage"
 allowed_roles = ["admin", "admin_readonly"]
 children = [
     { id = "APIKey.list", text = "APIKeyManage", allowed_roles = ["admin", "admin_readonly"] },
+    { id = "BatchTask.list", text = "BatchTaskManage", allowed_roles = ["admin", "admin_readonly"] },
     { id = "Entity.list", text = "EntityManage", allowed_roles = ["admin", "admin_readonly"] }
+]
+
+[[children]]
+id = "systemSecurity.admin.list"
+text = "SystemSecurityManage"
+allowed_roles = ["admin", "admin_readonly"]
+children = [
+    { id = "ReencryptSweep.list", text = "ReencryptSweepManage", allowed_roles = ["admin", "admin_readonly"] }
 ]
 
 [[children]]
