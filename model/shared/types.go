@@ -258,17 +258,21 @@ type RateLimitPolicyStorager interface {
 // lowercase snake_case; optional fields left nil are filled with defaults
 // (cache_key_strategy=lastQuestion, cache_ttl=0, max_body_bytes/max_value_bytes=1048576,
 // enable_semantic_cache=false).
-// CreatedAt/UpdatedAt are read-only response fields (RFC3339).
+// Per-rule timestamps are intentionally not part of the vocabulary: the
+// collection is a full-replace resource (every PUT recreates all rows and
+// renumbers their ids), so created_at/updated_at would only ever equal the last
+// PUT time. Not exposing them also keeps the bulk INSERT column set identical
+// across rows — gendry derives it from the first row and rejects later rows
+// missing a column with "insert data not match" (issue #258). Audit time is
+// available through GET /operation-logs.
 type AICacheRuleParam struct {
-	Name                *string    `json:"name"`
-	Cond                *string    `json:"cond"`
-	CacheKeyStrategy    *string    `json:"cache_key_strategy,omitempty"`
-	CacheTTL            *int       `json:"cache_ttl,omitempty"`
-	MaxBodyBytes        *int64     `json:"max_body_bytes,omitempty"`
-	MaxValueBytes       *int64     `json:"max_value_bytes,omitempty"`
-	EnableSemanticCache *bool      `json:"enable_semantic_cache,omitempty"`
-	CreatedAt           *time.Time `json:"created_at,omitempty"`
-	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
+	Name                *string `json:"name"`
+	Cond                *string `json:"cond"`
+	CacheKeyStrategy    *string `json:"cache_key_strategy,omitempty"`
+	CacheTTL            *int    `json:"cache_ttl,omitempty"`
+	MaxBodyBytes        *int64  `json:"max_body_bytes,omitempty"`
+	MaxValueBytes       *int64  `json:"max_value_bytes,omitempty"`
+	EnableSemanticCache *bool   `json:"enable_semantic_cache,omitempty"`
 }
 
 // AICacheRulesParam defines the AI cache rule collection (full-replace semantics:

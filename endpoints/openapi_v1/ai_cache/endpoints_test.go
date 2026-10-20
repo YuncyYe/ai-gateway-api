@@ -33,7 +33,7 @@ import (
 )
 
 // fakeAICacheStorager emulates the DB behavior: ReplaceAll rebuilds the table
-// (new ids in slice order, timestamps attached), FetchAll reads it back.
+// (new ids in slice order), FetchAll reads it back.
 type fakeAICacheStorager struct {
 	rules  []*aiCacheModel.AICacheRuleParam
 	nextID int64
@@ -45,7 +45,6 @@ func (f *fakeAICacheStorager) FetchAll(ctx context.Context) ([]*aiCacheModel.AIC
 
 func (f *fakeAICacheStorager) ReplaceAll(ctx context.Context, rules []*aiCacheModel.AICacheRuleParam) error {
 	f.rules = make([]*aiCacheModel.AICacheRuleParam, 0, len(rules))
-	now := time.Date(2026, 9, 24, 10, 30, 0, 0, time.UTC)
 	for _, r := range rules {
 		f.nextID++
 		f.rules = append(f.rules, &aiCacheModel.AICacheRuleParam{
@@ -57,8 +56,6 @@ func (f *fakeAICacheStorager) ReplaceAll(ctx context.Context, rules []*aiCacheMo
 			MaxBodyBytes:        r.MaxBodyBytes,
 			MaxValueBytes:       r.MaxValueBytes,
 			EnableSemanticCache: r.EnableSemanticCache,
-			CreatedAt:           &now,
-			UpdatedAt:           &now,
 		})
 	}
 	return nil
@@ -95,7 +92,6 @@ func setupAICacheManager(storager aiCacheModel.AICacheStorager, settingsStorager
 
 func TestAICacheRulesGetAction(t *testing.T) {
 	t.Run("returns rule collection without internal id", func(t *testing.T) {
-		now := time.Date(2026, 9, 24, 10, 30, 0, 0, time.UTC)
 		store := &fakeAICacheStorager{
 			nextID: 2,
 			rules: []*aiCacheModel.AICacheRuleParam{
@@ -107,8 +103,6 @@ func TestAICacheRulesGetAction(t *testing.T) {
 					CacheTTL:         lib.PInt(3600),
 					MaxBodyBytes:     lib.PInt64(1048576),
 					MaxValueBytes:    lib.PInt64(1048576),
-					CreatedAt:        &now,
-					UpdatedAt:        &now,
 				},
 			},
 		}
@@ -121,12 +115,13 @@ func TestAICacheRulesGetAction(t *testing.T) {
 		bs, err := json.Marshal(data)
 		require.NoError(t, err)
 		assert.NotContains(t, string(bs), `"id"`)
+		assert.NotContains(t, string(bs), `"created_at"`, "per-rule timestamps are not part of the contract (issue #258)")
+		assert.NotContains(t, string(bs), `"updated_at"`, "per-rule timestamps are not part of the contract (issue #258)")
 
 		result, ok := data.(*shared.AICacheRulesParam)
 		require.True(t, ok)
 		require.Len(t, result.Rules, 1)
 		assert.Equal(t, "rule1", *result.Rules[0].Name)
-		assert.NotNil(t, result.Rules[0].CreatedAt)
 	})
 
 	t.Run("empty collection returns empty rules array", func(t *testing.T) {
@@ -187,7 +182,8 @@ func TestAICacheRulesUpdateAction(t *testing.T) {
 		assert.Equal(t, 86400, *result.Rules[1].CacheTTL)
 		assert.Equal(t, int64(1048576), *result.Rules[1].MaxBodyBytes)
 		assert.Equal(t, int64(1048576), *result.Rules[1].MaxValueBytes)
-		assert.NotNil(t, result.Rules[1].CreatedAt)
+		assert.NotContains(t, string(bs), `"created_at"`)
+		assert.NotContains(t, string(bs), `"updated_at"`)
 	})
 
 	t.Run("empty rules clear the collection", func(t *testing.T) {

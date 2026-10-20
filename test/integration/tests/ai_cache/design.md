@@ -16,10 +16,10 @@ AI Cache Rules（AI 缓存规则）模块负责 AI 缓存规则集合的管理�
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 全量更新AI缓存规则（PUT） | 12 |
+| 全量更新AI缓存规则（PUT） | 16 |
 | 查询AI缓存规则（GET） | 3 |
 | 导出 AI 缓存规则配置（InnerAPI） | 6 |
-| **合计** | **21** |
+| **合计** | **25** |
 
 > AC-1-012 为 `//go:build mysql` 并发用例（家族10），需 `AIAPI_MYSQL_DSN`，SQLite 环境不编译。
 
@@ -33,7 +33,7 @@ AI Cache Rules（AI 缓存规则）模块负责 AI 缓存规则集合的管理�
 ai_cache/
 ├── design.md
 ├── update/
-│   ├── update_test.go            # AC-1-001 ~ AC-1-011（PUT）
+│   ├── update_test.go            # AC-1-001 ~ AC-1-016（PUT）
 │   └── concurrency_mysql_test.go # AC-1-012（//go:build mysql，并发全量替换）
 └── get/
     └── get_test.go               # AC-2-001 ~ AC-2-003（GET）
@@ -81,10 +81,8 @@ innerapi/ai_cache/
 | rules[].cache_ttl | int | 缓存 TTL |
 | rules[].max_body_bytes | int64 | 请求体大小上限 |
 | rules[].max_value_bytes | int64 | 缓存值大小上限 |
-| rules[].created_at | string | 创建时间（RFC3339，只读） |
-| rules[].updated_at | string | 更新时间（RFC3339，只读） |
 
-约束：响应**不得含内部 `id` 字段**；无 `enabled` 字段（提交的列表即生效集合）。
+约束：响应**不得含内部 `id` 字段**；无 `enabled` 字段（提交的列表即生效集合）；**不含逐行 `created_at`/`updated_at`**（整组替换语义下无信息价值，issue #258；请求体若携带按未知字段忽略）。
 
 ### 6.3 测试场景总览
 
@@ -102,6 +100,10 @@ innerapi/ai_cache/
 | AC-1-010 | 操作审计 | 审计 | 家族7（#201/#155） | PUT 成功记 update 审计（before/after 集合快照、diff_keys 精确匹配、快照无 `id`）；PUT 422 记失败审计且身份不依赖请求体 |
 | AC-1-011 | 混合集合假事务 | 异常参数 | 家族3/4 | 前 2 条合法第 3 条非法 → 422 且三条都未生效（GET 回读 + Inner 导出双重断言） |
 | AC-1-012 | 并发全量替换（MySQL） | 并发 | 家族10 | 20 goroutine 并发 PUT 互不相同小集合 → 无 5xx，最终集合与某次提交完全相等 |
+| AC-1-013 | 语义缓存开关往返 | 正常参数 | 家族1 | 显式 `true`/`false` 原样落库回读、省略回填 `false`（PUT 响应 = GET 回读） |
+| AC-1-014 | 回读原样 PUT | 正常参数 | 家族1/11 | GET 的 `rules` 原样作为 PUT body → 200 且逐字段一致（键集合 7 字段，无时间戳） |
+| AC-1-015 | 旧客户端携带只读时间戳 | 正常参数 | 家族1/11（#258） | 带 `created_at`/`updated_at` 的旧规则在前/在后两种排列 → 均 200、两条都写入、顺序=提交顺序 |
+| AC-1-016 | 只读时间戳被忽略 | 合同一致性 | 家族11（#258） | 提交伪造的 2000 年时间戳 → 200，PUT 响应与 GET 回读均无 `created_at`/`updated_at` 键 |
 
 ### 6.4 测试场景详细设计
 
@@ -109,7 +111,7 @@ innerapi/ai_cache/
 
 ##### 设计思路
 
-验证仅提交 `name`+`cond` 时，可选字段由服务端按合同默认值回填： `cache_key_strategy=lastQuestion`、`cache_ttl=0`、`max_body_bytes=max_value_bytes=1048576`，且响应携带只读 `created_at`/`updated_at`。随后 GET 回读与 PUT 响应逐字段一致。
+验证仅提交 `name`+`cond` 时，可选字段由服务端按合同默认值回填： `cache_key_strategy=lastQuestion`、`cache_ttl=0`、`max_body_bytes=max_value_bytes=1048576`；响应规则元素为 7 个业务字段（逐行时间戳自 issue #258 起不返回）。随后 GET 回读与 PUT 响应逐字段一致。
 
 ##### 前提数据准备
 
@@ -118,8 +120,8 @@ innerapi/ai_cache/
 ##### 执行步骤
 
 1. PUT `{"rules":[{"name":"<runID>-ac1001","cond":"req_path_in(\"/v1/chat/completions\", false)"}]}`。
-2. 断言 200；逐字段断言默认值回填与只读时间戳存在。
-3. GET `/open-api/v1/ai-cache-rules`，回读与 PUT 响应逐字段一致（忽略时间戳字面量，单独断言其存在且非空）。
+2. 断言 200；逐字段断言默认值回填，并断言键集合精确为 7 字段（无 `created_at`/`updated_at`/`id`）。
+3. GET `/open-api/v1/ai-cache-rules`，回读与 PUT 响应逐字段一致。
 
 ##### 预期返回结果
 
@@ -134,7 +136,7 @@ innerapi/ai_cache/
 | rules[0].cache_ttl | 0 | Equals（默认值回填） |
 | rules[0].max_body_bytes | 1048576 | Equals（默认值回填） |
 | rules[0].max_value_bytes | 1048576 | Equals（默认值回填） |
-| rules[0].created_at / updated_at | 非空 RFC3339 | NotEmpty |
+| rules[0].created_at / updated_at | 键不存在 | NotContains（#258） |
 
 ---
 
@@ -169,7 +171,7 @@ innerapi/ai_cache/
 
 ##### 预期返回结果
 
-**ErrNum**：200；GET `rules` 与集合 B 逐字段 DeepEquals（忽略 created_at/updated_at，单独断言存在）。
+**ErrNum**：200；GET `rules` 与集合 B 逐字段 DeepEquals（键集合 7 字段，无时间戳）。
 
 ---
 
@@ -253,7 +255,7 @@ innerapi/ai_cache/
 
 ##### 设计思路
 
-锁定"响应不得含内部 id 字段、无 enabled 字段"的合同条款：对 200 响应的每个规则元素，键集合用 `assert.ElementsMatch` **精确匹配** `{name, cond, cache_key_strategy, cache_ttl, max_body_bytes, max_value_bytes, created_at, updated_at}` 8 键，禁止 `Contains`（#201 幻影键不敏感）。
+锁定"响应不得含内部 id 字段、无 enabled 字段、无逐行时间戳"的合同条款：对 200 响应的每个规则元素，键集合用 `assert.ElementsMatch` **精确匹配** `{name, cond, cache_key_strategy, cache_ttl, max_body_bytes, max_value_bytes, enable_semantic_cache}` 7 键，禁止 `Contains`（#201 幻影键不敏感；时间戳移除见 #258）。
 
 ---
 
@@ -291,6 +293,85 @@ innerapi/ai_cache/
 ##### 预期返回结果
 
 20 请求全 2xx；最终 GET `rules` 长度=1 且其 name/cond 命中某一提交。
+
+---
+
+#### 6.4.13 AC-1-013：语义缓存开关往返（正常参数，家族1）
+
+##### 设计思路
+
+验证规则级二期字段 `enable_semantic_cache`：显式 `true`/`false` 原样落库并在 PUT 响应与 GET 回读中回显；省略时按合同默认值回填 `false`。
+
+##### 执行步骤
+
+1. PUT 3 条：第 1 条显式 `true`、第 2 条显式 `false`、第 3 条省略该字段。
+2. 断言 200，按数组下标断言 `enable_semantic_cache` 分别为 `true`/`false`/`false`，其余字段按默认值回填。
+3. GET 回读与 PUT 响应逐字段一致。
+
+##### 预期返回结果
+
+**ErrNum**：200；`rules[i].enable_semantic_cache` = `true`/`false`/`false`；GET 回读 = PUT 响应。
+
+---
+
+#### 6.4.14 AC-1-014：回读原样 PUT（正常参数，家族1/11）
+
+##### 设计思路
+
+覆盖"读取—修改—写回"的最自然编辑路径：把 `GET` 回读的 `rules` **原样**作为 `PUT` body 提交，服务端必须接受并按提交顺序重建集合（issue #258 的触发形态）。
+
+##### 执行步骤
+
+1. PUT 2 条规则（其中一条显式 `cache_ttl`）。
+2. GET 取回 `Data.rules`，原样作为 PUT body 再次提交。
+3. 断言 200；PUT 响应与原 `Data.rules` 逐字段一致；每个规则元素的键集合精确为 7 字段（无 `created_at`/`updated_at`）。
+
+##### 预期返回结果
+
+**ErrNum**：200；`rules` 长度 2、顺序不变、键集合 7 字段。
+
+---
+
+#### 6.4.15 AC-1-015：旧客户端携带只读时间戳（正常参数，家族1/11，#258）
+
+##### 设计思路
+
+复现 issue #258 的两种排列（同一集合、仅时间戳字段存在性不同）：
+
+| 提交内容 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 旧规则（带 `created_at`/`updated_at`）在前 + 新规则（不带）在后 | `500 insert data not match` | 200 |
+| 新规则在前 + 旧规则在后 | 200（旧行 `updated_at` 被静默丢弃） | 200 |
+
+时间戳自 #258 起不在契约内，按未知字段忽略，因此两种排列行为必须完全一致（各自按提交顺序返回，两条都写入）。
+
+##### 执行步骤
+
+1. 子用例 `legacy_rule_first` / `legacy_rule_last`，各先 PUT 一条规则（模拟"已有规则"）。
+2. 构造旧规则（7 业务字段 + 两个 RFC3339 时间戳）与新规则（仅 name/cond/ttl），按子用例顺序组成 2 条数组后 PUT。
+3. 断言 200、`rules` 长度 2、name 顺序 = 提交顺序、每个元素不含 `created_at`/`updated_at`。
+
+##### 预期返回结果
+
+**ErrNum**：200（修复前 `legacy_rule_first` 为 500）；两条规则均写入。
+
+---
+
+#### 6.4.16 AC-1-016：只读时间戳被忽略（合同一致性，家族11，#258）
+
+##### 设计思路
+
+验证只读时间戳既不回显也不落库：提交伪造的 `2000-01-01T00:00:00Z`，响应与 GET 回读均不得出现这两个键（区别于"值不等于伪值"——字段本身不在契约内）。
+
+##### 执行步骤
+
+1. PUT 1 条规则，body 显式携带 `created_at`/`updated_at` = `2000-01-01T00:00:00Z`。
+2. 断言 200；PUT 响应 `rules[0]` 不含 `created_at`/`updated_at`，`name` 等于提交值。
+3. GET 回读，断言同样不含这两个键。
+
+##### 预期返回结果
+
+**ErrNum**：200；响应与回读均无时间戳键。
 
 ---
 

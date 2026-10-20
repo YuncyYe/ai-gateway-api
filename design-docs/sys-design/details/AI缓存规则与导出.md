@@ -116,7 +116,7 @@ CREATE TABLE `ai_cache_semantic_settings` (
 | `rules[].max_value_bytes` | int64 | 缓存值大小上限（字节），超限不缓存 | 非必填；未传时默认 1048576（1MB）；> 0 |
 | `rules[].enable_semantic_cache` | bool | 语义缓存开关（二期）；`cache_key_strategy=disabled` 时无效（BFE 忽略，不报错） | 非必填；未传时默认 `false` |
 
-响应只读字段（仅 GET/PUT 响应携带，提交时忽略）：`rules[].created_at`、`rules[].updated_at`（RFC3339）。规则 `id` 为内部排序字段，不出现在 API 请求与响应中。
+**不返回** `rules[].created_at`/`rules[].updated_at`：本资源为整组替换语义（每次 PUT 全删重建，`id` 自增重排），逐规则时间戳无信息价值（与 `/ai-context-rules` 一致，issue #258）；请求体若携带这两个键，按未知字段忽略。规则 `id` 为内部排序字段，不出现在 API 请求与响应中。
 
 ---
 

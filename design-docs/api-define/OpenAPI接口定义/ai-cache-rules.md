@@ -40,12 +40,7 @@ AI 缓存规则集合（配合 BFE `mod_ai_cache` 模块：一期 Redis 精确�
 | `rules[].max_value_bytes` | int64 | 缓存值大小上限（字节），超限不缓存 | > 0 | 非必填；未传时默认 1048576（1MB） |
 | `rules[].enable_semantic_cache` | bool | 语义缓存开关：该规则命中且 Redis 精确未命中时，走 embedding + 向量相似度检索。`cache_key_strategy=disabled` 时本字段无效（被忽略，不报错） | `true` / `false` | 非必填；未传时默认 `false` |
 
-**响应只读字段**（仅 GET/PUT 响应携带，提交时忽略）：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `rules[].created_at` | string | 创建时间（RFC3339） |
-| `rules[].updated_at` | string | 更新时间（RFC3339） |
+> **不返回** `rules[].created_at`/`rules[].updated_at`：本资源为整组替换语义（每次 PUT 全删重建，`id` 自增重排），逐规则时间戳无信息价值（与 `/ai-context-rules` 一致）；操作审计时间见 `GET /operation-logs`。请求体若携带这两个键，按未知字段忽略。
 
 **约束**
 
@@ -117,7 +112,7 @@ AI 缓存规则集合（配合 BFE `mod_ai_cache` 模块：一期 Redis 精确�
 
 **返回数据（Data内容）**
 
-字段同第1节数据模型（含响应只读字段 `created_at`/`updated_at`）。
+字段同第1节数据模型。**不返回** `created_at`/`updated_at`（整组替换语义，见第1节说明）。
 
 **成功返回示例**
 
@@ -133,9 +128,7 @@ AI 缓存规则集合（配合 BFE `mod_ai_cache` 模块：一期 Redis 精确�
                 "cache_key_strategy": "lastQuestion",
                 "cache_ttl": 3600,
                 "max_body_bytes": 1048576,
-                "max_value_bytes": 1048576,
-                "created_at": "2026-09-24T10:30:00+08:00",
-                "updated_at": "2026-09-24T10:30:00+08:00"
+                "max_value_bytes": 1048576
             },
             {
                 "name": "cache-all-models-long-ttl",
@@ -143,9 +136,7 @@ AI 缓存规则集合（配合 BFE `mod_ai_cache` 模块：一期 Redis 精确�
                 "cache_key_strategy": "lastQuestion",
                 "cache_ttl": 86400,
                 "max_body_bytes": 1048576,
-                "max_value_bytes": 1048576,
-                "created_at": "2026-09-24T10:30:00+08:00",
-                "updated_at": "2026-09-24T10:30:00+08:00"
+                "max_value_bytes": 1048576
             }
         ]
     }
@@ -174,4 +165,4 @@ AI 缓存规则集合（配合 BFE `mod_ai_cache` 模块：一期 Redis 精确�
 
 **返回数据（Data内容）**
 
-字段同第1节数据模型（含响应只读字段）。空集合返回 `{"rules": []}`；按优先级升序返回（顺序同导出到 BFE 的顺序）。
+字段同第1节数据模型（**不含** `created_at`/`updated_at`，见第1节说明）。空集合返回 `{"rules": []}`；按优先级升序返回（顺序同导出到 BFE 的顺序）。

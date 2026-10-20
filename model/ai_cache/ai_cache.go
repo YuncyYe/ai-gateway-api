@@ -43,6 +43,9 @@ const (
 
 // AICacheRuleParam is the storage-level AI cache rule. The internal ID is the
 // ordering/priority key and is never exposed through the Open API.
+// Per-rule timestamps are intentionally not carried: the Open API does not
+// expose them (full-replace resource, see shared.AICacheRuleParam), the DAO
+// fills created_at on insert and the DB default fills updated_at.
 type AICacheRuleParam struct {
 	ID                  *int64
 	Name                *string
@@ -52,8 +55,6 @@ type AICacheRuleParam struct {
 	MaxBodyBytes        *int64
 	MaxValueBytes       *int64
 	EnableSemanticCache *bool
-	CreatedAt           *time.Time
-	UpdatedAt           *time.Time
 }
 
 // SemanticSettingsRow is the storage-level singleton semantic settings row.
@@ -98,7 +99,9 @@ type AICacheSemanticSettingsStorager interface {
 
 // aiCacheRuleParamFromShared converts an API-level rule into the storage-level
 // rule, filling the documented defaults for omitted optional fields so that
-// every inserted row carries the full column set.
+// every inserted row carries the full column set. Timestamps are not part of the
+// vocabulary: the DAO fills created_at and the DB default fills updated_at, which
+// also guarantees a uniform column set for the bulk INSERT (issue #258).
 func aiCacheRuleParamFromShared(param *shared.AICacheRuleParam) *AICacheRuleParam {
 	if param == nil {
 		return nil
@@ -112,8 +115,6 @@ func aiCacheRuleParamFromShared(param *shared.AICacheRuleParam) *AICacheRulePara
 		MaxBodyBytes:        param.MaxBodyBytes,
 		MaxValueBytes:       param.MaxValueBytes,
 		EnableSemanticCache: param.EnableSemanticCache,
-		CreatedAt:           param.CreatedAt,
-		UpdatedAt:           param.UpdatedAt,
 	}
 
 	if rule.CacheKeyStrategy == nil {
@@ -149,8 +150,6 @@ func aiCacheRuleParamToShared(rule *AICacheRuleParam) *shared.AICacheRuleParam {
 		MaxBodyBytes:        rule.MaxBodyBytes,
 		MaxValueBytes:       rule.MaxValueBytes,
 		EnableSemanticCache: rule.EnableSemanticCache,
-		CreatedAt:           rule.CreatedAt,
-		UpdatedAt:           rule.UpdatedAt,
 	}
 }
 

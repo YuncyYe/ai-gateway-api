@@ -38,11 +38,12 @@ const (
 	defaultMaxValueBytes    = 1048576
 )
 
-// ruleContractKeys 是合同锁定的响应规则元素键集合（9 字段，无 id/enabled）。
+// ruleContractKeys 是合同锁定的响应规则元素键集合（7 字段，无内部 id）。
+// 逐行 created_at/updated_at 自 issue #258 起不再返回：整组替换语义下无信息价值，
+// 且不暴露字段同时消除批量 INSERT 的列集合不一致（见 ai-cache-rules.md §1）。
 var ruleContractKeys = []string{
 	"name", "cond", "cache_key_strategy", "cache_ttl",
 	"max_body_bytes", "max_value_bytes", "enable_semantic_cache",
-	"created_at", "updated_at",
 }
 
 var sm *testutil.ServerManager
@@ -92,7 +93,8 @@ func rulesOf(t *testing.T, resp *testutil.APIResponse) []interface{} {
 	return rules
 }
 
-// rulesSnapshot 取当前集合全量快照（含 created_at/updated_at），用于回读零变更断言。
+// rulesSnapshot 取当前集合全量快照（业务字段；逐行时间戳自 issue #258 起不在契约内），
+// 用于回读零变更断言。
 func rulesSnapshot(t *testing.T) map[string]interface{} {
 	t.Helper()
 	resp := getAICacheRules(t)
@@ -129,16 +131,14 @@ func assertRuleFieldEquals(t *testing.T, rule map[string]interface{}, key string
 }
 
 // assertRuleMatches 逐字段断言规则与期望值一致（期望含默认值回填），
-// 并锁定响应键集合精确为合同 9 键（无 id/enabled，家族11/12 / #201）。
+// 并锁定响应键集合精确为合同 7 键（无内部 id、无逐行时间戳；家族11/12 / #201 / #258）。
 func assertRuleMatches(t *testing.T, rule map[string]interface{}, want map[string]interface{}) {
 	t.Helper()
 	for k, v := range want {
 		assertRuleFieldEquals(t, rule, k, v)
 	}
-	assert.NotEmpty(t, rule["created_at"], "created_at should be present")
-	assert.NotEmpty(t, rule["updated_at"], "updated_at should be present")
 	assert.ElementsMatch(t, ruleContractKeys, keysOf(rule),
-		"rule keys must exactly match contract (no id/enabled)")
+		"rule keys must exactly match contract (no id/enabled/timestamps)")
 }
 
 // assertRulesMatchWants 按数组下标逐条断言（顺序即优先级）。
@@ -667,4 +667,117 @@ func TestAICacheRules_Update_SemanticCacheFlag(t *testing.T) {
 
 	// GET 回读与 PUT 响应逐字段一致（家族1 往返）。
 	assertRulesMatchWants(t, getAICacheRules(t), []map[string]interface{}{wantTrue, wantFalse, wantOmit})
+}
+// ---------- AC-1-014 回读原样 PUT（幂等编辑，家族1/11） ----------
+
+// TestAICacheRules_Update_ReadbackRoundTrip 覆盖"读取—修改—写回"的最自然形态：
+// GET 回读的 rules 原样作为 PUT body 提交（issue #258 的编辑路径）。
+func TestAICacheRules_Update_ReadbackRoundTrip(t *testing.T) {
+	n1 := testutil.UniqueName("ac-1-014-a")
+	n2 := testutil.UniqueName("ac-1-014-b")
+
+	putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
+		map[string]interface{}{"name": n1, "cond": validAICacheCond, "cache_ttl": 120},
+		acRule(n2, validAICacheCond),
+	}})
+
+	getResp := getAICacheRules(t)
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(getResp.Data, &data))
+	readback, ok := data["rules"].([]interface{})
+	require.True(t, ok, "GET Data.rules should be an array")
+	require.Len(t, readback, 2)
+
+	resp := putAndAssert200(t, map[string]interface{}{"rules": readback})
+
+	got := rulesOf(t, resp)
+	require.Len(t, got, 2)
+	assert.Equal(t, readback, got, "原样回写的集合必须逐字段一致")
+	for i, item := range got {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok)
+		assert.NotContains(t, rule, "created_at", "rules[%d] must not carry per-rule timestamps", i)
+		assert.NotContains(t, rule, "updated_at", "rules[%d] must not carry per-rule timestamps", i)
+	}
+}
+
+// ---------- AC-1-015 旧客户端携带只读时间戳（issue #258 复现原文） ----------
+
+// TestAICacheRules_Update_LegacyTimestampOrderInsensitive 复现 issue 的两种排列：
+// 带 created_at/updated_at 的旧规则在前（修复前 500）、在后（修复前静默丢 updated_at）。
+// 修复后两种排列均 200，响应顺序等于各自提交顺序。
+func TestAICacheRules_Update_LegacyTimestampOrderInsensitive(t *testing.T) {
+	cases := []struct {
+		name        string
+		legacyFirst bool
+	}{
+		{name: "legacy_rule_first", legacyFirst: true},
+		{name: "legacy_rule_last", legacyFirst: false},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			oldName := testutil.UniqueName("ac-1-015-old")
+			putAndAssert200(t, map[string]interface{}{"rules": []interface{}{acRule(oldName, validAICacheCond)}})
+
+			// 旧客户端按 issue 的 curl 形态提交：旧规则带时间戳、新规则不带。
+			legacy := map[string]interface{}{
+				"name": oldName, "cond": validAICacheCond,
+				"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 300,
+				"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
+				"enable_semantic_cache": false,
+				"created_at":            "2026-10-19T04:27:56Z",
+				"updated_at":            "2026-10-19T12:27:56Z",
+			}
+			freshName := testutil.UniqueName("ac-1-015-new")
+			fresh := map[string]interface{}{"name": freshName, "cond": validAICacheCond, "cache_ttl": 300}
+
+			rules := []interface{}{legacy, fresh}
+			wantNames := []string{oldName, freshName}
+			if !tt.legacyFirst {
+				rules = []interface{}{fresh, legacy}
+				wantNames = []string{freshName, oldName}
+			}
+
+			resp := putAndAssert200(t, map[string]interface{}{"rules": rules})
+			got := rulesOf(t, resp)
+			require.Len(t, got, 2, "both rules must be written (issue #258 regression)")
+
+			gotNames := make([]string, 0, len(got))
+			for _, item := range got {
+				rule, ok := item.(map[string]interface{})
+				require.True(t, ok)
+				gotNames = append(gotNames, rule["name"].(string))
+				assert.NotContains(t, rule, "created_at")
+				assert.NotContains(t, rule, "updated_at")
+			}
+			assert.Equal(t, wantNames, gotNames, "响应顺序必须等于提交顺序")
+		})
+	}
+}
+
+// ---------- AC-1-016 只读时间戳被忽略（不回显、不落库） ----------
+
+func TestAICacheRules_Update_TimestampsIgnored(t *testing.T) {
+	name := testutil.UniqueName("ac-1-016")
+
+	resp := putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
+		map[string]interface{}{
+			"name": name, "cond": validAICacheCond,
+			// 伪造的只读时间戳（2000 年）：必须被忽略而非落库/回显。
+			"created_at": "2000-01-01T00:00:00Z",
+			"updated_at": "2000-01-01T00:00:00Z",
+		},
+	}})
+
+	rule := rulesOf(t, resp)[0].(map[string]interface{})
+	assert.NotContains(t, rule, "created_at", "submitted created_at must not be echoed")
+	assert.NotContains(t, rule, "updated_at", "submitted updated_at must not be echoed")
+
+	readback := rulesOf(t, getAICacheRules(t))
+	require.Len(t, readback, 1)
+	got := readback[0].(map[string]interface{})
+	assert.Equal(t, name, got["name"])
+	assert.NotContains(t, got, "created_at")
+	assert.NotContains(t, got, "updated_at")
 }
