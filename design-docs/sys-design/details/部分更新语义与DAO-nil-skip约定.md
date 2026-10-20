@@ -80,3 +80,31 @@ Entity 新增 `description` 字段（api-define entities.md §2.1-§2.5，变更
 - PUT 在绑参、校验之后，由 `endpoints/openapi_v1/entity/full_update.go` 将 nil 显式置为空字符串（`lib.PString("")`）再下发——"省略清空"通过**主动构造非 nil 空值**实现，不修改 storager 与 DAO 层语义。
 
 `description` 是字符串指针字段，天然区分"省略（nil）"与"显式空（非 nil）"，因此 PATCH 下支持"显式 `""` 清空"，不受 §4"显式空数组无法与省略区分"限制的约束。
+## 8. 整组替换与批量 INSERT 的列集合一致性（issue #258）
+
+本文 §1 的 nil-skip 约定在 **UPDATE** 场景是"省略即保留"；一旦同一机制被用于**批量 INSERT**，
+"指针为 nil"就变成"该列不出现在这一行"，进而在 gendry 层触发硬错误：
+
+- `struct2map`（`storage/rdb/internal/dao/internal/builder.go:43-96`）对 nil 指针 `continue`，因此同一批
+  数据里"带该字段的行"与"不带该字段的行"列集合不同；
+- gendry `buildInsert`（`builder/dao.go:377-397`）以**第一行**的字段集合作为 INSERT 列集合
+  （`fields = resolveFields(setMap[0])`），遍历后续行时缺列即返回 `insert data not match`
+  （`dao.go:392`），**后续行多出的列被静默丢弃**；
+- 该错误经 `xerror.WrapDaoError` 归为 `Database Exception` → HTTP 500，且失败与否**取决于行的顺序**
+  ——正是 issue #258 的表现：旧规则带 `updated_at` 排在前 → 500；反过来 → 200 但旧行时间戳被丢弃。
+
+本仓已有三种应对，按推荐顺序：
+
+| 应对 | 代表实现 | 适用面 |
+|------|----------|--------|
+| **不暴露该字段**（写路径不接收，列集合恒定） | `ai_context_rules`（`shared.AIContextRuleParam` 无时间戳）、`ai_cache_rules`（2026-10-20 起，issue #258） | 字段在整组替换语义下无信息价值时**首选** |
+| **逐条 INSERT** | `TTrafficMirrorRuleReplaceAll`（`storage/rdb/internal/dao/table_traffic_mirror_rules.go:118-144`） | 字段必须保留、且跨行合法可空（NULL 语义有意义） |
+| **恒写该列**（空值也赋非 nil） | 批量操作日志 `storage/rdb/ioperlog/operation_log.go:107-116`（`change_summary` 恒写） | 列必须非空且可归一为统一空值 |
+
+约定：
+
+1. 集合级资源（`PUT` = 全量替换）的词表**不携带逐行时间戳**，见 `接口层设计文档.md` §4.4.5；
+2. 写路径如需保留逐行可空列，`T<Table>ReplaceAll` 必须用逐条 `internal.Create`，不得依赖批量 INSERT；
+3. 新增批量写入口时，若列集合可能因数据而变（可空列、可选子结构），先在模型层归一（补齐默认值
+   或丢弃只读字段），再考虑 DAO 层兜底；
+4. 变更记录：`design-docs/modifications/2026-10-20-issue-258-ai-cache-rules-drop-readonly-timestamps/`。

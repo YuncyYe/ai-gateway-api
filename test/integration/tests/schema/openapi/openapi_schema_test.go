@@ -861,8 +861,8 @@ func testGlobalRouteRulesSchema(t *testing.T) {
 
 // testAICacheSchema 覆盖 AI 缓存规则集合（GET/PUT 同构）。
 // 集合级资源无 /{id} 端点："GET 单查" 即全量查询的重复拉取（唯一读形状）。
-// 另做定向断言：rules 元素键集合精确为合同 8 字段（含 created_at/updated_at），
-// 不得含内部 id、无 enabled（ai-cache-rules.md §1）。
+// 另做定向断言：rules 元素键集合精确为合同 7 字段（逐行 created_at/updated_at
+// 自 issue #258 起不返回），不得含内部 id、无 enabled（ai-cache-rules.md §1）。
 func testAICacheSchema(t *testing.T) {
 	validCond := `req_path_in("/v1/chat/completions", false)`
 	name1 := testutil.UniqueName("schema-ac-1")
@@ -907,7 +907,7 @@ func testAICacheSchema(t *testing.T) {
 	testutil.AssertSuccess(t, get2Resp)
 	testutil.AssertSchema(t, get2Resp, AICacheRulesSchema)
 
-	// 定向合同锁：rules 元素键集合精确 9 字段，无 id/enabled。
+	// 定向合同锁：rules 元素键集合精确 7 字段，无 id/enabled/时间戳（#258）。
 	var data map[string]interface{}
 	require.NoError(t, json.Unmarshal(get2Resp.Data, &data))
 	rules, ok := data["rules"].([]interface{})
@@ -924,8 +924,7 @@ func testAICacheSchema(t *testing.T) {
 		assert.ElementsMatch(t, []string{
 			"name", "cond", "cache_key_strategy", "cache_ttl",
 			"max_body_bytes", "max_value_bytes", "enable_semantic_cache",
-			"created_at", "updated_at",
-		}, keys, "rules[%d] keys must exactly match contract (no id/enabled)", i)
+		}, keys, "rules[%d] keys must exactly match contract (no id/enabled/timestamps)", i)
 		assert.Equal(t, wantStrategies[i], rule["cache_key_strategy"])
 		assert.Equal(t, false, rule["enable_semantic_cache"], "omitted flag must default to false")
 	}

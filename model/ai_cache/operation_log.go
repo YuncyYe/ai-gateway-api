@@ -172,12 +172,6 @@ func aiCacheRuleParamToMap(rule *shared.AICacheRuleParam) map[string]interface{}
 	if rule.EnableSemanticCache != nil {
 		m["enable_semantic_cache"] = *rule.EnableSemanticCache
 	}
-	if rule.CreatedAt != nil {
-		m["created_at"] = *rule.CreatedAt
-	}
-	if rule.UpdatedAt != nil {
-		m["updated_at"] = *rule.UpdatedAt
-	}
 
 	return m
 }
@@ -195,7 +189,8 @@ func aiCacheRulesParamToMap(rules []*shared.AICacheRuleParam) map[string]interfa
 }
 
 // aiCacheRulesSnapshotToMap builds the audit snapshot of a storage-level rule
-// list (converted to the API vocabulary, timestamps included when present).
+// list (converted to the API vocabulary; per-rule timestamps are not part of the
+// vocabulary since issue #258).
 func aiCacheRulesSnapshotToMap(rules []*AICacheRuleParam) map[string]interface{} {
 	list := make([]*shared.AICacheRuleParam, 0, len(rules))
 	for _, rule := range rules {

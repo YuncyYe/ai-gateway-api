@@ -88,8 +88,6 @@ func aiCacheRuleParamToData(param *ai_cache.AICacheRuleParam) *dao.TAICacheRuleP
 		MaxBodyBytes:        param.MaxBodyBytes,
 		MaxValueBytes:       param.MaxValueBytes,
 		EnableSemanticCache: param.EnableSemanticCache,
-		CreatedAt:           param.CreatedAt,
-		UpdatedAt:           param.UpdatedAt,
 	}
 }
 
@@ -107,7 +105,5 @@ func aiCacheRuleDataToParam(one *dao.TAICacheRule) *ai_cache.AICacheRuleParam {
 		MaxBodyBytes:        &one.MaxBodyBytes,
 		MaxValueBytes:       &one.MaxValueBytes,
 		EnableSemanticCache: &one.EnableSemanticCache,
-		CreatedAt:           &one.CreatedAt,
-		UpdatedAt:           &one.UpdatedAt,
 	}
 }

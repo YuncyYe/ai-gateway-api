@@ -30,7 +30,6 @@ import (
 )
 
 func storageRule(id int64, name, cond string) *AICacheRuleParam {
-	now := time.Date(2026, 9, 24, 10, 30, 0, 0, time.UTC)
 	return &AICacheRuleParam{
 		ID:               lib.PInt64(id),
 		Name:             lib.PString(name),
@@ -39,8 +38,6 @@ func storageRule(id int64, name, cond string) *AICacheRuleParam {
 		CacheTTL:         lib.PInt(3600),
 		MaxBodyBytes:     lib.PInt64(1048576),
 		MaxValueBytes:    lib.PInt64(1048576),
-		CreatedAt:        &now,
-		UpdatedAt:        &now,
 	}
 }
 
@@ -54,7 +51,7 @@ func sharedRule(name, cond string) *shared.AICacheRuleParam {
 func TestAICacheManager_GetAICacheRules(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("returns rules in storage order with timestamps", func(t *testing.T) {
+	t.Run("returns rules in storage order", func(t *testing.T) {
 		store := &fakeAICacheRuleStorager{
 			fetchAllFn: func(ctx context.Context) ([]*AICacheRuleParam, error) {
 				return []*AICacheRuleParam{
@@ -70,7 +67,7 @@ func TestAICacheManager_GetAICacheRules(t *testing.T) {
 		require.Len(t, rules, 2)
 		assert.Equal(t, "rule-a", *rules[0].Name)
 		assert.Equal(t, "rule-b", *rules[1].Name)
-		assert.NotNil(t, rules[0].CreatedAt)
+		assert.Equal(t, 3600, *rules[0].CacheTTL)
 	})
 
 	t.Run("empty collection returns empty slice", func(t *testing.T) {
@@ -224,9 +221,14 @@ func TestAICacheManager_SetAICacheRules(t *testing.T) {
 		require.True(t, ok)
 		require.Len(t, afterRules, 1)
 		assert.Equal(t, "new-rule", afterRules[0]["name"])
-		// Snapshot keys use the API lowercase vocabulary; internal id is absent.
+		// Snapshot keys use the API lowercase vocabulary; internal id and the
+		// per-rule timestamps are absent (timestamps dropped in issue #258).
 		_, hasID := afterRules[0]["id"]
 		assert.False(t, hasID)
+		_, hasCreatedAt := afterRules[0]["created_at"]
+		assert.False(t, hasCreatedAt)
+		_, hasUpdatedAt := afterRules[0]["updated_at"]
+		assert.False(t, hasUpdatedAt)
 	})
 
 	t.Run("records failed audit for validation rejection", func(t *testing.T) {
@@ -448,8 +450,7 @@ func TestAICacheRuleParam_Conversions(t *testing.T) {
 		assert.Equal(t, int64(DefaultMaxValueBytes), *rule.MaxValueBytes)
 	})
 
-	t.Run("round trip preserves values", func(t *testing.T) {
-		now := time.Date(2026, 9, 24, 10, 30, 0, 0, time.UTC)
+	t.Run("round trip preserves business fields", func(t *testing.T) {
 		original := &shared.AICacheRuleParam{
 			Name:                lib.PString("r1"),
 			Cond:                lib.PString("default_t()"),
@@ -458,14 +459,38 @@ func TestAICacheRuleParam_Conversions(t *testing.T) {
 			MaxBodyBytes:        lib.PInt64(1024),
 			MaxValueBytes:       lib.PInt64(2048),
 			EnableSemanticCache: lib.PBool(true),
-			CreatedAt:           &now,
-			UpdatedAt:           &now,
 		}
 
 		rule := aiCacheRuleParamFromShared(original)
 		rst := aiCacheRuleParamToShared(rule)
 		assert.Equal(t, original, rst)
 	})
+}
+
+// TestAICacheRuleJSONContract locks the response vocabulary of a rule: the
+// per-rule timestamps are intentionally absent (full-replace resource, issue
+// #258). Re-adding either field flips this test before it can leak into the
+// wire contract.
+func TestAICacheRuleJSONContract(t *testing.T) {
+	rule := &shared.AICacheRuleParam{
+		Name:                lib.PString("r1"),
+		Cond:                lib.PString("default_t()"),
+		CacheKeyStrategy:    lib.PString("lastQuestion"),
+		CacheTTL:            lib.PInt(0),
+		MaxBodyBytes:        lib.PInt64(1048576),
+		MaxValueBytes:       lib.PInt64(1048576),
+		EnableSemanticCache: lib.PBool(false),
+	}
+
+	bs, err := json.Marshal(rule)
+	require.NoError(t, err)
+
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(bs, &m))
+	assert.ElementsMatch(t, []string{
+		"name", "cond", "cache_key_strategy", "cache_ttl",
+		"max_body_bytes", "max_value_bytes", "enable_semantic_cache",
+	}, keysOf(m), "rule vocabulary must be exactly the 7 business fields (issue #258)")
 }
 
 func keysOf(m map[string]interface{}) []string {

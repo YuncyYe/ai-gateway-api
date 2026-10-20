@@ -17,14 +17,13 @@ package openapi
 import "github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
 
 // AICacheRuleSchema 单个 AI 缓存规则 schema。
-// Required 恰为合同 9 字段（7 业务字段 + created_at/updated_at 只读字段），
-// 不得包含内部 id；无 enabled 字段（ai-cache-rules.md §1）。
+// Required 恰为合同 7 字段（业务字段），不得包含内部 id 与逐行 created_at/updated_at
+// （整组替换语义下不返回，issue #258；ai-cache-rules.md §1）；无 enabled 字段。
 // enable_semantic_cache 为二期字段：响应恒携带，缺省填 false。
 var AICacheRuleSchema = &testutil.ObjectSchema{
 	Required: []string{
 		"name", "cond", "cache_key_strategy", "cache_ttl",
 		"max_body_bytes", "max_value_bytes", "enable_semantic_cache",
-		"created_at", "updated_at",
 	},
 	Fields: map[string]testutil.FieldSpec{
 		"name":                  {Type: testutil.TypeString},
@@ -34,8 +33,6 @@ var AICacheRuleSchema = &testutil.ObjectSchema{
 		"max_body_bytes":        {Type: testutil.TypeInt},
 		"max_value_bytes":       {Type: testutil.TypeInt},
 		"enable_semantic_cache": {Type: testutil.TypeBool},
-		"created_at":            {Type: testutil.TypeString},
-		"updated_at":            {Type: testutil.TypeString},
 	},
 }
 
