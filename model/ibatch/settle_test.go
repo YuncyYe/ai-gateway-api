@@ -37,6 +37,13 @@ const testJSONL = `{"id":"r-1","custom_id":"c-1","response":{"model":"gpt-4o","u
 {"id":"r-3","custom_id":"c-3","error":{"message":"boom"}}
 `
 
+// testJSONLBody 是 OpenAI Batch 契约形态（usage 在 response.body 内，
+// issue #254 的复现形态）。
+const testJSONLBody = `{"id":"r-1","custom_id":"c-1","response":{"status_code":200,"body":{"model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}},"error":null}
+{"id":"r-2","custom_id":"c-2","response":{"status_code":200,"body":{"model":"gpt-4o","usage":{"prompt_tokens":200,"completion_tokens":100,"total_tokens":300}}},"error":null}
+{"id":"r-3","custom_id":"c-3","response":null,"error":{"message":"boom"}}
+`
+
 // setupSettleFixture 组装兜底结算夹具。
 func setupSettleFixture(t *testing.T, tasks []*BatchTask, jsonl string, statusCode int, price *imodel_price.ModelPrice) (*Manager, *fakeBatchStorager, *fakeRedisClient) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +414,49 @@ func TestParseJSONLUsage(t *testing.T) {
 		assert.Equal(t, 0, totals.parsedLines)
 	})
 
+	t.Run("response.body.usage 契约形态（issue #254）", func(t *testing.T) {
+		totals := &usageTotals{}
+		err := parseJSONLUsage(strings.NewReader(testJSONLBody), 1<<20, totals)
+		require.NoError(t, err)
+		assert.Equal(t, int64(300), totals.inputTokens)
+		assert.Equal(t, int64(150), totals.outputTokens)
+		assert.Equal(t, "gpt-4o", totals.model)
+		assert.Equal(t, 2, totals.parsedLines)
+		assert.Equal(t, 0, totals.noUsageLines, "错误行不计 noUsage")
+		assert.Equal(t, 0, totals.badLines)
+	})
+
+	t.Run("两种形态混合：body 优先，扁平兼容", func(t *testing.T) {
+		jsonl := `{"response":{"body":{"model":"m-body","usage":{"prompt_tokens":1,"completion_tokens":2}}}}` + "\n" +
+			`{"response":{"model":"m-flat","usage":{"prompt_tokens":3,"completion_tokens":4}}}` + "\n" +
+			`{"response":{"body":{"model":"m-body","usage":{"prompt_tokens":5,"completion_tokens":6}}},"response_extra":null}` + "\n"
+		totals := &usageTotals{}
+		err := parseJSONLUsage(strings.NewReader(jsonl), 1<<20, totals)
+		require.NoError(t, err)
+		assert.Equal(t, int64(9), totals.inputTokens)
+		assert.Equal(t, int64(12), totals.outputTokens)
+		assert.Equal(t, "m-body", totals.model, "首个可计费行的 model（body 优先）")
+		assert.Equal(t, 3, totals.parsedLines)
+	})
+
+	t.Run("有 response 无 usage 计 noUsageLines", func(t *testing.T) {
+		jsonl := `{"response":{"body":{"model":"m"}}}` + "\n" +
+			`{"response":{"model":"m"}}` + "\n"
+		totals := &usageTotals{}
+		err := parseJSONLUsage(strings.NewReader(jsonl), 1<<20, totals)
+		require.NoError(t, err)
+		assert.Equal(t, 0, totals.parsedLines)
+		assert.Equal(t, 2, totals.noUsageLines)
+	})
+
+	t.Run("非法 JSON 计 badLines", func(t *testing.T) {
+		totals := &usageTotals{}
+		err := parseJSONLUsage(strings.NewReader("not-a-json-line\n"), 1<<20, totals)
+		require.NoError(t, err)
+		assert.Equal(t, 1, totals.badLines)
+		assert.Equal(t, 0, totals.noUsageLines)
+	})
+
 	t.Run("空行与空白跳过", func(t *testing.T) {
 		totals := &usageTotals{}
 		err := parseJSONLUsage(strings.NewReader("\n   \n"), 1<<20, totals)
@@ -451,4 +501,41 @@ func TestNoSettleReleaseStatuses(t *testing.T) {
 	// completed 不在整额释放集合（先实结，预留随结算冲正）。
 	assert.NotContains(t, noSettleReleaseStatuses, TaskStatusCompleted)
 	assert.NotContains(t, noSettleReleaseStatuses, TaskStatusCancelling)
+}
+
+// issue #254 安全阀：结果文件里的行有 response 却一行 usage 都取不到时，
+// 不得把批次推进为 settled（修复前扁平解析正是这种形态，会造成 0 元结算）。
+func TestReconcileSettle_NoUsageNotSettled(t *testing.T) {
+	noUsageJSONL := `{"custom_id":"c-1","response":{"status_code":200,"body":{"model":"gpt-4o"}},"error":null}` + "\n" +
+		`{"custom_id":"c-2","response":null,"error":{"message":"boom"}}` + "\n"
+	price := &imodel_price.ModelPrice{
+		Provider: "openai", Model: "gpt-4o", Mode: "batch",
+		Prices: imodel_price.PriceMap{"input_cost_per_token": 0.00001},
+	}
+	m, storager, redis := setupSettleFixture(t, []*BatchTask{completedTask()}, noUsageJSONL, 200, price)
+
+	settled, released, err := m.ReconcileSettle(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, settled, "有 response 无 usage 时不得判 settled")
+	assert.Equal(t, 0, released)
+	assert.Empty(t, storager.settlePatches, "不得推进 settle_status")
+	assert.Empty(t, redis.hSets, "不得写回 Redis 结算字段")
+}
+
+// 纯错误行（response 全为 null）是合法形态：照常按 0 元结算。
+func TestReconcileSettle_OnlyErrorRowsSettlesZero(t *testing.T) {
+	errorOnly := `{"custom_id":"c-1","response":null,"error":{"message":"boom"}}` + "\n"
+	price := &imodel_price.ModelPrice{
+		Provider: "openai", Model: "gpt-4o", Mode: "batch",
+		Prices: imodel_price.PriceMap{"input_cost_per_token": 0.00001},
+	}
+	m, storager, redis := setupSettleFixture(t, []*BatchTask{completedTask()}, errorOnly, 200, price)
+
+	settled, _, err := m.ReconcileSettle(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, settled, "全部请求失败的结果文件应正常结算 0")
+	require.Len(t, redis.hSets, 1)
+	assert.Equal(t, "0", redis.hSets[0].fields["usage_in"])
+	assert.Equal(t, SettleStatusSettled, redis.hSets[0].fields["settle_status"])
+	require.Len(t, storager.settlePatches, 1)
 }

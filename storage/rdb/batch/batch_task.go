@@ -122,6 +122,7 @@ func (s *BatchStorager) UpdateBatchTaskProgress(ctx context.Context, id int64, p
 	assign := &dao.TBatchTaskParam{
 		Status:       patch.Status,
 		OutputFileID: patch.OutputFileID,
+		Endpoint:     patch.Endpoint,
 		TerminalAt:   patch.TerminalAt,
 		UpdatedAt:    lib.PTimeNow(),
 	}

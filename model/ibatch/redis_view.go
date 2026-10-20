@@ -16,6 +16,7 @@ package ibatch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -25,23 +26,29 @@ import (
 // "hash 未携带"（nil，不覆盖 DB 已有值）与零值。
 //
 // 键结构（批量任务与对账.md §2）：{api_key_id, provider, key_name,
-// input_file_id, est_lines, reserved_units, status, usage_in, usage_out,
-// settle_units, settle_status}。数据面一期实现以 cluster 字段承载路由
+// input_file_id, output_file_id, endpoint, request_counts, est_lines,
+// reserved_units, status, created_at, usage_in, usage_out, settle_units,
+// settle_status, usage_source}。数据面一期实现以 cluster 字段承载路由
 // cluster 名（provider 列同值），故 provider 缺失时回退读 cluster；
 // 预留布尔标记为 reserved（"1"/"0"），reserved_units 金额优先。
 type redisTaskView struct {
-	batchID      string
-	apiKeyID     string
-	provider     string
-	keyName      string
-	inputFileID  string
-	estLines     *int64
-	reserveUnits *int64
-	status       string
-	usageIn      *int64
-	usageOut     *int64
-	settleUnits  *int64
-	settleStatus string
+	batchID       string
+	apiKeyID      string
+	provider      string
+	keyName       string
+	inputFileID   string
+	outputFileID  *string
+	endpoint      *string
+	requestCounts map[string]int64
+	estLines      *int64
+	reserveUnits  *int64
+	status        string
+	createdAt     *time.Time
+	usageIn       *int64
+	usageOut      *int64
+	usageSource   string
+	settleUnits   *int64
+	settleStatus  string
 }
 
 // ParseRedisTaskView 解析 BATCH_TASK hash；batch_id 取自键。
@@ -60,12 +67,25 @@ func ParseRedisTaskView(batchID string, vals map[string]string) (*redisTaskView,
 		keyName:      vals["key_name"],
 		inputFileID:  vals["input_file_id"],
 		status:       status,
+		usageSource:  vals["usage_source"],
 		settleStatus: vals["settle_status"],
 	}
 	view.provider = vals["provider"]
 	if view.provider == "" {
 		// 兼容数据面一期字段名（路由 cluster 名，与 provider 列同值）。
 		view.provider = vals["cluster"]
+	}
+	if v := vals["output_file_id"]; v != "" {
+		view.outputFileID = &v
+	}
+	if v := vals["endpoint"]; v != "" {
+		view.endpoint = &v
+	}
+	if v, ok := parseRequestCounts(vals["request_counts"]); ok {
+		view.requestCounts = v
+	}
+	if v, ok := parseUnixOrRFC3339(vals["created_at"]); ok {
+		view.createdAt = &v
 	}
 	if v, ok := parseInt64Field(vals, "est_lines"); ok {
 		view.estLines = &v
@@ -91,17 +111,22 @@ func ParseRedisTaskView(batchID string, vals map[string]string) (*redisTaskView,
 }
 
 // redisFileView 是 Redis BATCH_FILE hash 的读视图。键结构：
-// {api_key_id, key_name, lines, bytes, purpose, dir}（输出文件绑定另含
-// batch_id）。
+// {api_key_id, key_name, cluster, lines, bytes, purpose, dir, filename,
+// batch_id, lines_src, bytes_src}（输出文件绑定另含 batch_id）。
 type redisFileView struct {
 	partition string
 	fileID    string
 	apiKeyID  string
 	keyName   string
+	cluster   string
 	lines     *int64
 	bytes     *int64
 	purpose   string
+	filename  string
 	direction string
+	batchID   string
+	linesSrc  string
+	bytesSrc  string
 }
 
 // ParseRedisFileView 解析 BATCH_FILE hash。
@@ -111,8 +136,13 @@ func ParseRedisFileView(partition, fileID string, vals map[string]string) *redis
 		fileID:    fileID,
 		apiKeyID:  vals["api_key_id"],
 		keyName:   vals["key_name"],
+		cluster:   vals["cluster"],
 		purpose:   vals["purpose"],
+		filename:  vals["filename"],
 		direction: vals["dir"],
+		batchID:   vals["batch_id"],
+		linesSrc:  vals["lines_src"],
+		bytesSrc:  vals["bytes_src"],
 	}
 	if v, ok := parseInt64Field(vals, "lines"); ok {
 		view.lines = &v
@@ -121,6 +151,37 @@ func ParseRedisFileView(partition, fileID string, vals map[string]string) *redis
 		view.bytes = &v
 	}
 	return view
+}
+
+// parseRequestCounts 解析 provider 的 request_counts JSON 对象；空/非法
+// 视为"未携带"，避免把脏值写进 DB。
+func parseRequestCounts(raw string) (map[string]int64, bool) {
+	if raw == "" {
+		return nil, false
+	}
+	counts := make(map[string]int64)
+	if err := json.Unmarshal([]byte(raw), &counts); err != nil || len(counts) == 0 {
+		return nil, false
+	}
+	return counts, true
+}
+
+// parseUnixOrRFC3339 解析时间戳：数据面写 unix 秒，控制面自身可能写
+// RFC3339，两种形态都接受。
+func parseUnixOrRFC3339(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if sec, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if sec <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(sec, 0), true
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
 }
 
 func parseInt64Field(vals map[string]string, field string) (int64, bool) {
@@ -165,6 +226,21 @@ func (m *Manager) applyTaskView(ctx context.Context, cache *apiKeyResolveCache, 
 	if view.estLines != nil {
 		task.EstLines = *view.estLines
 	}
+	if view.outputFileID != nil {
+		task.OutputFileID = *view.outputFileID
+	}
+	if view.endpoint != nil {
+		task.Endpoint = *view.endpoint
+	}
+	if view.requestCounts != nil {
+		task.RequestCounts = view.requestCounts
+	}
+	if view.createdAt != nil {
+		task.CreatedAt = *view.createdAt
+	}
+	if view.usageSource != "" {
+		task.UsageSource = view.usageSource
+	}
 	if view.reserveUnits != nil {
 		task.ReserveUnits = *view.reserveUnits
 	}
@@ -202,10 +278,11 @@ func (m *Manager) applyFileView(ctx context.Context, cache *apiKeyResolveCache, 
 	file := &BatchFile{
 		FileID:    view.fileID,
 		Provider:  view.partition,
-		APIKeyID:  view.apiKeyID,
 		KeyName:   view.keyName,
+		APIKeyID:  view.apiKeyID,
 		Direction: view.direction,
 		Purpose:   view.purpose,
+		Filename:  view.filename,
 	}
 	if ak.ProductName != nil {
 		file.ProductName = *ak.ProductName
@@ -307,6 +384,13 @@ func mergeTaskForSync(existing *BatchTask, incoming *BatchTask, view *redisTaskV
 	if view.settleStatus == "" {
 		merged.SettleStatus = existing.SettleStatus
 	}
+	// 创建时间：数据面修复前不写该字段，hash 未携带时保留 DB 值（避免把
+	// 真实创建时间抹零）；携带时以 provider 时间为准。
+	if view.createdAt != nil {
+		merged.CreatedAt = *view.createdAt
+	} else {
+		merged.CreatedAt = existing.CreatedAt
+	}
 	// 终态不回退。
 	if IsTerminalStatus(existing.Status) {
 		merged.Status = existing.Status
@@ -347,6 +431,9 @@ func mergeFileForSync(existing *BatchFile, incoming *BatchFile, view *redisFileV
 	}
 	if merged.Purpose == "" {
 		merged.Purpose = existing.Purpose
+	}
+	if merged.Filename == "" {
+		merged.Filename = existing.Filename
 	}
 	if view.lines != nil {
 		merged.Lines = *view.lines

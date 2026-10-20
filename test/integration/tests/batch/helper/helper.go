@@ -149,6 +149,7 @@ type BatchFileRow struct {
 	ProductName string
 	Direction   string
 	Purpose     string
+	Filename    string
 	Lines       int64
 	Bytes       int64
 }
@@ -161,10 +162,10 @@ func InsertBatchFile(t *testing.T, db *sql.DB, row BatchFileRow) {
 	_, err := db.Exec(`
 		INSERT INTO batch_files (
 			file_id, provider, key_name, api_key_id, product_name, direction,
-			purpose, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at
-		) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			purpose, filename, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at
+		) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, row.FileID, row.Provider, row.APIKeyID, row.ProductName, row.Direction,
-		row.Purpose, row.Lines, row.Bytes, now, now, now, now)
+		row.Purpose, row.Filename, row.Lines, row.Bytes, now, now, now, now)
 	require.NoError(t, err)
 }
 

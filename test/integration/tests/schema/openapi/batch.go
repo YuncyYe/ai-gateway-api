@@ -17,7 +17,8 @@ package openapi
 import "github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
 
 // BatchFileMetaSchema 批量文件元数据对外视图（batches.md §2.2）。
-// Required 恰为恒输出键；filename 一期留空被 omitempty 省略，不列入。
+// Required 恰为恒输出键；purpose/filename/bytes 为 omitempty（无值时缺席，
+// filename 由 provider File 对象给出，issue #254 起落库）。
 // 不得包含内部字段（id/direction/lines/key_name/api_key_id/product_name/
 // first_seen_at/last_seen_at/updated_at）——由 detail 用例键集合精确锁兜底。
 var BatchFileMetaSchema = &testutil.ObjectSchema{

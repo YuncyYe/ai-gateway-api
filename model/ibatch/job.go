@@ -36,6 +36,7 @@ const batchJobLockName = "batch_reconcile_job"
 type ReconcileManager interface {
 	SyncFromRedis(ctx context.Context) (int, int, error)
 	AdvanceStatus(ctx context.Context) (int, error)
+	BackfillTerminalArtifacts(ctx context.Context) (int, error)
 	ReconcileSettle(ctx context.Context) (int, int, error)
 }
 
@@ -159,6 +160,14 @@ func (j *Job) RunOnce(ctx context.Context) error {
 			return err
 		}
 		jobLogf("batch reconcile: advanced=%d", advanced)
+		return nil
+	})
+	j.runDuty("backfill terminal artifacts", func(ctx context.Context) error {
+		backfilled, err := j.manager.BackfillTerminalArtifacts(ctx)
+		if err != nil {
+			return err
+		}
+		jobLogf("batch reconcile: backfilled=%d", backfilled)
 		return nil
 	})
 	j.runDuty("reconcile settle", func(ctx context.Context) error {

@@ -62,7 +62,7 @@ batch/
 ├── list/
 │   └── list_test.go         # BT-1-000 ~ BT-1-004
 ├── detail/
-│   └── detail_test.go       # BT-2-000 ~ BT-2-004
+│   └── detail_test.go       # BT-2-000 ~ BT-2-005
 ├── cancel/
 │   └── cancel_test.go       # BT-3-000 ~ BT-3-007（BT-3-007 为 MySQL 并发用例）
 └── file/
@@ -94,9 +94,10 @@ batch/
 |------|------|---------|---------|------|
 | BT-2-000 | 可达性冒烟（ghost → 404 业务语义） | 冒烟 | - | 404 |
 | BT-2-001 | 任务不存在 | 异常参数 | - | 404 |
-| BT-2-002 | 直写一行 → 字段完整（**2026-10-16 按合同重写**，issue #249） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行 | 200；Data 顶层即任务字段（§2.1，无 task/files 包装层）；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`batch_files` 恰含输入/输出两条，元素键集合精确为 §2.2（file_id/provider/purpose/bytes/created_at，filename 一期留空被省略），原始报文无 direction 等内部字段 |
+| BT-2-002 | 直写一行 → 字段完整（**2026-10-16 按合同重写**，issue #249；**2026-10-19 补 filename**，issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行（含 filename） | 200；Data 顶层即任务字段（§2.1，无 task/files 包装层）；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`batch_files` 恰含输入/输出两条，元素键集合精确为 §2.2 六字段（file_id/provider/purpose/filename/bytes/created_at），`filename` 为 `input.jsonl`/`output.jsonl`，原始报文无 direction 等内部字段 |
 | BT-2-003 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 行 1 行 | 404（按不存在处理） |
 | BT-2-004 | 无关联文件 | 返回数据 | 直写任务 1 行（无输入/输出文件 ID） | 200；`batch_files` 键缺席（omitempty，无文件不输出空数组） |
+| BT-2-005 | purpose 按方向映射（issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行，`purpose` 列写 provider 原值 `batch`、`filename` 留空 | 200；`purpose` 分别为 `batch_input`/`batch_output`（列内原值不外泄）；`filename` 键缺席（omitempty）；原始报文无 `direction` |
 
 **断言要点（BT-2-002，合同锁定）**
 
@@ -110,6 +111,9 @@ batch/
   原始报文断言 `"direction"` 不得出现
 - 历史教训：本用例初版按实现现状断言 task/files 包装与 direction 字段，
   把缺陷固化成"通行证"（反面模式 #5）；2026-10-16 服务端修复后按合同重写
+- issue #254 起 `filename` 由 provider File 对象落库并输出，元素键集合锁
+  由"五键"扩为 §2.2 六键；`purpose` 的映射关系（列内 provider 原值 →
+  视图契约枚举）由 BT-2-005 单独锁定，避免"按实现现状断言"再次固化
 
 ### 4.3 取消（BT-3）
 
@@ -139,7 +143,7 @@ batch/
 | 编号 | 场景 | 测试类型 | 数据准备 | 预期 |
 |------|------|---------|---------|------|
 | BT-4-000 | 可达性冒烟（ghost file → 404 业务语义） | 冒烟 | - | 404 |
-| BT-4-001 | 直写 batch_files → 200 | 返回数据 | 直写文件 1 行 | 200；file_id/provider/api_key_id/product_name/direction/purpose/lines/bytes 全字段匹配 |
+| BT-4-001 | 直写 batch_files → 200 | 返回数据 | 直写文件 1 行（含 filename） | 200；file_id/provider/api_key_id/product_name/direction/purpose/filename/lines/bytes 全字段匹配 |
 | BT-4-002 | 文件不存在 | 异常参数 | - | 404 |
 | BT-4-003 | provider query 缺失 | 必填校验 | - | 422 |
 | BT-4-004 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 文件 1 行 | 404 |

@@ -34,6 +34,7 @@ type TBatchFile struct {
 	ProductName string     `db:"product_name"`
 	Direction   string     `db:"direction"`
 	Purpose     string     `db:"purpose"`
+	Filename    string     `db:"filename"`
 	Lines       int64      `db:"line_count"`
 	Bytes       int64      `db:"bytes"`
 	FirstSeenAt *time.Time `db:"first_seen_at"`
@@ -79,6 +80,7 @@ type TBatchFileParam struct {
 	ProductName *string    `db:"product_name"`
 	Direction   *string    `db:"direction"`
 	Purpose     *string    `db:"purpose"`
+	Filename    *string    `db:"filename"`
 	Lines       *int64     `db:"line_count"`
 	Bytes       *int64     `db:"bytes"`
 	FirstSeenAt *time.Time `db:"first_seen_at"`

@@ -118,7 +118,8 @@ type BatchTask struct {
 // BatchFileMeta 是批量文件元数据的对外视图（batches.md §2.2）：只映射
 // 契约字段，内部字段（id / key_name / api_key_id / product_name /
 // direction / lines / first_seen_at / last_seen_at / updated_at）不外泄。
-// filename 一期不落库（batch_files 表无该列），固定为空、序列化时省略。
+// purpose 由文件方向映射为契约枚举（batch_files.purpose 列保留 provider
+// 原值，如 "batch"）；filename 来自 provider File 对象，缺失时省略。
 type BatchFileMeta struct {
 	FileID    string    `json:"file_id"`
 	Provider  string    `json:"provider"`
@@ -136,12 +137,31 @@ func (f *BatchFile) ToMeta() *BatchFileMeta {
 	return &BatchFileMeta{
 		FileID:    f.FileID,
 		Provider:  f.Provider,
-		Purpose:   f.Purpose,
-		Filename:  "",
+		Purpose:   f.contractPurpose(),
+		Filename:  f.Filename,
 		Bytes:     f.Bytes,
 		CreatedAt: f.CreatedAt,
 	}
 }
+
+// contractPurpose 把文件方向映射为契约 purpose（batches.md §2.2）：
+// input → batch_input、output → batch_output。direction 缺失（历史脏
+// 数据）时透传列值，不猜方向。
+func (f *BatchFile) contractPurpose() string {
+	switch f.Direction {
+	case FileDirectionInput:
+		return PurposeBatchInput
+	case FileDirectionOutput:
+		return PurposeBatchOutput
+	}
+	return f.Purpose
+}
+
+// 批量文件契约 purpose（batches.md §2.2）。
+const (
+	PurposeBatchInput  = "batch_input"
+	PurposeBatchOutput = "batch_output"
+)
 
 // 文件实体（batch_files 行）。表内不存文件内容。
 type BatchFile struct {
@@ -153,6 +173,7 @@ type BatchFile struct {
 	ProductName string     `json:"product_name"`
 	Direction   string     `json:"direction"`
 	Purpose     string     `json:"purpose,omitempty"`
+	Filename    string     `json:"filename,omitempty"`
 	Lines       int64      `json:"lines,omitempty"`
 	Bytes       int64      `json:"bytes,omitempty"`
 	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
@@ -210,6 +231,7 @@ const (
 type BatchTaskProgressPatch struct {
 	Status        *string
 	OutputFileID  *string
+	Endpoint      *string
 	RequestCounts *map[string]int64
 	TerminalAt    *time.Time
 }

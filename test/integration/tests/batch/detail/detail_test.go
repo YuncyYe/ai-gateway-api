@@ -91,11 +91,13 @@ func TestBatchDetail_FullFields(t *testing.T) {
 
 	helper.InsertBatchFile(t, db, helper.BatchFileRow{
 		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
-		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input", Lines: 10, Bytes: 1024,
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input",
+		Filename: "input.jsonl", Lines: 10, Bytes: 1024,
 	})
 	helper.InsertBatchFile(t, db, helper.BatchFileRow{
 		FileID: tag + "-out", Provider: "deepseek", APIKeyID: tag + "-ak",
-		ProductName: helper.TestProductName, Direction: "output", Purpose: "batch_output", Lines: 9, Bytes: 2048,
+		ProductName: helper.TestProductName, Direction: "output", Purpose: "batch_output",
+		Filename: "output.jsonl", Lines: 9, Bytes: 2048,
 	})
 	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
 	defer helper.DeleteBatchFile(t, db, tag+"-out", "deepseek")
@@ -149,15 +151,15 @@ func TestBatchDetail_FullFields(t *testing.T) {
 	for _, item := range files {
 		f, ok := item.(map[string]interface{})
 		require.True(t, ok, "batch_files element must be object")
-		// 键集合精确锁：恰为 §2.2 六字段中的实际输出五键
-		//（filename 一期留空被 omitempty 省略），不得泄漏内部字段
+		// 键集合精确锁：恰为 §2.2 六字段（issue #254 起 filename 由 provider
+		// File 对象落库并输出），不得泄漏内部字段
 		//（id/direction/lines/key_name/api_key_id/product_name/first_seen_at/...）。
 		keys := make([]string, 0, len(f))
 		for k := range f {
 			keys = append(keys, k)
 		}
 		assert.ElementsMatch(t,
-			[]string{"file_id", "provider", "purpose", "bytes", "created_at"}, keys,
+			[]string{"file_id", "provider", "purpose", "filename", "bytes", "created_at"}, keys,
 			"batch_files element keys must exactly match contract (batches.md §2.2)")
 		byID[f["file_id"].(string)] = f
 	}
@@ -165,12 +167,71 @@ func TestBatchDetail_FullFields(t *testing.T) {
 	require.Contains(t, byID, tag+"-out")
 	assert.Equal(t, "batch_input", byID[tag+"-in"]["purpose"])
 	assert.Equal(t, "batch_output", byID[tag+"-out"]["purpose"])
+	// issue #254：filename 来自 provider File 对象（数据面同步落库）
+	assert.Equal(t, "input.jsonl", byID[tag+"-in"]["filename"])
+	assert.Equal(t, "output.jsonl", byID[tag+"-out"]["filename"])
 	assert.Equal(t, float64(1024), byID[tag+"-in"]["bytes"])
 	assert.Equal(t, float64(2048), byID[tag+"-out"]["bytes"])
 
 	// 原始报文不得出现文件内部字段（direction 为一期直出缺陷的典型泄漏键）。
 	assert.NotContains(t, string(resp.RawBody), `"direction"`)
 	assert.NotContains(t, string(resp.RawBody), `"first_seen_at"`)
+}
+
+// ---------- BT-2-005 列内 purpose 为 provider 原值 → 视图按方向映射契约枚举（issue #254） ----------
+
+// TestBatchDetail_PurposeMappedFromDirection 锁定"batch_files.purpose 列保留
+// provider 原值（batch），对外视图按 direction 映射为 batch_input/batch_output"
+// 的语义（batches.md §2.2）；同时验证 filename 缺失时该键省略。
+func TestBatchDetail_PurposeMappedFromDirection(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-005")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "openai", Status: "in_progress", SettleStatus: "reserved",
+		InputFileID: tag + "-in", OutputFileID: tag + "-out",
+		SyncSource: "redis", IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	// 数据面原样写入 provider 的 purpose=batch；filename 缺失
+	helper.InsertBatchFile(t, db, helper.BatchFileRow{
+		FileID: tag + "-in", Provider: "openai", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch", Bytes: 206,
+	})
+	helper.InsertBatchFile(t, db, helper.BatchFileRow{
+		FileID: tag + "-out", Provider: "openai", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "output", Purpose: "batch", Bytes: 512,
+	})
+	defer helper.DeleteBatchFile(t, db, tag+"-in", "openai")
+	defer helper.DeleteBatchFile(t, db, tag+"-out", "openai")
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	filesVal, ok := data["batch_files"]
+	require.True(t, ok)
+	files, ok := filesVal.([]interface{})
+	require.True(t, ok)
+	require.Equal(t, 2, len(files))
+
+	byID := map[string]map[string]interface{}{}
+	for _, item := range files {
+		f, ok := item.(map[string]interface{})
+		require.True(t, ok)
+		byID[f["file_id"].(string)] = f
+	}
+	assert.Equal(t, "batch_input", byID[tag+"-in"]["purpose"])
+	assert.Equal(t, "batch_output", byID[tag+"-out"]["purpose"])
+	_, hasFilename := byID[tag+"-in"]["filename"]
+	assert.False(t, hasFilename, "filename 缺失时该键须省略")
+	// 原始报文不得出现 provider 原值 purpose（batch）以外的 internal 泄漏
+	assert.NotContains(t, string(resp.RawBody), `"direction"`)
 }
 
 // ---------- BT-2-004 无关联文件 → 200 且 batch_files 键缺席（omitempty） ----------

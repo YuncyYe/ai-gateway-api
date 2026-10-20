@@ -746,6 +746,7 @@ CREATE TABLE batch_files (
   product_name TEXT NOT NULL,
   direction TEXT NOT NULL,
   purpose TEXT,
+  filename TEXT,
   line_count INTEGER,
   bytes INTEGER,
   first_seen_at DATETIME,

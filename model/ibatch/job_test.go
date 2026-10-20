@@ -28,16 +28,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeReconcileManager 记录三职责调用；可注入错误与 panic。
+// fakeReconcileManager 记录各职责调用；可注入错误与 panic。
 type fakeReconcileManager struct {
-	mu          sync.Mutex
-	syncCalls   int
-	advCalls    int
-	settleCalls int
-	syncErr     error
-	advErr      error
-	settleErr   error
-	advPanic    bool
+	mu            sync.Mutex
+	syncCalls     int
+	advCalls      int
+	backfillCalls int
+	settleCalls   int
+	syncErr       error
+	advErr        error
+	backfillErr   error
+	settleErr     error
+	advPanic      bool
+	backfillPanic bool
 }
 
 func (f *fakeReconcileManager) SyncFromRedis(ctx context.Context) (int, int, error) {
@@ -57,6 +60,16 @@ func (f *fakeReconcileManager) AdvanceStatus(ctx context.Context) (int, error) {
 	return 3, f.advErr
 }
 
+func (f *fakeReconcileManager) BackfillTerminalArtifacts(ctx context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.backfillCalls++
+	if f.backfillPanic {
+		panic("backfill duty boom")
+	}
+	return 6, f.backfillErr
+}
+
 func (f *fakeReconcileManager) ReconcileSettle(ctx context.Context) (int, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -65,9 +78,14 @@ func (f *fakeReconcileManager) ReconcileSettle(ctx context.Context) (int, int, e
 }
 
 func (f *fakeReconcileManager) counts() (int, int, int) {
+	sync_, adv, _, settle := f.allCounts()
+	return sync_, adv, settle
+}
+
+func (f *fakeReconcileManager) allCounts() (int, int, int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.syncCalls, f.advCalls, f.settleCalls
+	return f.syncCalls, f.advCalls, f.backfillCalls, f.settleCalls
 }
 
 func setupJobSQLiteDB(t *testing.T) *sql.DB {
@@ -136,7 +154,7 @@ func TestJob_MySQLNamedLock(t *testing.T) {
 		j.useMySQL = true // sqlmock 驱动非 MySQLDriver，强制走 named lock 路径
 
 		require.NoError(t, j.RunOnce(context.Background()))
-		assert.Equal(t, []string{"sync", "advance", "settle"}, callOrder(manager))
+		assert.Equal(t, []string{"sync", "advance", "backfill", "settle"}, callOrder(manager))
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -170,15 +188,18 @@ func TestJob_MySQLNamedLock(t *testing.T) {
 	})
 }
 
-// callOrder 通过计数快照推断三职责被依次调用（职责内串行）。
+// callOrder 通过计数快照推断各职责被依次调用（职责内串行）。
 func callOrder(m *fakeReconcileManager) []string {
-	sync, adv, settle := m.counts()
+	sync, adv, backfill, settle := m.allCounts()
 	order := []string{}
 	for i := 0; i < sync; i++ {
 		order = append(order, "sync")
 	}
 	for i := 0; i < adv; i++ {
 		order = append(order, "advance")
+	}
+	for i := 0; i < backfill; i++ {
+		order = append(order, "backfill")
 	}
 	for i := 0; i < settle; i++ {
 		order = append(order, "settle")
