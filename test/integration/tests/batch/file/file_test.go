@@ -62,6 +62,7 @@ func TestBatchFile_Found(t *testing.T) {
 		ProductName: helper.TestProductName,
 		Direction:   "input",
 		Purpose:     "batch_input",
+		Filename:    "input.jsonl",
 		Lines:       128,
 		Bytes:       65536,
 	}
@@ -82,6 +83,8 @@ func TestBatchFile_Found(t *testing.T) {
 	assert.Equal(t, helper.TestProductName, data["product_name"])
 	assert.Equal(t, "input", data["direction"])
 	assert.Equal(t, "batch_input", data["purpose"])
+	// issue #254：filename 由 provider File 对象落库后透出
+	assert.Equal(t, "input.jsonl", data["filename"])
 	assert.Equal(t, float64(128), data["lines"])
 	assert.Equal(t, float64(65536), data["bytes"])
 }

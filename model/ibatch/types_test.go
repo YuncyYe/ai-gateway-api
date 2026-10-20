@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBatchFileToMeta(t *testing.T) {
@@ -60,6 +61,32 @@ func TestBatchFileToMeta(t *testing.T) {
 	assert.Contains(t, s, `"file_id":"file-1"`)
 
 	assert.Nil(t, (*BatchFile)(nil).ToMeta())
+
+	// issue #254：purpose 由方向映射（列内保留 provider 原值），filename 透出。
+	t.Run("output 方向映射 batch_output，provider 原值不外泄", func(t *testing.T) {
+		out := &BatchFile{FileID: "file-out", Provider: "openai", Direction: FileDirectionOutput, Purpose: "batch"}
+		meta := out.ToMeta()
+		assert.Equal(t, "batch_output", meta.Purpose)
+
+		// direction 缺失（历史脏数据）时透传列值，不猜方向
+		legacy := &BatchFile{FileID: "file-x", Provider: "openai", Purpose: "batch"}
+		assert.Equal(t, "batch", legacy.ToMeta().Purpose)
+	})
+
+	t.Run("filename 透出且空值省略", func(t *testing.T) {
+		withName := &BatchFile{FileID: "file-1", Provider: "openai", Direction: FileDirectionInput,
+			Purpose: "batch", Filename: "input.jsonl"}
+		assert.Equal(t, "input.jsonl", withName.ToMeta().Filename)
+
+		raw, err := json.Marshal(withName.ToMeta())
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"filename":"input.jsonl"`)
+
+		noName := &BatchFile{FileID: "file-2", Provider: "openai", Direction: FileDirectionOutput}
+		raw, err = json.Marshal(noName.ToMeta())
+		require.NoError(t, err)
+		assert.NotContains(t, string(raw), `"filename"`, "空文件名省略该键")
+	})
 }
 
 func TestBatchTaskBatchFilesOmitEmpty(t *testing.T) {

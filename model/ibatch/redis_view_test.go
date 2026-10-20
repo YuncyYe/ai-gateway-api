@@ -61,13 +61,18 @@ func TestParseRedisTaskView(t *testing.T) {
 			"provider":       "openai",
 			"key_name":       "k1",
 			"input_file_id":  "f-in",
+			"output_file_id": "f-out",
+			"endpoint":       "/v1/chat/completions",
+			"request_counts": `{"completed":2,"failed":0,"total":2}`,
+			"created_at":     "1760000000",
 			"est_lines":      "10",
 			"reserved_units": "500",
-			"status":         "in_progress",
+			"status":         "completed",
 			"usage_in":       "1",
 			"usage_out":      "2",
-			"settle_units":   "0",
-			"settle_status":  "reserved",
+			"usage_source":   "download",
+			"settle_units":   "2700",
+			"settle_status":  "settled",
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "openai", view.provider)
@@ -75,6 +80,52 @@ func TestParseRedisTaskView(t *testing.T) {
 		assert.Equal(t, int64(500), *view.reserveUnits)
 		require.NotNil(t, view.usageIn)
 		assert.Equal(t, int64(1), *view.usageIn)
+		// issue #254: 终态字段
+		require.NotNil(t, view.outputFileID)
+		assert.Equal(t, "f-out", *view.outputFileID)
+		require.NotNil(t, view.endpoint)
+		assert.Equal(t, "/v1/chat/completions", *view.endpoint)
+		assert.Equal(t, map[string]int64{"completed": 2, "failed": 0, "total": 2}, view.requestCounts)
+		require.NotNil(t, view.createdAt)
+		assert.Equal(t, time.Unix(1760000000, 0).UTC(), view.createdAt.UTC())
+		assert.Equal(t, "download", view.usageSource)
+	})
+
+	t.Run("created_at 支持 RFC3339（控制面自写形态）", func(t *testing.T) {
+		view, err := ParseRedisTaskView("b-1", map[string]string{
+			"status": "queued", "created_at": "2026-10-19T05:03:33Z",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, view.createdAt)
+		assert.Equal(t, 2026, view.createdAt.UTC().Year())
+	})
+
+	t.Run("终态字段缺失时不携带（不覆盖 DB）", func(t *testing.T) {
+		view, err := ParseRedisTaskView("b-1", map[string]string{"status": "queued"})
+		require.NoError(t, err)
+		assert.Nil(t, view.outputFileID)
+		assert.Nil(t, view.endpoint)
+		assert.Nil(t, view.requestCounts)
+		assert.Nil(t, view.createdAt)
+		assert.Empty(t, view.usageSource)
+	})
+
+	t.Run("request_counts/created_at 脏值视为未携带", func(t *testing.T) {
+		view, err := ParseRedisTaskView("b-1", map[string]string{
+			"status":         "queued",
+			"request_counts": "not-json",
+			"created_at":     "yesterday",
+		})
+		require.NoError(t, err)
+		assert.Nil(t, view.requestCounts)
+		assert.Nil(t, view.createdAt)
+
+		// 空对象也不算携带
+		view, err = ParseRedisTaskView("b-1", map[string]string{
+			"status": "queued", "request_counts": "{}",
+		})
+		require.NoError(t, err)
+		assert.Nil(t, view.requestCounts)
 	})
 
 	t.Run("provider 缺失回退 cluster（数据面一期字段名）", func(t *testing.T) {
@@ -112,16 +163,27 @@ func TestParseRedisFileView(t *testing.T) {
 	view := ParseRedisFileView("p", "f-1", map[string]string{
 		"api_key_id": "ak",
 		"key_name":   "k1",
+		"cluster":    "c-1",
 		"lines":      "8",
 		"bytes":      "999",
 		"purpose":    "batch",
+		"filename":   "input.jsonl",
 		"dir":        "output",
+		"batch_id":   "b-1",
+		"lines_src":  "exact",
+		"bytes_src":  "approx",
 	})
 	assert.Equal(t, "p", view.partition)
 	assert.Equal(t, "f-1", view.fileID)
 	require.NotNil(t, view.lines)
 	assert.Equal(t, int64(8), *view.lines)
 	assert.Equal(t, "output", view.direction)
+	// issue #254: 文件名与来源标记
+	assert.Equal(t, "input.jsonl", view.filename)
+	assert.Equal(t, "b-1", view.batchID)
+	assert.Equal(t, "c-1", view.cluster)
+	assert.Equal(t, "exact", view.linesSrc)
+	assert.Equal(t, "approx", view.bytesSrc)
 }
 
 func TestMergeTaskForSync(t *testing.T) {
@@ -193,6 +255,54 @@ func TestMergeTaskForSync(t *testing.T) {
 		merged = mergeTaskForSync(existing, incoming, view2, now)
 		assert.Equal(t, int64(7), merged.UsageInputTokens)
 		assert.Equal(t, int64(9), merged.SettleUnits)
+	})
+
+	t.Run("终态字段按 hash 携带性刷新（issue #254）", func(t *testing.T) {
+		existing := newIncoming()
+		existing.ID = 9
+		existing.Status = TaskStatusCompleted
+		existing.OutputFileID = "f-out"
+		existing.Endpoint = "/v1/chat/completions"
+		existing.RequestCounts = map[string]int64{"total": 2}
+		existing.UsageSource = UsageSourceDownload
+		created := time.Unix(1760000000, 0)
+		existing.CreatedAt = created
+
+		// hash 未携带：全部保留 DB 值（含 created_at 不被抹零）
+		incoming := newIncoming()
+		incoming.Status = TaskStatusCompleted
+		view := &redisTaskView{batchID: "b-1", status: "completed"}
+		merged := mergeTaskForSync(existing, incoming, view, now)
+		assert.Equal(t, "f-out", merged.OutputFileID)
+		assert.Equal(t, "/v1/chat/completions", merged.Endpoint)
+		assert.Equal(t, map[string]int64{"total": 2}, merged.RequestCounts)
+		assert.Equal(t, UsageSourceDownload, merged.UsageSource)
+		assert.Equal(t, created, merged.CreatedAt, "created_at 不得被抹零")
+
+		// hash 携带：以 Redis 值为准
+		out := "f-out-2"
+		endpoint := "/v1/embeddings"
+		createdAt := time.Unix(1760000100, 0)
+		incoming2 := newIncoming()
+		incoming2.Status = TaskStatusCompleted
+		incoming2.OutputFileID = out
+		incoming2.Endpoint = endpoint
+		incoming2.RequestCounts = map[string]int64{"total": 3}
+		incoming2.UsageSource = UsageSourceReconcile
+		incoming2.CreatedAt = createdAt
+		view2 := &redisTaskView{
+			batchID: "b-1", status: "completed",
+			outputFileID: &out, endpoint: &endpoint,
+			requestCounts: map[string]int64{"total": 3},
+			usageSource:   UsageSourceReconcile,
+			createdAt:     &createdAt,
+		}
+		merged = mergeTaskForSync(existing, incoming2, view2, now)
+		assert.Equal(t, "f-out-2", merged.OutputFileID)
+		assert.Equal(t, "/v1/embeddings", merged.Endpoint)
+		assert.Equal(t, map[string]int64{"total": 3}, merged.RequestCounts)
+		assert.Equal(t, UsageSourceReconcile, merged.UsageSource)
+		assert.Equal(t, createdAt, merged.CreatedAt)
 	})
 
 	t.Run("归属列不回退", func(t *testing.T) {

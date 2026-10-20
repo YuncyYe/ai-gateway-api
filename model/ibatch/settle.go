@@ -189,8 +189,20 @@ func (m *Manager) settleOneTask(ctx context.Context, accessCache map[string]*pro
 		return false, nil
 	}
 
-	// ③ 批量价：model 取结果文件首个非空 response.model（BATCH_TASK
-	// 无 model 字段）；查不到 batch 价 → warn + settle_units=0 记待人工。
+	// 安全阀（issue #254）：整份文件一个可计费行都没有、却存在"有
+	// response 但没有 usage"的行——内容存在而一行 usage 都取不到，属解析
+	// 口径可疑（修复前扁平解析正是这种形态），此时不推进 settled，告警并
+	// 释放占位、下轮重试。纯错误行/空文件（noUsageLines=0）照常按 0 元结算。
+	if usage.parsedLines == 0 && usage.noUsageLines > 0 {
+		stateful.AccessLogger.Warn(
+			"ibatch: result file carries responses without usage, settlement skipped, batch=%s file=%s no_usage_lines=%d bad_lines=%d",
+			task.BatchID, task.OutputFileID, usage.noUsageLines, usage.badLines)
+		releaseClaim()
+		return false, nil
+	}
+
+	// ③ 批量价：model 取结果文件首个非空 response.body.model / response.model
+	// （BATCH_TASK 无 model 字段）；查不到 batch 价 → warn + settle_units=0 记待人工。
 	settleUnits, priceMiss, err := m.calcSettleUnits(ctx, task, usage)
 	if err != nil {
 		releaseClaim()
@@ -274,7 +286,9 @@ type usageTotals struct {
 	inputTokens  int64
 	outputTokens int64
 	model        string
-	parsedLines  int
+	parsedLines  int // lines that yielded usage
+	noUsageLines int // rows with a response object but no usage in either shape
+	badLines     int // lines that are not valid JSON
 }
 
 // downloadAndParseUsage 下载输出文件并流式逐行解析（内存 O(1)，单行
@@ -382,29 +396,71 @@ func parseJSONLUsage(r io.Reader, maxLineBytes int64, totals *usageTotals) error
 	}
 }
 
-// handleUsageLine 解析单行 jsonl 并累加 usage。行内无 response.usage
-// （错误行 / 非响应行）跳过；model 取首个非空值。
+// handleUsageLine 解析单行 jsonl 并累加 usage。
+//
+// usage 位于 response.body.usage（OpenAI Batch 结果文件契约），顶层
+// response.usage 作为兼容回退（非标准上游与历史夹具）。行内既有 response
+// 对象却两条路径都取不到 usage 时计 noUsageLines（安全阀依据）；整行非法
+// JSON 计 badLines；response 为 null/缺省的错误行两者都不计。
 func handleUsageLine(line []byte, totals *usageTotals) {
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 {
 		return
 	}
-	var row struct {
-		Response struct {
-			Model string `json:"model"`
-			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-			} `json:"usage"`
-		} `json:"response"`
-	}
-	if err := json.Unmarshal(trimmed, &row); err != nil || row.Response.Usage == nil {
+	var row batchResultRow
+	if err := json.Unmarshal(trimmed, &row); err != nil {
+		totals.badLines++
 		return
 	}
-	if totals.model == "" && row.Response.Model != "" {
-		totals.model = row.Response.Model
+	if row.Response == nil {
+		return // error rows ({"error":{...}}) carry no usage at all
 	}
-	totals.inputTokens += row.Response.Usage.PromptTokens
-	totals.outputTokens += row.Response.Usage.CompletionTokens
+	usage, model := row.usageAndModel()
+	if usage == nil {
+		totals.noUsageLines++
+		return
+	}
+	if totals.model == "" && model != "" {
+		totals.model = model
+	}
+	totals.inputTokens += usage.PromptTokens
+	totals.outputTokens += usage.CompletionTokens
 	totals.parsedLines++
+}
+
+// batchResultRow 是批量结果文件的一行：OpenAI 形态把 chat completion 嵌在
+// response.body，故 model/usage 位于 response.body.model / .usage，顶层
+// response.model / .usage 作为兼容回退。
+type batchResultRow struct {
+	Response *struct {
+		Model string        `json:"model"`
+		Usage *usageTokens  `json:"usage"`
+		Body  *responseBody `json:"body"`
+	} `json:"response"`
+}
+
+// responseBody 是结果行里 chat completion 的最小读视图。
+type responseBody struct {
+	Model string       `json:"model"`
+	Usage *usageTokens `json:"usage"`
+}
+
+// usageTokens 是结果行里的 token 用量对象。
+type usageTokens struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+}
+
+// usageAndModel 返回该行的 usage 与 model（response.body 优先）。
+func (r *batchResultRow) usageAndModel() (*usageTokens, string) {
+	if r == nil || r.Response == nil {
+		return nil, ""
+	}
+	if body := r.Response.Body; body != nil && body.Usage != nil {
+		return body.Usage, body.Model
+	}
+	if r.Response.Usage != nil {
+		return r.Response.Usage, r.Response.Model
+	}
+	return nil, ""
 }

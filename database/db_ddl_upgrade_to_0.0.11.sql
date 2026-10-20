@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS `batch_files` (
   `product_name` VARCHAR(128) NOT NULL COMMENT '产品线名称（强制隔离维度）',
   `direction` VARCHAR(8) NOT NULL COMMENT '方向：input | output',
   `purpose` VARCHAR(32) COMMENT '文件用途（如 batch）',
+  `filename` VARCHAR(256) COMMENT '文件名（provider File 对象给出，可空）',
   `line_count` INT COMMENT '文件行数（预留金额估算与对账用）',
   `bytes` BIGINT COMMENT '文件字节数',
   `first_seen_at` DATETIME COMMENT '首次见到时间',

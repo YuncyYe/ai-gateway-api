@@ -1533,7 +1533,8 @@ func testBatchSchema(t *testing.T) {
 	defer helper.DeleteBatchTask(t, db, tag)
 	helper.InsertBatchFile(t, db, helper.BatchFileRow{
 		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
-		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input", Bytes: 1024,
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input",
+		Filename: "input.jsonl", Bytes: 1024,
 	})
 	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
 
@@ -1553,9 +1554,11 @@ func testBatchSchema(t *testing.T) {
 	require.Len(t, filesVal, 1)
 	elem, ok := filesVal[0].(map[string]interface{})
 	require.True(t, ok, "batch_files[0] should be object")
+	// issue #254：filename 由 provider File 对象落库后纳入 §2.2 六字段锁。
 	assert.ElementsMatch(t,
-		[]string{"file_id", "provider", "purpose", "bytes", "created_at"}, keysOfMap(elem),
+		[]string{"file_id", "provider", "purpose", "filename", "bytes", "created_at"}, keysOfMap(elem),
 		"batch_files element keys must exactly match contract (batches.md §2.2, no internal fields)")
+	assert.Equal(t, "input.jsonl", elem["filename"])
 
 	// 无关联文件的任务：batch_files 键缺席（omitempty）。
 	bareTag := helper.Unique("schema-bt-bare")

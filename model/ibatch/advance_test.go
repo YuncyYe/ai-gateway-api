@@ -224,3 +224,169 @@ func TestAdvanceStatus_MismatchedID(t *testing.T) {
 	assert.Equal(t, 0, advanced)
 	assert.Empty(t, storager.progressPatches)
 }
+
+// setupBackfillFixture 组装终态产物补漏夹具：DB 侧返回给定的 completed
+// 任务，并记录每次 ListBatchTasks 的过滤条件。
+func setupBackfillFixture(t *testing.T, tasks []*BatchTask, handler http.HandlerFunc) (*Manager, *fakeBatchStorager, *[]*BatchTaskFilter) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	filters := make([]*BatchTaskFilter, 0, 1)
+	storager := &fakeBatchStorager{
+		listTasksFn: func(ctx context.Context, filter *BatchTaskFilter) ([]*BatchTask, error) {
+			filters = append(filters, filter)
+			return tasks, nil
+		},
+		updateProgressFn: func(ctx context.Context, id int64, patch *BatchTaskProgressPatch) (int64, error) {
+			return 1, nil
+		},
+		upsertFileFn: func(ctx context.Context, file *BatchFile) (int64, error) {
+			return 1, nil
+		},
+	}
+	addr, port := splitAddrPort(t, server.URL)
+	providers := &fakeProviderQuerier{
+		fetchFn: func(ctx context.Context, filter *iprovider.ProviderFilter) (*iprovider.Provider, error) {
+			return &iprovider.Provider{
+				Name:          "openai",
+				Keys:          []iprovider.ProviderKey{{Name: "k1", Key: "sk"}},
+				InstancePool:  []iprovider.ProviderInstance{{Addr: addr, Port: port}},
+				ProtocolPaths: map[string]string{"openai": "/v1"},
+			}, nil
+		},
+	}
+	m := NewManager(storager, &fakeRedisClient{},
+		&fakeAPIKeyQuerier{}, providers, &fakePriceQuerier{},
+		func() *http.Client { return server.Client() },
+		&fakeClock{t: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)})
+	return m, storager, &filters
+}
+
+// issue #254 职责②b：completed 且缺产物的任务由 provider 回读补齐，不改状态。
+func TestBackfillTerminalArtifacts_FillsMissingFields(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 7, BatchID: "b-1", ProductName: "p1", Provider: "openai", KeyName: "k1",
+		Status:    TaskStatusCompleted,
+		CreatedAt: time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC),
+	}}
+	m, storager, filters := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/batches/b-1", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"b-1","status":"completed","output_file_id":"file-out",`+
+			`"endpoint":"/v1/chat/completions","request_counts":{"completed":2,"failed":0,"total":2}}`)
+	})
+
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, backfilled)
+
+	// 候选过滤：completed + 24h 时间窗 + 限量
+	require.Len(t, *filters, 1)
+	f := (*filters)[0]
+	require.NotNil(t, f.Status)
+	assert.Equal(t, TaskStatusCompleted, *f.Status)
+	require.NotNil(t, f.CreatedStart)
+	assert.Equal(t, time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC), *f.CreatedStart)
+	assert.Equal(t, defaultAdvanceLimit, f.Limit)
+
+	require.Len(t, storager.progressPatches, 1)
+	patch := storager.progressPatches[0]
+	assert.Nil(t, patch.Status, "补漏不得改状态")
+	require.NotNil(t, patch.OutputFileID)
+	assert.Equal(t, "file-out", *patch.OutputFileID)
+	require.NotNil(t, patch.Endpoint)
+	assert.Equal(t, "/v1/chat/completions", *patch.Endpoint)
+	require.NotNil(t, patch.RequestCounts)
+	assert.Equal(t, int64(2), (*patch.RequestCounts)["completed"])
+
+	require.Len(t, storager.upsertedFiles, 1)
+	assert.Equal(t, "file-out", storager.upsertedFiles[0].FileID)
+}
+
+// 产物已齐备的任务不出网。
+func TestBackfillTerminalArtifacts_CompleteTaskSkipped(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 7, BatchID: "b-1", Provider: "openai", KeyName: "k1",
+		Status:        TaskStatusCompleted,
+		OutputFileID:  "file-out",
+		RequestCounts: map[string]int64{"completed": 2},
+	}}
+	hit := 0
+	m, storager, _ := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		hit++
+		fmt.Fprint(w, `{"id":"b-1","status":"completed"}`)
+	})
+
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+	assert.Equal(t, 0, hit, "产物齐全时不得出网")
+	assert.Empty(t, storager.progressPatches)
+}
+
+// provider 404：保持 completed，不降级为 expired（与职责② 的语义差异）。
+func TestBackfillTerminalArtifacts_Provider404KeepsStatus(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 7, BatchID: "b-1", Provider: "openai", KeyName: "k1",
+		Status:    TaskStatusCompleted,
+		CreatedAt: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), // 远超 24h
+	}}
+	m, storager, _ := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"message":"not found"}}`)
+	})
+
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+	assert.Empty(t, storager.progressPatches, "404 不得改写终态任务")
+}
+
+// provider 非 2xx / 非法 JSON：告警跳过，不影响其他任务。
+func TestBackfillTerminalArtifacts_ProviderErrorsSkipped(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 7, BatchID: "b-1", Provider: "openai", KeyName: "k1",
+		Status: TaskStatusCompleted,
+	}}
+	m, storager, _ := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `boom`)
+	})
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+	assert.Empty(t, storager.progressPatches)
+
+	m2, storager2, _ := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `not-json`)
+	})
+	backfilled, err = m2.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+	assert.Empty(t, storager2.progressPatches)
+}
+
+// provider 返回的 id 与任务不一致：判为脏数据跳过。
+func TestBackfillTerminalArtifacts_MismatchedID(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 7, BatchID: "b-1", Provider: "openai", KeyName: "k1",
+		Status: TaskStatusCompleted,
+	}}
+	m, storager, _ := setupBackfillFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"other","status":"completed","output_file_id":"file-out"}`)
+	})
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+	assert.Empty(t, storager.progressPatches)
+}
+
+// 未注入 providerQuerier（无出网降级）时直接返回零值。
+func TestBackfillTerminalArtifacts_NoProviderQuerier(t *testing.T) {
+	m := NewManager(&fakeBatchStorager{}, &fakeRedisClient{}, &fakeAPIKeyQuerier{}, nil,
+		&fakePriceQuerier{}, nil, &fakeClock{t: time.Now()})
+	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, backfilled)
+}

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
@@ -36,12 +37,13 @@ type providerBatchResponse struct {
 	ID            string           `json:"id"`
 	Status        string           `json:"status"`
 	OutputFileID  string           `json:"output_file_id"`
+	Endpoint      string           `json:"endpoint"`
 	RequestCounts map[string]int64 `json:"request_counts"`
 }
 
 // AdvanceStatus 对账 job 职责②（状态推进，需出网）：对非终态任务
 // （限量）直调 provider GET {base}/batches/{id}，按返回原样更新
-// status/output_file_id/request_counts（终态不回退，进入终态记
+// status/output_file_id/request_counts/endpoint（终态不回退，进入终态记
 // terminal_at）；首次发现 output_file_id 补登记输出 batch_files
 // （direction=output）。provider 侧已消失（404）且任务创建超
 // providerAbsentGrace 判定 expired。
@@ -73,6 +75,113 @@ func (m *Manager) AdvanceStatus(ctx context.Context) (int, error) {
 		}
 	}
 	return advanced, nil
+}
+
+// terminalArtifactWindow 是终态产物补漏的候选时间窗：只补最近该时长内
+// 创建的任务，限定每轮的出网范围（更早的缺失行由对账巡检告警，不再重试）。
+const terminalArtifactWindow = 24 * time.Hour
+
+// BackfillTerminalArtifacts 对账 job 职责②b（终态产物补漏，需出网）。
+//
+// 职责① 会把 Redis 里的 completed 直接落库，职责② 只查非终态，于是已终态
+// 的行永远补不上 output_file_id/request_counts/endpoint（Redis 键先到期、
+// 或历史键缺字段时尤其明显）。本轮对"completed 且缺产物"的任务直调
+// provider，只 patch 缺失字段。
+//
+// 与职责② 的关键差别：provider 404 / 非 2xx / 解析失败一律告警跳过，
+// **不改任务状态**——completed 不会因为 provider 侧数据过期被误降级为
+// expired。代价是永久缺失的行会按周期重复出网，上限为
+// 每轮 advanceLimit 次 GET × 窗口内的缺失行。
+func (m *Manager) BackfillTerminalArtifacts(ctx context.Context) (int, error) {
+	if m.providerQuerier == nil {
+		return 0, nil
+	}
+	status := TaskStatusCompleted
+	windowStart := m.clock.Now().Add(-terminalArtifactWindow)
+	tasks, err := m.storager.ListBatchTasks(ctx, &BatchTaskFilter{
+		Status:       &status,
+		CreatedStart: &windowStart,
+		Limit:        m.advanceLimit,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	backfilled := 0
+	for _, task := range tasks {
+		if task.OutputFileID != "" && task.RequestCounts != nil {
+			continue // artifacts already complete
+		}
+		ok, err := m.backfillOneTask(ctx, task)
+		if err != nil {
+			stateful.AccessLogger.Warn("ibatch: backfill artifacts skipped, batch=%s: %v", task.BatchID, err)
+			continue
+		}
+		if ok {
+			backfilled++
+		}
+	}
+	return backfilled, nil
+}
+
+// backfillOneTask 补齐单个 completed 任务的产物字段（不动 status）。
+func (m *Manager) backfillOneTask(ctx context.Context, task *BatchTask) (bool, error) {
+	access, err := m.resolveProviderAccess(ctx, task.Provider, task.KeyName)
+	if err != nil {
+		return false, err
+	}
+
+	queryURL := access.baseURL + access.path + "/batches/" + task.BatchID
+	respBody, statusCode, err := m.getProvider(ctx, access, queryURL)
+	if err != nil {
+		return false, err
+	}
+	if statusCode == http.StatusNotFound {
+		// provider 侧已不可查：保持 completed，不降级为 expired（与职责②不同）
+		stateful.AccessLogger.Warn("ibatch: backfill artifacts not found on provider, keep status, batch=%s",
+			task.BatchID)
+		return false, nil
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return false, fmt.Errorf("%w: provider GET %s returned %d", ErrUpstreamUnreachable, queryURL, statusCode)
+	}
+
+	var batchResp providerBatchResponse
+	if err := json.Unmarshal(respBody, &batchResp); err != nil {
+		return false, fmt.Errorf("parse provider batch response: %v", err)
+	}
+	if batchResp.ID != "" && batchResp.ID != task.BatchID {
+		return false, fmt.Errorf("provider returned mismatched batch id %q, expect %q", batchResp.ID, task.BatchID)
+	}
+
+	now := m.clock.Now()
+	patch := &BatchTaskProgressPatch{}
+	missing := make([]string, 0, 3)
+	if task.OutputFileID == "" && batchResp.OutputFileID != "" {
+		patch.OutputFileID = &batchResp.OutputFileID
+		missing = append(missing, "output_file_id")
+		if err := m.registerOutputFile(ctx, task, batchResp.OutputFileID, now); err != nil {
+			stateful.AccessLogger.Warn("ibatch: register output file failed, batch=%s file=%s: %v",
+				task.BatchID, batchResp.OutputFileID, err)
+		}
+	}
+	if task.RequestCounts == nil && batchResp.RequestCounts != nil {
+		patch.RequestCounts = &batchResp.RequestCounts
+		missing = append(missing, "request_counts")
+	}
+	if task.Endpoint == "" && batchResp.Endpoint != "" {
+		patch.Endpoint = &batchResp.Endpoint
+		missing = append(missing, "endpoint")
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+	if _, err := m.storager.UpdateBatchTaskProgress(ctx, task.ID, patch); err != nil {
+		return false, err
+	}
+	stateful.AccessLogger.Warn("ibatch: backfilled terminal artifacts, batch=%s fields=%v",
+		task.BatchID, strings.Join(missing, ","))
+	return true, nil
 }
 
 // advanceOneTask 推进单个任务。返回是否发生状态/产物更新。
@@ -122,6 +231,10 @@ func (m *Manager) advanceOneTask(ctx context.Context, task *BatchTask) (bool, er
 			stateful.AccessLogger.Warn("ibatch: register output file failed, batch=%s file=%s: %v",
 				task.BatchID, batchResp.OutputFileID, err)
 		}
+	}
+	if batchResp.Endpoint != "" && batchResp.Endpoint != task.Endpoint {
+		patch.Endpoint = &batchResp.Endpoint
+		changed = true
 	}
 
 	if IsTerminalStatus(task.Status) {
