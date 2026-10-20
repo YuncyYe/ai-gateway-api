@@ -709,6 +709,12 @@ const (
 // AICacheRules validates an AI cache rule set (the full-replace PUT body).
 // A nil rules list is treated as empty (clear all rules); any single failure
 // rejects the whole collection with a param error (HTTP 422).
+//
+// Collection-level cond uniqueness mirrors the data plane contract: BFE
+// mod_ai_cache keys the rules of a product by the cond string and rejects the
+// whole file on a duplicate ("can't have same cond"), which leaves conf-agent
+// retrying the same unloadable version forever. The comparison is byte-wise
+// because that is exactly what BFE does — no trimming or normalisation.
 func AICacheRules(param *shared.AICacheRulesParam) error {
 	if param == nil {
 		return nil
@@ -720,6 +726,7 @@ func AICacheRules(param *shared.AICacheRulesParam) error {
 	}
 
 	nameSet := map[string]struct{}{}
+	condSet := map[string]struct{}{}
 	for i, rule := range rules {
 		if rule == nil {
 			return xerror.WrapParamErrorWithMsg("ai cache rule #%d is null", i)
@@ -742,6 +749,10 @@ func AICacheRules(param *shared.AICacheRulesParam) error {
 		if err := ConditionExpression(*rule.Cond); err != nil {
 			return xerror.WrapParamErrorWithMsg("ai cache rule %s cond: %v", *rule.Name, err)
 		}
+		if _, ok := condSet[*rule.Cond]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate ai cache rule cond: %s", *rule.Cond)
+		}
+		condSet[*rule.Cond] = struct{}{}
 
 		if rule.CacheKeyStrategy != nil {
 			switch *rule.CacheKeyStrategy {

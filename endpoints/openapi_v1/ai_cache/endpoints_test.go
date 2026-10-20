@@ -205,7 +205,7 @@ func TestAICacheRulesUpdateAction(t *testing.T) {
 
 		body := `{"rules": [
 			{"name": "semantic-on", "cond": "default_t()", "enable_semantic_cache": true},
-			{"name": "semantic-off-explicit", "cond": "default_t()", "enable_semantic_cache": false}
+			{"name": "semantic-off-explicit", "cond": "req_path_in(\"/v1/chat/completions\", false)", "enable_semantic_cache": false}
 		]}`
 		req := httptest.NewRequest(http.MethodPut, "/ai-cache-rules", strings.NewReader(body))
 		data, err := AICacheRulesUpdateAction(req)
@@ -256,6 +256,19 @@ func TestAICacheRulesUpdateAction(t *testing.T) {
 		_, err := AICacheRulesUpdateAction(req)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "duplicate")
+	})
+
+	t.Run("422 duplicate cond in collection", func(t *testing.T) {
+		defer setupAICacheManager(&fakeAICacheStorager{}, &fakeAICacheSemanticSettingsStorager{})()
+
+		body := `{"rules": [
+			{"name": "cond-a", "cond": "req_path_in(\"/v1/chat/completions\", false)"},
+			{"name": "cond-b", "cond": "req_path_in(\"/v1/chat/completions\", false)", "cache_ttl": 60}
+		]}`
+		req := httptest.NewRequest(http.MethodPut, "/ai-cache-rules", strings.NewReader(body))
+		_, err := AICacheRulesUpdateAction(req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate ai cache rule cond")
 	})
 
 	t.Run("422 invalid cache_key_strategy enum", func(t *testing.T) {

@@ -143,8 +143,9 @@ CREATE TABLE `ai_cache_semantic_settings` (
 | 每条 `max_body_bytes` / `max_value_bytes` | > 0 |
 | 每条 `enable_semantic_cache`（二期） | bool 类型；无组合校验——`disabled` 策略上的开关由 BFE 忽略（两侧一致，不报错） |
 | 集合内 `name` 唯一 | 遍历查重（422，请求集合内部矛盾，不用 409） |
+| 集合内 `cond` 唯一 | 遍历查重（422；判据与 BFE product 内 `cond` 唯一一致，逐字节比较，issue #261） |
 
-控制面校验把错误拦在写入前（fail-fast）；BFE 侧校验（最后防线）：`cond` 必须 `condition.Build` 编译通过、`cacheKeyStrategy` 枚举、`cacheTTL >= 0`、`maxBodyBytes`/`maxValueBytes > 0`、同一 product 内 `cond` 不可重复（BFE `ProductRuleConfListFile.Check` 拒绝；控制面不做集合内 cond 去重）。
+控制面校验把错误拦在写入前（fail-fast）；BFE 侧校验（最后防线）：`cond` 必须 `condition.Build` 编译通过、`cacheKeyStrategy` 枚举、`cacheTTL >= 0`、`maxBodyBytes`/`maxValueBytes > 0`、同一 product 内 `cond` 不可重复（BFE `ProductRuleConfListFile.Check` 拒绝；控制面在 PUT 时已对集合内 cond 查重，issue #261）。
 
 ### 4.3 事务重建
 
@@ -225,7 +226,7 @@ PUT `/ai-cache-semantic-settings` 为单事务 **upsert**：delete-all + insert�
 
 1. 流式答案路径的 tag 是 `cacheStreamValueFrom`（不是 `cacheStreamFrom`）——Go 字段名与 JSON tag 刻意不同，二期开放该字段时照抄 tag；
 2. `cond` 没有默认值，**每条导出规则必须带 `cond`**；
-3. 同一 product 内 `cond` 不可重复；控制面不做集合内 cond 去重（BFE 加载报错兜底）；
+3. 同一 product 内 `cond` 不可重复；控制面在 PUT 时已对集合内 `cond` 查重（422），BFE 加载报错为最后兜底（issue #261）；
 4. BFE 规则加载器对**所有**字段（含未导出的）在 `setDefaults` 后统一 `CheckNilField`——控制面漏导任何"标记为一期导出"的字段会直接导致 BFE 加载失败，属 P0 级契约事故。
 
 ---
@@ -321,7 +322,7 @@ BFE `mod_ai_cache` 收到 `ai_cache.data` 并热加载后：
 | PUT 部分规则校验失败 | 整个 PUT 422，单事务回滚，GET 集合不变 |
 | 集合内 `name` 重名 | 422（请求集合内部矛盾，不用 409）；`uk_name` 为 DB 最后防线 |
 | `cond` 编译失败 | 422（Open API 层 `ConditionExpression` 校验，fail-fast） |
-| 集合内 `cond` 重复 | 控制面不拦截；BFE `ProductRuleConfListFile.Check` 拒绝加载（兜底） |
+| 集合内 `cond` 重复 | 422（控制面 fail-fast，逐字节比较，issue #261）；BFE `ProductRuleConfListFile.Check` 拒绝加载（兜底） |
 | 漏导一期字段 | BFE `CheckNilField` 加载失败（P0 级契约事故）；单测对 marshal 结果做 JSON key 精确断言防回归 |
 | 漏导 `Semantic` 块 / `enableSemanticCache` | BFE 语义能力按默认值运行（**不报错**——二期字段全部可选，缺省即默认）；单测断言两键恒存在 |
 | PUT 设置非法（top_k 越界 / relation 非法枚举） | 422，设置不变，记失败审计 |

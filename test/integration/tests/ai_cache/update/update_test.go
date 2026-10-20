@@ -68,6 +68,12 @@ func acRule(name, cond string) map[string]interface{} {
 	}
 }
 
+// aiCacheCondFor 在基准表达式上追加一个只用于区分规则身份的 model 子句：
+// 导出的 cond 必须逐条不同，否则整个 ai_cache.data 会被 BFE 拒载（issue #261）。
+func aiCacheCondFor(suffix string) string {
+	return fmt.Sprintf(`req_path_in("/v1/chat/completions", false) && req_body_json_in("model", %q, false)`, suffix)
+}
+
 func putAICacheRules(t *testing.T, body map[string]interface{}) *testutil.APIResponse {
 	t.Helper()
 	resp, err := testutil.GetClient().Put(aiCacheRulesPath, body)
@@ -254,13 +260,13 @@ func TestAICacheRules_Update_FullParams(t *testing.T) {
 			"enable_semantic_cache": true,
 		},
 		{
-			"name": n2, "cond": validAICacheCond,
+			"name": n2, "cond": aiCacheCondFor(n2),
 			"cache_key_strategy": "disabled", "cache_ttl": 86400,
 			"max_body_bytes": 1048576, "max_value_bytes": 524288,
 			"enable_semantic_cache": false,
 		},
 		{
-			"name": n3, "cond": validAICacheCond,
+			"name": n3, "cond": aiCacheCondFor(n3),
 			"cache_key_strategy": "lastQuestion", "cache_ttl": 60,
 			"max_body_bytes": 1048576, "max_value_bytes": 1048576,
 			"enable_semantic_cache": true,
@@ -285,30 +291,30 @@ func TestAICacheRules_Update_FullReplace(t *testing.T) {
 	na3 := testutil.UniqueName("ac-1-003-a3")
 	nb1 := testutil.UniqueName("ac-1-003-b1")
 
-	// 集合 A：3 条。
+	// 集合 A：3 条（cond 逐条不同，见 issue #261）。
 	putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
-		map[string]interface{}{"name": na1, "cond": validAICacheCond, "cache_ttl": 111},
-		acRule(na2, validAICacheCond),
-		acRule(na3, validAICacheCond),
+		map[string]interface{}{"name": na1, "cond": aiCacheCondFor(na1), "cache_ttl": 111},
+		acRule(na2, aiCacheCondFor(na2)),
+		acRule(na3, aiCacheCondFor(na3)),
 	}})
 	require.Len(t, rulesOf(t, getAICacheRules(t)), 3, "setup collection A")
 
 	// 集合 B：改 a1（ttl/strategy）、增 b1；a2/a3 被删除。
 	wantA1 := map[string]interface{}{
-		"name": na1, "cond": validAICacheCond,
+		"name": na1, "cond": aiCacheCondFor(na1),
 		"cache_key_strategy": "allQuestions", "cache_ttl": 222,
 		"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
 		"enable_semantic_cache": true,
 	}
 	wantB1 := map[string]interface{}{
-		"name": nb1, "cond": validAICacheCond,
+		"name": nb1, "cond": aiCacheCondFor(nb1),
 		"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 0,
 		"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
 		"enable_semantic_cache": false,
 	}
 	resp := putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
 		map[string]interface{}(wantA1),
-		acRule(nb1, validAICacheCond),
+		acRule(nb1, aiCacheCondFor(nb1)),
 	}})
 
 	// GET 逐字段精确等于新提交集合（含默认值回填）。
@@ -403,8 +409,12 @@ func TestAICacheRules_Update_DuplicateName(t *testing.T) {
 	before := rulesSnapshot(t)
 
 	dup := testutil.UniqueName("ac-1-006-dup")
+	// 两条规则 cond 互不相同，保证失败原因唯一归因到重名（issue #261 判重不会抢先拦截）。
 	resp := putAICacheRules(t, map[string]interface{}{
-		"rules": []interface{}{acRule(dup, validAICacheCond), acRule(dup, validAICacheCond)},
+		"rules": []interface{}{
+			acRule(dup, aiCacheCondFor(dup+"-a")),
+			acRule(dup, aiCacheCondFor(dup+"-b")),
+		},
 	})
 	testutil.AssertErrCode(t, resp, 422)
 	assert.Contains(t, resp.ErrMsg, dup, "error message should identify the duplicated name")
@@ -490,11 +500,14 @@ func TestAICacheRules_Update_BoundaryValues(t *testing.T) {
 // ---------- AC-1-009 合同锁定：响应不得含 id/enabled（家族11/12 / #201） ----------
 
 func TestAICacheRules_Update_ContractLockNoInternalFields(t *testing.T) {
+	na := testutil.UniqueName("ac-1-009-a")
+	nb := testutil.UniqueName("ac-1-009-b")
+
 	resp := putAndAssert200(t, map[string]interface{}{
 		"rules": []interface{}{
-			acRule(testutil.UniqueName("ac-1-009-a"), validAICacheCond),
+			acRule(na, aiCacheCondFor(na)),
 			map[string]interface{}{
-				"name": testutil.UniqueName("ac-1-009-b"), "cond": validAICacheCond,
+				"name": nb, "cond": aiCacheCondFor(nb),
 				"cache_key_strategy": "disabled",
 			},
 		},
@@ -609,10 +622,14 @@ func TestAICacheRules_Update_MixedCollection(t *testing.T) {
 	versionBefore := innerExportVersion(t)
 
 	// 同一 PUT：2 条合法 + 1 条非法（cond 编译失败）。
+	// 两条合法规则的 cond 必须互不相同，否则会被"重复 cond"抢先拒绝（issue #261），
+	// 用例的失败原因就不再是"第 3 条编译失败"。
+	ok1 := testutil.UniqueName("ac-1-011-ok1")
+	ok2 := testutil.UniqueName("ac-1-011-ok2")
 	resp := putAICacheRules(t, map[string]interface{}{
 		"rules": []interface{}{
-			acRule(testutil.UniqueName("ac-1-011-ok1"), validAICacheCond),
-			acRule(testutil.UniqueName("ac-1-011-ok2"), validAICacheCond),
+			acRule(ok1, aiCacheCondFor(ok1)),
+			acRule(ok2, aiCacheCondFor(ok2)),
 			acRule(testutil.UniqueName("ac-1-011-bad"), "not_a_valid_expr("),
 		},
 	})
@@ -644,7 +661,7 @@ func TestAICacheRules_Update_SemanticCacheFlag(t *testing.T) {
 		"enable_semantic_cache": true,
 	}
 	wantFalse := map[string]interface{}{
-		"name": nFalse, "cond": validAICacheCond,
+		"name": nFalse, "cond": aiCacheCondFor(nFalse),
 		"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 0,
 		"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
 		"enable_semantic_cache": false,
@@ -654,11 +671,11 @@ func TestAICacheRules_Update_SemanticCacheFlag(t *testing.T) {
 	resp := putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
 		map[string]interface{}(wantTrue),
 		map[string]interface{}(wantFalse),
-		acRule(nOmit, validAICacheCond),
+		acRule(nOmit, aiCacheCondFor(nOmit)),
 	}})
 
 	wantOmit := map[string]interface{}{
-		"name": nOmit, "cond": validAICacheCond,
+		"name": nOmit, "cond": aiCacheCondFor(nOmit),
 		"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 0,
 		"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
 		"enable_semantic_cache": false,
@@ -677,8 +694,8 @@ func TestAICacheRules_Update_ReadbackRoundTrip(t *testing.T) {
 	n2 := testutil.UniqueName("ac-1-014-b")
 
 	putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
-		map[string]interface{}{"name": n1, "cond": validAICacheCond, "cache_ttl": 120},
-		acRule(n2, validAICacheCond),
+		map[string]interface{}{"name": n1, "cond": aiCacheCondFor(n1), "cache_ttl": 120},
+		acRule(n2, aiCacheCondFor(n2)),
 	}})
 
 	getResp := getAICacheRules(t)
@@ -722,7 +739,7 @@ func TestAICacheRules_Update_LegacyTimestampOrderInsensitive(t *testing.T) {
 
 			// 旧客户端按 issue 的 curl 形态提交：旧规则带时间戳、新规则不带。
 			legacy := map[string]interface{}{
-				"name": oldName, "cond": validAICacheCond,
+				"name": oldName, "cond": aiCacheCondFor(oldName),
 				"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 300,
 				"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
 				"enable_semantic_cache": false,
@@ -730,7 +747,7 @@ func TestAICacheRules_Update_LegacyTimestampOrderInsensitive(t *testing.T) {
 				"updated_at":            "2026-10-19T12:27:56Z",
 			}
 			freshName := testutil.UniqueName("ac-1-015-new")
-			fresh := map[string]interface{}{"name": freshName, "cond": validAICacheCond, "cache_ttl": 300}
+			fresh := map[string]interface{}{"name": freshName, "cond": aiCacheCondFor(freshName), "cache_ttl": 300}
 
 			rules := []interface{}{legacy, fresh}
 			wantNames := []string{oldName, freshName}
@@ -780,4 +797,98 @@ func TestAICacheRules_Update_TimestampsIgnored(t *testing.T) {
 	assert.Equal(t, name, got["name"])
 	assert.NotContains(t, got, "created_at")
 	assert.NotContains(t, got, "updated_at")
+}
+
+// ---------- AC-1-017 集合内重复 cond（异常参数，issue #261） ----------
+
+// TestAICacheRules_Update_DuplicateCond 验证同一次 PUT 的 rules 数组内 cond 逐字节
+// 重复必须 422：BFE mod_ai_cache 以 cond 作为 product 内的规则键，重复会让整份
+// ai_cache.data 被拒载（conf-agent 每 5s 重试同一文件、symlink 不推进），因此控制面
+// 必须在入门前拦截，且拒绝即零变更 + 记一条失败审计。
+func TestAICacheRules_Update_DuplicateCond(t *testing.T) {
+	keeper := testutil.UniqueName("ac-1-017-keeper")
+	putAndAssert200(t, map[string]interface{}{
+		"rules": []interface{}{acRule(keeper, validAICacheCond)},
+	})
+	before := rulesSnapshot(t)
+
+	// 两条规则仅 name 与 cache_ttl 不同、cond 逐字节相同：判重只看 cond。
+	startTs := time.Now().Unix()
+	resp := putAICacheRules(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"name": testutil.UniqueName("ac-1-017-dup1"), "cond": validAICacheCond,
+				"cache_ttl": 60,
+			},
+			map[string]interface{}{
+				"name": testutil.UniqueName("ac-1-017-dup2"), "cond": validAICacheCond,
+				"cache_ttl": 600,
+			},
+		},
+	})
+	testutil.AssertErrCode(t, resp, 422)
+	assert.Contains(t, resp.ErrMsg, "duplicate", "error message must attribute the duplicated cond")
+	assert.Contains(t, resp.ErrMsg, validAICacheCond, "error message must carry the duplicated cond verbatim")
+
+	// 拒绝即零变更（家族3）。
+	assert.Equal(t, before, rulesSnapshot(t), "rejected PUT must leave collection unchanged (issue #261)")
+
+	// 拒绝同样记失败审计（家族7/#155）：before 快照取自库中现状，与请求体无关。
+	entry := waitForAICacheAudit(t, startTs, "2", func(e *testutil.OperationLogEntry) bool {
+		return e.ResourceType == "ai_cache_rule" && e.Action == "update" &&
+			strings.Contains(e.ErrorMsg, validAICacheCond)
+	})
+	require.NotNil(t, entry)
+
+	assert.Equal(t, float64(2), entry.Status, "duplicate cond must be audited as a failed write")
+	assert.Equal(t, aiCacheAuditResourceID, entry.ResourceID)
+	assert.Equal(t, aiCacheAuditResourceID, entry.ResourceName)
+
+	beforeSnap, ok := entry.ChangeSummary["before"].(map[string]interface{})
+	require.True(t, ok, "failure audit must carry a before snapshot")
+	beforeRules, ok := beforeSnap["rules"].([]interface{})
+	require.True(t, ok, "failure audit before.rules should be an array")
+	require.Len(t, beforeRules, 1, "before snapshot must be the stored collection")
+	assert.Equal(t, keeper, beforeRules[0].(map[string]interface{})["name"],
+		"before snapshot must come from storage, not from the rejected request body")
+}
+
+// ---------- AC-1-018 唯一 cond 集合的幂等编辑（正常参数） ----------
+
+// TestAICacheRules_Update_UniqueCondIdempotentEdit 验证新增的 cond 唯一性校验不干扰
+// 正常编辑路径：cond 互不相同的集合可写入，且 GET 回读的 rules 原样作为 PUT body
+// 回写仍 200、响应与回读逐字段一致，规则元素仍是合同 7 键。
+func TestAICacheRules_Update_UniqueCondIdempotentEdit(t *testing.T) {
+	n1 := testutil.UniqueName("ac-1-018-a")
+	n2 := testutil.UniqueName("ac-1-018-b")
+
+	wants := []map[string]interface{}{
+		{
+			"name": n1, "cond": aiCacheCondFor(n1),
+			"cache_key_strategy": defaultCacheKeyStrategy, "cache_ttl": 120,
+			"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
+			"enable_semantic_cache": false,
+		},
+		{
+			"name": n2, "cond": aiCacheCondFor(n2),
+			"cache_key_strategy": "allQuestions", "cache_ttl": 0,
+			"max_body_bytes": defaultMaxBodyBytes, "max_value_bytes": defaultMaxValueBytes,
+			"enable_semantic_cache": false,
+		},
+	}
+
+	resp := putAndAssert200(t, map[string]interface{}{"rules": []interface{}{
+		map[string]interface{}{"name": n1, "cond": aiCacheCondFor(n1), "cache_ttl": 120},
+		map[string]interface{}{"name": n2, "cond": aiCacheCondFor(n2), "cache_key_strategy": "allQuestions"},
+	}})
+	assertRulesMatchWants(t, resp, wants)
+
+	readback := rulesOf(t, getAICacheRules(t))
+	require.Len(t, readback, 2, "GET readback must contain both rules")
+	assert.Equal(t, rulesOf(t, resp), readback, "GET 回读与 PUT 响应逐字段一致")
+
+	// 原样回写：唯一 cond 集合不得被判重拦截。
+	resp2 := putAndAssert200(t, map[string]interface{}{"rules": readback})
+	assertRulesMatchWants(t, resp2, wants)
+	assert.Equal(t, readback, rulesOf(t, resp2), "原样回写的集合必须逐字段一致")
 }
