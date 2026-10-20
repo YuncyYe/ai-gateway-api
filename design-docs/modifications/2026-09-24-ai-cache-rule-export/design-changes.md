@@ -129,6 +129,9 @@ CREATE TABLE `ai_cache_rules` (
 1. 流式答案路径的 tag 是 `cacheStreamValueFrom`（不是 `cacheStreamFrom`）——Go 字段名与 JSON tag 刻意不同，二期开放该字段时照抄 tag；
 2. `cond` 没有默认值，**每条导出规则必须带 `cond`**；
 3. 同一 product 内 `cond` 不可重复（BFE `ProductRuleConfListFile.Check` 拒绝）；控制面不做集合内 cond 去重（BFE 加载报错兜底），但 Open API 层对每条 cond 做编译校验；
+
+> 2026-10-20 修订（issue #261）：控制面已改为在 PUT 时对集合内 `cond` 查重（422），本条“控制面不做去重”的决策被取代；见 modifications/2026-10-20-issue-261-ai-cache-rules-duplicate-cond/。
+
 4. BFE 规则加载器对**所有**字段（含未导出的）在 `setDefaults` 后统一 `CheckNilField`——控制面漏导任何"标记为一期导出"的字段会直接导致 BFE 加载失败，属 P0 级契约事故。
 
 ### 4.3 控制面校验与 BFE 校验的对应关系
@@ -141,9 +144,11 @@ CREATE TABLE `ai_cache_rules` (
 | maxBodyBytes/maxValueBytes > 0 | 是 | 是 |
 | 模板含 `%s` | 一期不暴露该字段 | 是（用默认模板恒过） |
 | 集合内 name 唯一 | 是（`uk_name` 兜底） | - |
-| 集合内 cond 去重 | 否 | 是 |
+| 集合内 cond 去重 | 是（PUT 422，issue #261） | 是（最后防线） |
 
 控制面校验的目标是把错误拦在写入前（fail-fast），BFE 校验是最后防线。
+
+> 2026-10-20 修订（issue #261）：控制面已改为在 PUT 时对集合内 `cond` 查重（422），本条“控制面不做去重”的决策被取代；见 modifications/2026-10-20-issue-261-ai-cache-rules-duplicate-cond/。
 
 ### 4.4 导出最小字段集策略
 
@@ -219,6 +224,7 @@ func (m *AICacheManager) ConfigExport(ctx context.Context, lastVersion string) (
 | 每条 cache_ttl | ≥ 0 | `WrapParamErrorWithMsg` |
 | 每条 max_body_bytes / max_value_bytes | > 0 | `WrapParamErrorWithMsg` |
 | 集合内 name 唯一 | 遍历查重 | `WrapParamErrorWithMsg`（422，请求集合内部矛盾，不用 409） |
+| 集合内 cond 唯一 | 遍历查重（逐字节比较，与 BFE 同判据；issue #261） | `WrapParamErrorWithMsg`（422） |
 
 ---
 

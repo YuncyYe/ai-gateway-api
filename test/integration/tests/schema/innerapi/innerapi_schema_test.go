@@ -705,11 +705,12 @@ var phaseTwoAICacheFields = []string{
 func testAICacheRuleSchema(t *testing.T) {
 	// 自建集合：1 条仅 name+cond（默认值回填），1 条显式非默认。
 	validCond := `req_path_in("/v1/chat/completions", false)`
+	validCond2 := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "inner-schema-ac-2", false)`
 	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
 		"rules": []interface{}{
 			map[string]interface{}{"name": testutil.UniqueName("inner-schema-ac-1"), "cond": validCond},
 			map[string]interface{}{
-				"name": testutil.UniqueName("inner-schema-ac-2"), "cond": validCond,
+				"name": testutil.UniqueName("inner-schema-ac-2"), "cond": validCond2,
 				"cache_key_strategy": "allQuestions", "cache_ttl": 3600,
 				"max_body_bytes": 2097152, "max_value_bytes": 2097152,
 			},
@@ -759,7 +760,7 @@ func testAICacheRuleSchema(t *testing.T) {
 			"enableSemanticCache": false,
 		},
 		{
-			"cond": validCond, "cacheKeyStrategy": "allQuestions",
+			"cond": validCond2, "cacheKeyStrategy": "allQuestions",
 			"cacheTTL": float64(3600), "maxBodyBytes": float64(2097152), "maxValueBytes": float64(2097152),
 			"enableSemanticCache": false,
 		},

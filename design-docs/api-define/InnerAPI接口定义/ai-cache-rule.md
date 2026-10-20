@@ -108,7 +108,7 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/ai-cache-rule?version=0
 - 二期起每条规则额外恒导出 `enableSemanticCache`（默认 `false`），顶层恒导出 `Semantic` 块（设置行不存在时用默认值 `1 / 0.15 / lt`）；
 - 规则集合 = 控制面规则表全量（`id` 升序，无 enabled 过滤）；空表时 product 键对应空数组 `[]`，`Semantic` 块**仍导出**（设置独立于规则生命周期）；
 - 命中后的响应由 BFE `mod_ai_cache` 直接构造（非流式 JSON / 流式 SSE），不转发到后端；访问日志记录 `ai_cache_status`（hit / **hit_semantic** / miss / skip）、语义命中时的 `ai_cache_semantic` / `ai_cache_similarity`（791/792，bfe-access-pb v0.3.10）与 `ai_cache_key`；
-- BFE 侧校验（最后防线）：`cond` 必须 `condition.Build` 编译通过；`cacheTTL >= 0`；`maxBodyBytes`/`maxValueBytes > 0`；同一 product 内 `cond` 不可重复；`topK` 1-10、`threshold` 0-2、`thresholdRelation` 四枚举（Semantic 块存在时）。
+- BFE 侧校验（最后防线）：`cond` 必须 `condition.Build` 编译通过；`cacheTTL >= 0`；`maxBodyBytes`/`maxValueBytes > 0`；同一 product 内 `cond` 不可重复；`topK` 1-10、`threshold` 0-2、`thresholdRelation` 四枚举（Semantic 块存在时）；控制面 `PUT /open-api/v1/ai-cache-rules` 已在写入前拒绝集合内重复 `cond`，本接口不再产生该类非法文件（issue #261）
 
 ## 4. 成功返回示例
 

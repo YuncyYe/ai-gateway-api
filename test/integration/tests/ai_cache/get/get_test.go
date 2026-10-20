@@ -16,6 +16,7 @@ package ai_cache_get_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 
@@ -65,6 +66,12 @@ func acRule(name, cond string) map[string]interface{} {
 	}
 }
 
+// aiCacheCondFor 在基准表达式上追加一个只用于区分规则身份的 model 子句：
+// 导出的 cond 必须逐条不同，否则整个 ai_cache.data 会被 BFE 拒载（issue #261）。
+func aiCacheCondFor(suffix string) string {
+	return fmt.Sprintf(`req_path_in("/v1/chat/completions", false) && req_body_json_in("model", %q, false)`, suffix)
+}
+
 // ---------- AC-2-001 空集合形状（家族11：顶层键含 rules 且为 [] 非 null） ----------
 
 func TestAICacheRules_Get_EmptyShape(t *testing.T) {
@@ -92,9 +99,9 @@ func TestAICacheRules_Get_Order(t *testing.T) {
 	n3 := testutil.UniqueName("ac-2-002-third")
 
 	resp := putAICacheRules(t, map[string]interface{}{"rules": []interface{}{
-		map[string]interface{}{"name": n1, "cond": validAICacheCond, "cache_ttl": 100},
-		map[string]interface{}{"name": n2, "cond": validAICacheCond, "cache_ttl": 200},
-		map[string]interface{}{"name": n3, "cond": validAICacheCond, "cache_ttl": 300},
+		map[string]interface{}{"name": n1, "cond": aiCacheCondFor(n1), "cache_ttl": 100},
+		map[string]interface{}{"name": n2, "cond": aiCacheCondFor(n2), "cache_ttl": 200},
+		map[string]interface{}{"name": n3, "cond": aiCacheCondFor(n3), "cache_ttl": 300},
 	}})
 	testutil.AssertSuccess(t, resp)
 
@@ -143,10 +150,10 @@ func TestAICacheRules_Get_SemanticCacheFlag(t *testing.T) {
 
 	resp := putAICacheRules(t, map[string]interface{}{"rules": []interface{}{
 		map[string]interface{}{
-			"name": nTrue, "cond": validAICacheCond,
+			"name": nTrue, "cond": aiCacheCondFor(nTrue),
 			"enable_semantic_cache": true,
 		},
-		acRule(nOmit, validAICacheCond),
+		acRule(nOmit, aiCacheCondFor(nOmit)),
 	}})
 	testutil.AssertSuccess(t, resp)
 

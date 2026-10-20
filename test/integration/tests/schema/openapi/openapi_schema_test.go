@@ -865,6 +865,7 @@ func testGlobalRouteRulesSchema(t *testing.T) {
 // 自 issue #258 起不返回），不得含内部 id、无 enabled（ai-cache-rules.md §1）。
 func testAICacheSchema(t *testing.T) {
 	validCond := `req_path_in("/v1/chat/completions", false)`
+	validCond2 := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "schema-ac-2", false)`
 	name1 := testutil.UniqueName("schema-ac-1")
 	name2 := testutil.UniqueName("schema-ac-2")
 
@@ -894,7 +895,7 @@ func testAICacheSchema(t *testing.T) {
 	put2Resp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
 		"rules": []interface{}{
 			map[string]interface{}{"name": name1, "cond": validCond, "cache_ttl": 7200},
-			map[string]interface{}{"name": name2, "cond": validCond, "cache_key_strategy": "disabled"},
+			map[string]interface{}{"name": name2, "cond": validCond2, "cache_key_strategy": "disabled"},
 		},
 	})
 	require.NoError(t, err)

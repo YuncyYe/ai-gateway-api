@@ -664,6 +664,47 @@ func TestAICacheRules(t *testing.T) {
 	rule.Cond = lib.PString("unknown_func()")
 	assert.Error(t, AICacheRules(&shared.AICacheRulesParam{Rules: []*shared.AICacheRuleParam{rule}}))
 
+	// cond: unique within the collection (byte-wise, matching BFE's
+	// ProductRuleConfListFile.Check). A duplicate cond makes the whole exported
+	// file unloadable, so it must be rejected before the write (issue #261).
+	condA := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "issue-261-a", false)`
+	condB := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "issue-261-b", false)`
+	first := validRule()
+	first.Cond = &condA
+	second := validRule()
+	second.Name = lib.PString("cache-deepseek-chat-2")
+	second.Cond = &condA
+	second.CacheTTL = lib.PInt(60)
+	err := AICacheRules(&shared.AICacheRulesParam{Rules: []*shared.AICacheRuleParam{first, second}})
+	assert.Error(t, err, "duplicate cond with a different name must be rejected")
+	assert.Contains(t, err.Error(), "duplicate ai cache rule cond")
+	assert.Contains(t, err.Error(), condA)
+
+	// Distinct conds pass (positive anchor); byte-wise comparison means a
+	// one-byte difference is enough (no normalisation on either side).
+	second.Cond = &condB
+	assert.NoError(t, AICacheRules(&shared.AICacheRulesParam{Rules: []*shared.AICacheRuleParam{first, second}}))
+
+	// Duplicate name is still reported before duplicate cond.
+	first.Name = lib.PString("same-name")
+	second.Name = lib.PString("same-name")
+	second.Cond = &condA
+	err = AICacheRules(&shared.AICacheRulesParam{Rules: []*shared.AICacheRuleParam{first, second}})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate ai cache rule name")
+
+	// Two identical unparsable conds report the compile error, not the
+	// duplicate error (the compile check runs first). Names are distinct so the
+	// name check cannot mask the assertion.
+	bad := "unknown_func()"
+	first.Name = lib.PString("compile-order-1")
+	second.Name = lib.PString("compile-order-2")
+	first.Cond = &bad
+	second.Cond = &bad
+	err = AICacheRules(&shared.AICacheRulesParam{Rules: []*shared.AICacheRuleParam{first, second}})
+	assert.Error(t, err)
+	assert.NotContains(t, err.Error(), "duplicate ai cache rule cond")
+
 	// cache_key_strategy enum.
 	for _, strategy := range []string{AICacheKeyStrategyLastQuestion, AICacheKeyStrategyAllQuestions, AICacheKeyStrategyDisabled} {
 		rule = validRule()

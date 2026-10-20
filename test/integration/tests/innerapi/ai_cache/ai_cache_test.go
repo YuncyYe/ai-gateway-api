@@ -16,6 +16,7 @@ package innerapi_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -146,6 +147,12 @@ func assertExportRuleValues(t *testing.T, rule map[string]interface{}, want map[
 	}
 }
 
+// aiCacheCondFor 在基准表达式上追加一个只用于区分规则身份的 model 子句：
+// 导出的 cond 必须逐条不同，否则整个 ai_cache.data 会被 BFE 拒载（issue #261）。
+func aiCacheCondFor(suffix string) string {
+	return fmt.Sprintf(`req_path_in("/v1/chat/completions", false) && req_body_json_in("model", %q, false)`, suffix)
+}
+
 // ---------- AICE-1-001 首拉（家族8：存在性 + 取值 + 原始 body 文本形态） ----------
 
 func TestInnerAPI_AICache_ExportFirstPull(t *testing.T) {
@@ -153,10 +160,10 @@ func TestInnerAPI_AICache_ExportFirstPull(t *testing.T) {
 	n2 := testutil.UniqueName("aice-1-001-explicit")
 	putAICacheRulesOK(t, []interface{}{
 		// 规则 1：仅 name+cond，依赖默认值回填。
-		map[string]interface{}{"name": n1, "cond": validAICacheCond},
+		map[string]interface{}{"name": n1, "cond": aiCacheCondFor(n1)},
 		// 规则 2：显式非默认值（含语义开关 true）。
 		map[string]interface{}{
-			"name": n2, "cond": validAICacheCond,
+			"name": n2, "cond": aiCacheCondFor(n2),
 			"cache_key_strategy": "disabled", "cache_ttl": 86400,
 			"max_body_bytes": 524288, "max_value_bytes": 262144,
 			"enable_semantic_cache": true,
@@ -176,12 +183,12 @@ func TestInnerAPI_AICache_ExportFirstPull(t *testing.T) {
 
 	// 顺序=提交顺序（first-match-wins 优先级）。
 	assertExportRuleValues(t, rules[0], map[string]interface{}{
-		"cond": validAICacheCond, "cacheKeyStrategy": "lastQuestion",
+		"cond": aiCacheCondFor(n1), "cacheKeyStrategy": "lastQuestion",
 		"cacheTTL": float64(0), "maxBodyBytes": float64(1048576), "maxValueBytes": float64(1048576),
 		"enableSemanticCache": false,
 	})
 	assertExportRuleValues(t, rules[1], map[string]interface{}{
-		"cond": validAICacheCond, "cacheKeyStrategy": "disabled",
+		"cond": aiCacheCondFor(n2), "cacheKeyStrategy": "disabled",
 		"cacheTTL": float64(86400), "maxBodyBytes": float64(524288), "maxValueBytes": float64(262144),
 		"enableSemanticCache": true,
 	})
@@ -251,8 +258,8 @@ func TestInnerAPI_AICache_VersionMonotonic(t *testing.T) {
 	nB1 := testutil.UniqueName("aice-1-004-b1")
 	nB2 := testutil.UniqueName("aice-1-004-b2")
 	putAICacheRulesOK(t, []interface{}{
-		map[string]interface{}{"name": nB1, "cond": validAICacheCond, "cache_ttl": 222},
-		map[string]interface{}{"name": nB2, "cond": validAICacheCond, "cache_ttl": 333},
+		map[string]interface{}{"name": nB1, "cond": aiCacheCondFor(nB1), "cache_ttl": 222},
+		map[string]interface{}{"name": nB2, "cond": aiCacheCondFor(nB2), "cache_ttl": 333},
 	})
 
 	// 轮询导出（间隔 500ms，最多 10 次）直到版本严格大于 v1（版本串为 14 位定宽，字典序即时间序）。
@@ -267,16 +274,16 @@ func TestInnerAPI_AICache_VersionMonotonic(t *testing.T) {
 	}
 	require.NotNil(t, converged, "version must strictly increase within bounded polls (家族8/#142)")
 
-	// 内容收敛为最新集合（导出无 name 字段，以 cond + 各不相同的 cacheTTL 锁定顺序）。
+	// 内容收敛为最新集合（导出无 name 字段，以逐条唯一的 cond 锁定顺序）。
 	rules := productRules(t, converged)
 	require.Len(t, rules, 2)
 	assertExportRuleValues(t, rules[0], map[string]interface{}{
-		"cond": validAICacheCond, "cacheKeyStrategy": "lastQuestion",
+		"cond": aiCacheCondFor(nB1), "cacheKeyStrategy": "lastQuestion",
 		"cacheTTL": float64(222), "maxBodyBytes": float64(1048576), "maxValueBytes": float64(1048576),
 		"enableSemanticCache": false,
 	})
 	assertExportRuleValues(t, rules[1], map[string]interface{}{
-		"cond": validAICacheCond, "cacheKeyStrategy": "lastQuestion",
+		"cond": aiCacheCondFor(nB2), "cacheKeyStrategy": "lastQuestion",
 		"cacheTTL": float64(333), "maxBodyBytes": float64(1048576), "maxValueBytes": float64(1048576),
 		"enableSemanticCache": false,
 	})
@@ -286,8 +293,8 @@ func TestInnerAPI_AICache_VersionMonotonic(t *testing.T) {
 
 func TestInnerAPI_AICache_ExportEmpty(t *testing.T) {
 	putAICacheRulesOK(t, []interface{}{
-		map[string]interface{}{"name": testutil.UniqueName("aice-1-005-a"), "cond": validAICacheCond},
-		map[string]interface{}{"name": testutil.UniqueName("aice-1-005-b"), "cond": validAICacheCond},
+		map[string]interface{}{"name": testutil.UniqueName("aice-1-005-a"), "cond": aiCacheCondFor("aice-1-005-a")},
+		map[string]interface{}{"name": testutil.UniqueName("aice-1-005-b"), "cond": aiCacheCondFor("aice-1-005-b")},
 	})
 	putAICacheRulesOK(t, []interface{}{})
 
@@ -431,8 +438,8 @@ func TestInnerAPI_AICache_ExportSemanticChangeBumpsVersion(t *testing.T) {
 
 func TestInnerAPI_AICache_ExportSemanticSurvivesRuleClear(t *testing.T) {
 	putAICacheRulesOK(t, []interface{}{
-		map[string]interface{}{"name": testutil.UniqueName("aice-1-010-a"), "cond": validAICacheCond},
-		map[string]interface{}{"name": testutil.UniqueName("aice-1-010-b"), "cond": validAICacheCond},
+		map[string]interface{}{"name": testutil.UniqueName("aice-1-010-a"), "cond": aiCacheCondFor("aice-1-010-a")},
+		map[string]interface{}{"name": testutil.UniqueName("aice-1-010-b"), "cond": aiCacheCondFor("aice-1-010-b")},
 	})
 	putAICacheRulesOK(t, []interface{}{})
 

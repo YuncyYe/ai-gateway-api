@@ -16,10 +16,10 @@ AI Cache Rules（AI 缓存规则）模块负责 AI 缓存规则集合的管理�
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 全量更新AI缓存规则（PUT） | 16 |
+| 全量更新AI缓存规则（PUT） | 18 |
 | 查询AI缓存规则（GET） | 3 |
 | 导出 AI 缓存规则配置（InnerAPI） | 6 |
-| **合计** | **25** |
+| **合计** | **27** |
 
 > AC-1-012 为 `//go:build mysql` 并发用例（家族10），需 `AIAPI_MYSQL_DSN`，SQLite 环境不编译。
 
@@ -33,7 +33,7 @@ AI Cache Rules（AI 缓存规则）模块负责 AI 缓存规则集合的管理�
 ai_cache/
 ├── design.md
 ├── update/
-│   ├── update_test.go            # AC-1-001 ~ AC-1-016（PUT）
+│   ├── update_test.go            # AC-1-001 ~ AC-1-018（PUT）
 │   └── concurrency_mysql_test.go # AC-1-012（//go:build mysql，并发全量替换）
 └── get/
     └── get_test.go               # AC-2-001 ~ AC-2-003（GET）
@@ -64,7 +64,7 @@ innerapi/ai_cache/
 |--------|------|------|------|------------|
 | rules | array | Y | 规则列表，数组顺序即优先级 | 必填；`null`/缺省按 `[]` 处理（清空） |
 | rules[].name | string | Y | 规则名称 | 必填；1-128 字符；同一集合内不得重复 |
-| rules[].cond | string | Y | BFE 条件表达式 | 必填；必须能通过 BFE `condition.Build` 编译 |
+| rules[].cond | string | Y | BFE 条件表达式 | 必填；必须能通过 BFE `condition.Build` 编译；同一集合内**不得重复**（逐字节比较） |
 | rules[].cache_key_strategy | string | N | 缓存键策略 | `lastQuestion`（默认）/ `allQuestions` / `disabled` |
 | rules[].cache_ttl | int | N | 缓存 TTL（秒），0 表示不过期 | ≥ 0，默认 0 |
 | rules[].max_body_bytes | int64 | N | 请求体大小上限（字节） | > 0，默认 1048576 |
@@ -82,7 +82,7 @@ innerapi/ai_cache/
 | rules[].max_body_bytes | int64 | 请求体大小上限 |
 | rules[].max_value_bytes | int64 | 缓存值大小上限 |
 
-约束：响应**不得含内部 `id` 字段**；无 `enabled` 字段（提交的列表即生效集合）；**不含逐行 `created_at`/`updated_at`**（整组替换语义下无信息价值，issue #258；请求体若携带按未知字段忽略）。
+约束：响应**不得含内部 `id` 字段**；无 `enabled` 字段（提交的列表即生效集合）；**不含逐行 `created_at`/`updated_at`**（整组替换语义下无信息价值，issue #258；请求体若携带按未知字段忽略）。同一集合内 `cond` 不得重复（逐字节比较）：BFE 以 `cond` 作为 product 内的规则键，重复会使整份 `ai_cache.data` 拒载（issue #261）。
 
 ### 6.3 测试场景总览
 
@@ -104,6 +104,8 @@ innerapi/ai_cache/
 | AC-1-014 | 回读原样 PUT | 正常参数 | 家族1/11 | GET 的 `rules` 原样作为 PUT body → 200 且逐字段一致（键集合 7 字段，无时间戳） |
 | AC-1-015 | 旧客户端携带只读时间戳 | 正常参数 | 家族1/11（#258） | 带 `created_at`/`updated_at` 的旧规则在前/在后两种排列 → 均 200、两条都写入、顺序=提交顺序 |
 | AC-1-016 | 只读时间戳被忽略 | 合同一致性 | 家族11（#258） | 提交伪造的 2000 年时间戳 → 200，PUT 响应与 GET 回读均无 `created_at`/`updated_at` 键 |
+| AC-1-017 | 集合内 cond 重复 | 异常参数 | 家族3/7（#261） | 同一 PUT 内两条规则仅 name/ttl 不同、`cond` 逐字节相同 → 422（ErrMsg 含 duplicate 与 cond 原文）+ 回读零变更 + 失败审计 before 快照取自库中现状 |
+| AC-1-018 | 唯一 cond 集合幂等编辑 | 正常参数 | 家族1/11（#261） | 2 条 `cond` 互不相同 → 200；GET 回读原样作为 PUT body 再提交 → 200 且逐字段一致、规则元素仍为合同 7 键 |
 
 ### 6.4 测试场景详细设计
 
@@ -372,6 +374,49 @@ innerapi/ai_cache/
 ##### 预期返回结果
 
 **ErrNum**：200；响应与回读均无时间戳键。
+
+---
+
+#### 6.4.17 AC-1-017：集合内 cond 重复（异常参数，家族3/7，#261）
+
+##### 设计思路
+
+BFE `mod_ai_cache` 以 `cond` 字符串作为 product 内的规则键，集合内重复会使整份 `ai_cache.data` 被拒载，conf-agent 每 5s 重试同一文件、symlink 不推进（issue #261）。因此控制面必须在写入前拦截：同一 PUT 的 `rules` 数组内任意两条 `cond` 逐字节相同即 422，集合零变更，并记一条失败审计。
+
+##### 前提数据准备
+
+PUT 1 条 `cond=req_path_in("/v1/chat/completions", false)` 的合法规则，作为"库中现状"。
+
+##### 执行步骤
+
+1. 取 `before` 快照（GET 回读整个集合）。
+2. PUT 2 条规则：仅 `name` 与 `cache_ttl`（60 / 600）不同，`cond` 完全相同（判重只看 cond）。
+3. 断言 422；`ErrMsg` 含 `duplicate` 且含该 `cond` 原文。
+4. GET 回读，断言与 `before` 逐字段相等（拒绝即零变更，家族3）。
+5. 轮询操作日志：`resource_type=ai_cache_rule, action=update, status=2` 且 `error_msg` 含该 cond 的记录；断言 `resource_id=resource_name=ai_cache_rules`，且 `change_summary.before.rules` 长度 1、内容为库中现状规则（before 快照取自库中现状而非请求体，#155）。
+
+##### 预期返回结果
+
+**ErrNum**：422；**ErrMsg**：`duplicate ai cache rule cond: <cond>`；GET 回读零变更；失败审计 1 条。
+
+---
+
+#### 6.4.18 AC-1-018：唯一 cond 集合幂等编辑（正常参数，家族1/11，#261）
+
+##### 设计思路
+
+验证新增的集合内 cond 唯一性校验不干扰正常编辑路径：`cond` 互不相同的集合可正常写入，"GET 回读 → 原样 PUT"仍 200 且响应与回读逐字段一致，规则元素仍是合同 7 字段（无 `created_at`/`updated_at`/`id`）。
+
+##### 执行步骤
+
+1. PUT 2 条规则：`cond` 分别为 `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "<name1>", false)` 与同形态的 `<name2>` 变体（逐条唯一），其中一条显式 `cache_ttl=120`、另一条显式 `cache_key_strategy=allQuestions`。
+2. 断言 200；按数组下标逐字段断言（含默认值回填与合同 7 键锁）。
+3. GET 回读 `Data.rules`，断言与 PUT 响应逐字段一致。
+4. 把回读的 `rules` 原样作为 PUT body 再次提交 → 200；响应与原回读逐字段一致，每个规则元素键集合精确为 7 字段。
+
+##### 预期返回结果
+
+**ErrNum**：200（两次）；`rules` 长度 2、顺序不变、字段逐一致。
 
 ---
 
