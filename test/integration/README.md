@@ -71,7 +71,30 @@ integration/
 | Go | 1.22+ |
 | 操作系统 | Windows / Linux / macOS |
 | 磁盘空间 | 建议 2GB+（go-sqlite 纯 Go 编译需要较大临时空间） |
-| 外部依赖 | 无（SQLite 纯 Go 实现，无需 CGO） |
+| MySQL | 推荐：MySQL 8.x（控制面 bfe_db 的默认测试后端，见「数据库后端」） |
+| 外部依赖 | MySQL 不可用时自动回退 SQLite（`AIAPI_FORCE_SQLITE=1` 强制） |
+
+## 数据库后端（默认 MySQL）
+
+`StartServer` / `StartServerWithExtraConfig` / `StartServerWithMonitor` /
+`StartServerWithSharedInfra` 系列入口默认走 **MySQL**，每次调用独立建库
+`ai_gateway_it_*`（执行项目 `db_ddl.sql` + 种子数据，`Shutdown` 时 DROP）。
+后端选择优先级：
+
+1. `AIAPI_FORCE_SQLITE=1` → 回退 SQLite（旧行为，供无 MySQL 的环境/CI）；
+2. `AIAPI_MYSQL_DSN`（管理员 DSN，不带库名，形如 `root:pass@tcp(127.0.0.1:3306)/`）；
+3. 探测本机 `root@tcp(127.0.0.1:3306)/`（root 无口令实例）可达则用 MySQL，否则 SQLite。
+
+> 为什么默认 MySQL：SQLite 的 `TEXT` 列不校验 JSON，无法暴露「`JSON` 列拒绝
+> `enc$v1$` 信封」这类 MySQL 严格模式才触发的缺陷（issue #264）。凡直读数据库的
+> 断言统一用 `testutil.OpenDB(t, sm)`（按后端自动选驱动），勿直接读 `sm.DBPath`。
+
+本地起一个无口令 MySQL 8.4 即可满足默认探测：
+
+```bash
+mysqld --initialize-insecure --datadir=<dir>
+mysqld --datadir=<dir> --port=3306 --bind-address=127.0.0.1
+```
 
 ## 快速开始
 
@@ -112,44 +135,28 @@ go test -v -run TestCreate_Normal_MinimalParams ./tests/api_key/create/
 ### MySQL 并发用例（build tag 隔离）
 
 并发正确性（ID 生成竞态、行锁超时，issue #80/#99/#132；批量任务 cancel
-抢占原子性 BT-3-007）在 SQLite 单连接串行
-环境下无法暴露，相关用例以 `//go:build mysql` 隔离，需真实 MySQL：
+抢占原子性 BT-3-007）在串行环境下无法暴露，相关用例以 `//go:build mysql`
+编译隔离，内部走 `StartServerWithMySQL`（显式管理员 DSN，不带库名；测试自动
+建库 `ai_gateway_it_*`、执行 `db_ddl.sql`、用毕删库）：
 
 ```bash
-# admin DSN 不带库名；测试自动建库 ai_gateway_it_*、执行 db_ddl.sql、用毕删库
-AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
-  go test -tags mysql -count=1 -timeout 600s \
+go test -tags mysql -count=1 -timeout 600s \
   ./tests/api_key/create/ ./tests/entity/create/ -run Concurrent
 ```
 
 未设置 `AIAPI_MYSQL_DSN` 时上述用例自动 Skip；不带 `-tags mysql` 时不编译。
 
-### 双后端全量运行（StartServerAuto / StartServerWithMonitorAuto）
+`tests/secret_at_rest/`（DB 落盘加密）是 MySQL 后端的关键回归面：`providers.api_keys`
+若是 `JSON` 列，整列 `enc$v1$` 信封在 MySQL 严格模式下写入报 `Error 3140`，而
+SQLite 的 `TEXT` 列不校验 JSON、测不出来（issue #264，用例 SAR-4-001）。
 
-批量特性新增包（`tests/batch/*`、`tests/model_price/batch_price`、
-`tests/api_key/batch_limits`）的 TestMain 使用 `testutil.StartServerAuto`：
-默认 SQLite；设置 `AIAPI_MYSQL_DSN` 后同一批用例在 MySQL 上运行（自动
-建库 `ai_gateway_it_*`、执行主项目 `db_ddl.sql`、用毕 DROP）。因此：
+### SQLite 回归运行（AIAPI_FORCE_SQLITE）
 
-```bash
-# 仅跑 MySQL 隔离的并发用例
-AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
-  go test -tags mysql -count=1 -timeout 600s ./tests/batch/cancel/ -run Concurrent
-
-# 三个模块全量用例跑到 MySQL 上（新包自动切换后端，既有包仍为 SQLite）
-AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
-  go test -count=1 -timeout 900s ./tests/batch/... ./tests/model_price/... ./tests/api_key/...
-```
-
-`tests/secret_at_rest/`（DB 落盘加密）使用 `testutil.StartServerWithMonitorAuto`
-——与上面同一套后端选择，额外启用监控端口（`/reload/security`）。**该模块推荐在
-MySQL 后端上跑一遍**：`providers.api_keys` 若是 `JSON` 列，整列 `enc$v1$` 信封在
-MySQL 严格模式下写入报 `Error 3140`，而 SQLite 的 `TEXT` 列不校验 JSON、测不出来
-（issue #264，用例 SAR-4-001）：
+全部 `StartServer*` 入口默认走 MySQL（见「数据库后端」）。需要回归 SQLite
+行为时（例如验证 MySQL/SQLite 双 DDL 的一致性）显式强制：
 
 ```bash
-AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
-  go test -count=1 -timeout 900s ./tests/secret_at_rest/...
+AIAPI_FORCE_SQLITE=1 go test -count=1 -timeout 900s ./tests/secret_at_rest/...
 ```
 
 ### 4. 清理运行时数据
@@ -193,7 +200,7 @@ MonitorPort = -1                   # -1 = 禁用监控端口
 ### 服务器管理
 
 ```go
-// 启动测试服务器（自动初始化 SQLite、加载配置、注册路由）
+// 启动测试服务器（自动初始化数据库（默认 MySQL）、加载配置、注册路由）
 sm, err := testutil.StartServer()
 
 // 停止测试服务器并清理资源

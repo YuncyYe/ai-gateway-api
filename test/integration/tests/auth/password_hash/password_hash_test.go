@@ -57,7 +57,7 @@ func login(t *testing.T, userName, password string) *testutil.APIResponse {
 
 func TestAuth_PasswordHash(t *testing.T) {
 	t.Run("AUTH-14-001 DDL种子admin口令为bcrypt哈希且admin可登录", func(t *testing.T) {
-		stored, err := testutil.GetUserPassword(sm.DBPath, "admin")
+		stored, err := testutil.GetUserPassword(t, sm, "admin")
 		require.NoError(t, err)
 		assert.True(t, isBcryptHash(stored), "admin password must be stored as bcrypt hash, got %q", stored)
 		assert.NotEqual(t, "admin", stored)
@@ -70,7 +70,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		require.NoError(t, testutil.CreateUser(userName, "password@123"))
 		t.Cleanup(func() { testutil.DeleteUser(userName) })
 
-		stored, err := testutil.GetUserPassword(sm.DBPath, userName)
+		stored, err := testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 		assert.True(t, isBcryptHash(stored), "created user password must be stored as bcrypt hash, got %q", stored)
 		assert.NotEqual(t, "password@123", stored)
@@ -84,14 +84,14 @@ func TestAuth_PasswordHash(t *testing.T) {
 		t.Cleanup(func() { testutil.DeleteUser(userName) })
 
 		// 模拟老版本存量库：password 为明文。
-		require.NoError(t, testutil.SetUserPassword(sm.DBPath, userName, "password@123"))
-		stored, err := testutil.GetUserPassword(sm.DBPath, userName)
+		require.NoError(t, testutil.SetUserPassword(t, sm, userName, "password@123"))
+		stored, err := testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 		require.Equal(t, "password@123", stored, "precondition: plaintext row")
 
 		// 明文口令登录成功，并在同一事务内重哈希落库。
 		testutil.AssertSuccess(t, login(t, userName, "password@123"))
-		stored, err = testutil.GetUserPassword(sm.DBPath, userName)
+		stored, err = testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 		assert.True(t, isBcryptHash(stored), "legacy plaintext must be re-hashed after login, got %q", stored)
 
@@ -120,7 +120,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		})
 		require.NoError(t, err)
 		testutil.AssertErrCode(t, resp, 422)
-		_, err = testutil.GetUserPassword(sm.DBPath, rejectedName)
+		_, err = testutil.GetUserPassword(t, sm, rejectedName)
 		assert.Error(t, err, "rejected user must not exist in DB")
 
 		// 改密路径：73 字节密码 422，且存储值与操作前逐字节一致（回读零变更）。
@@ -128,7 +128,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		require.NoError(t, testutil.CreateUser(userName, "password@123"))
 		t.Cleanup(func() { testutil.DeleteUser(userName) })
 
-		before, err := testutil.GetUserPassword(sm.DBPath, userName)
+		before, err := testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 
 		resp, err = testutil.GetClient().Patch("/open-api/v1/auth/users/"+userName+"/passwd", map[string]interface{}{
@@ -137,7 +137,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		require.NoError(t, err)
 		testutil.AssertErrCode(t, resp, 422)
 
-		after, err := testutil.GetUserPassword(sm.DBPath, userName)
+		after, err := testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 		assert.Equal(t, before, after, "rejected password change must not modify the stored value")
 	})
@@ -153,7 +153,7 @@ func TestAuth_PasswordHash(t *testing.T) {
 		require.NoError(t, err)
 		testutil.AssertSuccess(t, resp)
 
-		stored, err := testutil.GetUserPassword(sm.DBPath, userName)
+		stored, err := testutil.GetUserPassword(t, sm, userName)
 		require.NoError(t, err)
 		assert.True(t, isBcryptHash(stored), "reset password must be stored as bcrypt hash, got %q", stored)
 

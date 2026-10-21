@@ -105,25 +105,12 @@ func startSARServer(t *testing.T, extraTOML string) *testutil.ServerManager {
 	return sm
 }
 
-// openRawDB 直读被测库：MySQL 后端（AIAPI_MYSQL_DSN）用 mysql 驱动连测试库，
+// openRawDB 直读被测库：委托 testutil.OpenDB——MySQL 后端用 mysql 驱动连测试库，
 // 否则读服务端 SQLite 文件（busy_timeout 与 createTempConfig 同款，避免与后台
 // 审计刷盘瞬态争用写锁）。两套后端下断言语义一致，故统一收口到本函数。
 func openRawDB(t *testing.T, sm *testutil.ServerManager) *sql.DB {
 	t.Helper()
-
-	dsn := sm.MySQLDSN()
-	if dsn != "" {
-		db, err := sql.Open("mysql", dsn)
-		require.NoError(t, err)
-		t.Cleanup(func() { db.Close() })
-		return db
-	}
-
-	sqliteDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(sm.DBPath))
-	db, err := sql.Open("sqlite-strip", sqliteDSN)
-	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
-	return db
+	return testutil.OpenDB(t, sm)
 }
 
 // requireSQLiteBackend 跳过依赖「共享 SQLite 文件」基础设施的用例

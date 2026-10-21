@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
@@ -53,6 +54,9 @@ type ServerManager struct {
 	// Shutdown 时 DROP DATABASE 清理。
 	mysqlAdminDSN string
 	mysqlDBName   string
+	// mysqlShared 为 true 表示该库属于 StartServerWithSharedInfra 共享池，
+	// Shutdown 只递减引用，最后一个实例退出时才 DROP。
+	mysqlShared bool
 }
 
 // dbPatch 以非 SQLite 后端启动时的数据库配置覆盖项（仅 MySQL 并发用例使用）。
@@ -91,9 +95,10 @@ func replaceDBSection(confText, section string) string {
 	return strings.Join(out, "\n")
 }
 
-// StartServer 使用项目编译的 ai-gateway-api.exe 作为子进程启动测试服务器
+// StartServer 使用项目编译的 ai-gateway-api.exe 作为子进程启动测试服务器。
+// 后端由 startServerAuto 决定：本机 MySQL 可用时默认 MySQL，否则 SQLite。
 func StartServer() (*ServerManager, error) {
-	return startServer(nil, "", "", nil, 0)
+	return startServerAuto(nil, "", "", 0, false)
 }
 
 // StartServerWithExtraConfig 启动一个测试服务器，并把 extraTOML 追加到临时
@@ -101,21 +106,117 @@ func StartServer() (*ServerManager, error) {
 // （如 [Report]、[Databases.xxx]）。extraTOML 为空串时行为与 StartServer 完全
 // 一致。注意：额外数据源（如 MySQL）需要测试自身保证可用。
 func StartServerWithExtraConfig(extraTOML string) (*ServerManager, error) {
-	return startServer(nil, "", extraTOML, nil, 0)
+	return startServerAuto(nil, "", extraTOML, 0, false)
 }
 
 // StartServerWithMonitor 启动一个测试服务器，同时把模板中被禁用的监控端口
 // （MonitorPort = -1）改为随机可用端口，用于需要访问 monitor 端口能力
 // （如 /reload/*、/monitor/metrics）的用例。MonitorURL 为监控端口地址。
 func StartServerWithMonitor(extraTOML string) (*ServerManager, error) {
-	return startServer(nil, "", extraTOML, nil, 1)
+	return startServerAuto(nil, "", extraTOML, 1, false)
 }
 
-// StartServerWithSharedInfra 启动一个测试服务器，可复用外部传入的 miniredis 与 SQLite 数据库文件。
-// 当 sharedRedis == nil 时创建新的 miniredis；当 sharedDBPath == "" 时创建新的 SQLite 数据库。
+// StartServerWithSharedInfra 启动一个测试服务器，可复用外部传入的 miniredis 与数据库。
+// 当 sharedRedis == nil 时创建新的 miniredis；当 sharedDBPath == "" 时创建新的数据库。
 // 该函数用于多实例部署场景，让多个 ai-gateway-api 实例共享同一 Redis（分布式锁）与同一 DB。
+// MySQL 后端下多个实例共享进程内全局测试库（引用计数，最后一个 Shutdown 时 DROP）。
 func StartServerWithSharedInfra(sharedRedis *miniredis.Miniredis, sharedDBPath string) (*ServerManager, error) {
-	return startServer(sharedRedis, sharedDBPath, "", nil, 0)
+	return startServerAuto(sharedRedis, sharedDBPath, "", 0, true)
+}
+
+// startServerAuto 是 StartServer 系列入口的后端分发器：
+//   - sharedDBPath != ""：调用方显式共享 SQLite 文件，保持既有语义；
+//   - resolveMySQLAdminDSN() 非空（AIAPI_MYSQL_DSN 或本机默认实例可达）：MySQL，
+//     每次调用独立建库；joinPool=true（SharedInfra 形态）时注册到进程内共享库池；
+//   - 否则回退 SQLite（原 startServer 行为）。
+func startServerAuto(sharedRedis *miniredis.Miniredis, sharedDBPath, extraTOML string, monitorPortMode int, joinPool bool) (*ServerManager, error) {
+	if sharedDBPath != "" {
+		return startServer(sharedRedis, sharedDBPath, extraTOML, nil, monitorPortMode)
+	}
+	adminDSN := resolveMySQLAdminDSN()
+	if adminDSN == "" {
+		return startServer(sharedRedis, sharedDBPath, extraTOML, nil, monitorPortMode)
+	}
+
+	sharedMySQLMu.Lock()
+	if joinPool && sharedMySQLPool != nil {
+		pool := sharedMySQLPool
+		pool.refs++
+		sharedMySQLMu.Unlock()
+
+		sm, err := startServer(sharedRedis, "", extraTOML, &dbPatch{driver: "mysql", section: pool.section}, monitorPortMode)
+		if err != nil {
+			releaseSharedMySQLRef()
+			return nil, err
+		}
+		sm.mysqlAdminDSN = pool.adminDSN
+		sm.mysqlDBName = pool.dbName
+		sm.mysqlShared = true
+		if sharedRedis == nil {
+			SetServerURL(sm.ServerURL)
+		}
+		return sm, nil
+	}
+
+	dbName, err := provisionMySQLDatabase(adminDSN)
+	if err != nil {
+		sharedMySQLMu.Unlock()
+		return nil, err
+	}
+	section, err := mysqlDBSection(adminDSN, dbName)
+	if err != nil {
+		sharedMySQLMu.Unlock()
+		dropMySQLDatabase(adminDSN, dbName)
+		return nil, err
+	}
+	if joinPool {
+		sharedMySQLPool = &sharedMySQLDB{adminDSN: adminDSN, dbName: dbName, section: section, refs: 1}
+	}
+	sharedMySQLMu.Unlock()
+
+	sm, err := startServer(sharedRedis, "", extraTOML, &dbPatch{driver: "mysql", section: section}, monitorPortMode)
+	if err != nil {
+		if joinPool {
+			releaseSharedMySQLRef()
+		} else {
+			dropMySQLDatabase(adminDSN, dbName)
+		}
+		return nil, err
+	}
+	sm.mysqlAdminDSN = adminDSN
+	sm.mysqlDBName = dbName
+	sm.mysqlShared = joinPool
+	if sharedRedis == nil {
+		SetServerURL(sm.ServerURL)
+	}
+	return sm, nil
+}
+
+// sharedMySQLDB 是 MySQL 后端下 StartServerWithSharedInfra 多实例共享的测试库。
+type sharedMySQLDB struct {
+	adminDSN string
+	dbName   string
+	section  string
+	refs     int
+}
+
+var (
+	sharedMySQLMu   sync.Mutex
+	sharedMySQLPool *sharedMySQLDB
+)
+
+// releaseSharedMySQLRef 递减共享库引用；归零时 DROP 并清空池。
+func releaseSharedMySQLRef() {
+	sharedMySQLMu.Lock()
+	defer sharedMySQLMu.Unlock()
+	if sharedMySQLPool == nil {
+		return
+	}
+	sharedMySQLPool.refs--
+	if sharedMySQLPool.refs <= 0 {
+		dropMySQLDatabase(sharedMySQLPool.adminDSN, sharedMySQLPool.dbName)
+		sharedMySQLPool = nil
+	}
 }
 
 // startServer 启动测试服务器。monitorPortMode: 0=沿用模板（禁用监控端口）；
@@ -312,11 +413,13 @@ func (sm *ServerManager) Shutdown() {
 		sm.Redis.Close()
 	}
 
-	// MySQL 后端：删除本次用例创建的库（须先于全局 client 无关逻辑、在进程终止后执行）
+	// MySQL 后端：删除本次用例创建的库。共享池成员只递减引用，
+	// 最后一个实例退出时才真正 DROP。
 	if sm.mysqlAdminDSN != "" && sm.mysqlDBName != "" {
-		if db, err := sql.Open("mysql", sm.mysqlAdminDSN); err == nil {
-			db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", sm.mysqlDBName))
-			db.Close()
+		if sm.mysqlShared {
+			releaseSharedMySQLRef()
+		} else {
+			dropMySQLDatabase(sm.mysqlAdminDSN, sm.mysqlDBName)
 		}
 	}
 }
@@ -542,12 +645,21 @@ func (sm *ServerManager) GetQuotaRemaining(ownerKey string, unit string) float64
 	return golibquota.FromRedisValue(value, unit)
 }
 
+// openDB 打开被测库句柄：MySQL 后端（mysqlAdminDSN/mysqlDBName 非空）连被测库，
+// 否则读 sm.DBPath（SQLite）。供直接改写/断言库内状态的辅助方法使用。
+func (sm *ServerManager) openDB() (*sql.DB, error) {
+	if dsn := sm.MySQLDSN(); dsn != "" {
+		return sql.Open("mysql", dsn)
+	}
+	return sql.Open("sqlite-strip", sm.DBPath)
+}
+
 // UpdateQuotaPlanLastResetAt 直接更新 SQLite 中某 API-Key / Entity 对应 quota_plans.last_reset_at。
 // ownerType 取 "api_key" 或 "entity"。
 func (sm *ServerManager) UpdateQuotaPlanLastResetAt(ownerID string, ownerType string, lastResetAt time.Time) error {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return fmt.Errorf("open sqlite db: %w", err)
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -573,9 +685,9 @@ func (sm *ServerManager) UpdateQuotaPlanLastResetAt(ownerID string, ownerType st
 
 // GetQuotaPlanLastResetAt 读取某 API-Key / Entity 对应 quota_plans.last_reset_at。
 func (sm *ServerManager) GetQuotaPlanLastResetAt(ownerID string, ownerType string) (*time.Time, error) {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite db: %w", err)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -603,9 +715,9 @@ func (sm *ServerManager) GetQuotaPlanLastResetAt(ownerID string, ownerType strin
 // NullQuotaPlanLastResetAt 将某 API-Key / Entity 对应 quota_plans.last_reset_at 置为 NULL，
 // 用于模拟修复前创建的存量计划（issue #228）。
 func (sm *ServerManager) NullQuotaPlanLastResetAt(ownerID string, ownerType string) error {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return fmt.Errorf("open sqlite db: %w", err)
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -624,9 +736,9 @@ func (sm *ServerManager) NullQuotaPlanLastResetAt(ownerID string, ownerType stri
 // GetQuotaPlanLastResetAtNullable 读取某 API-Key / Entity 对应 quota_plans.last_reset_at，
 // 列为 NULL 时返回 (nil, nil)。
 func (sm *ServerManager) GetQuotaPlanLastResetAtNullable(ownerID string, ownerType string) (*time.Time, error) {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite db: %w", err)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 

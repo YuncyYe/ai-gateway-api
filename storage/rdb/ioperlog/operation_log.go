@@ -197,7 +197,10 @@ func filterToParam(filter *ioperlog.OperationLogFilter) *dao.TOperationLogParam 
 			offset = 0
 		}
 		param.Limit = []uint{uint(offset), uint(*filter.PageSize)}
-		orderBy := "created_at DESC"
+		// created_at 为秒级时间戳：同秒批量落盘的日志（异步刷盘常态）只靠
+		// created_at 排序时次序不确定（MySQL 与 SQLite 行为不同），补充
+		// id 作决胜键，保证"最新在前"稳定可判。
+		orderBy := "created_at DESC, id DESC"
 		param.OrderBy = &orderBy
 	}
 

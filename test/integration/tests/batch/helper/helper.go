@@ -67,23 +67,11 @@ func RequireBatchAPI(t *testing.T) {
 	}
 }
 
-// OpenDB 打开本测试进程的数据库：MySQL 后端（StartServerAuto /
-// StartServerWithMySQL）用 mysql 驱动连被测库；否则 sqlite-strip 驱动
-// 打开 sm.DBPath（与 testutil 初始化一致）。
+// OpenDB 打开本测试进程的数据库：委托 testutil.OpenDB（MySQL 后端用 mysql
+// 驱动连被测库；否则 sqlite-strip 打开 sm.DBPath），同一断言代码双后端零改动。
 func OpenDB(t *testing.T, sm *testutil.ServerManager) *sql.DB {
 	t.Helper()
-	var (
-		db  *sql.DB
-		err error
-	)
-	if dsn := sm.MySQLDSN(); dsn != "" {
-		db, err = sql.Open("mysql", dsn)
-	} else {
-		db, err = sql.Open("sqlite-strip", sm.DBPath)
-	}
-	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
-	return db
+	return testutil.OpenDB(t, sm)
 }
 
 // BatchTaskRow 描述 batch_tasks 直写种子（仅含测试常用列）。
