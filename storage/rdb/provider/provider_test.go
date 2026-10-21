@@ -28,6 +28,13 @@ import (
 )
 
 func setupTestStorager(t *testing.T) *RDBProviderStorager {
+	s, _ := setupTestStoragerWithDB(t)
+	return s
+}
+
+// setupTestStoragerWithDB also hands back the raw DB so tests can corrupt or
+// inspect column values directly (e.g. the api_keys text column).
+func setupTestStoragerWithDB(t *testing.T) (*RDBProviderStorager, *sql.DB) {
 	// The DAO layer consults stateful.DefaultConfig when recording SQL.
 	if stateful.DefaultConfig == nil {
 		stateful.DefaultConfig = &stateful.Config{}
@@ -64,7 +71,7 @@ CREATE TABLE providers (
 		return lib.NewDBContext(ctx, db), nil
 	})
 
-	return NewRDBProviderStorager(factory)
+	return NewRDBProviderStorager(factory), db
 }
 
 func TestToDAOParamForUpdate_OmittedFieldsStayNil(t *testing.T) {
@@ -337,4 +344,38 @@ func TestRDBProviderStorager_InstanceSourceRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "desc", one.Description)
 	assert.Empty(t, one.K8sInstancePool)
+}
+
+// api_keys is a text column (it holds an enc$v1$ envelope at rest), so the DB
+// no longer rejects malformed JSON for us: corruption must surface as an error
+// instead of silently reading back as "no keys" (issue #264).
+func TestRDBProviderStorager_FetchProviderRejectsCorruptKeys(t *testing.T) {
+	ctx := context.Background()
+	s, db := setupTestStoragerWithDB(t)
+
+	_, err := s.CreateProvider(ctx, &iprovider.ProviderParam{
+		Name:           lib.PString("p1"),
+		Keys:           []iprovider.ProviderKey{{Name: "k1", Key: "sk-abc"}},
+		InstancePool:   []iprovider.ProviderInstance{{Addr: "10.0.0.1", Port: 9002, Weight: 100}},
+		ModelProtocols: []string{"openai"},
+	})
+	require.NoError(t, err)
+
+	_, err = db.Exec(`UPDATE providers SET api_keys = 'not-json' WHERE name = 'p1'`)
+	require.NoError(t, err)
+
+	one, err := s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("p1")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse api_keys")
+	assert.Nil(t, one)
+
+	// Empty and null are legitimate "no keys" values and keep working.
+	for _, raw := range []string{"", "null", "[]"} {
+		_, err = db.Exec(`UPDATE providers SET api_keys = ? WHERE name = 'p1'`, raw)
+		require.NoError(t, err)
+		one, err = s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("p1")})
+		require.NoError(t, err)
+		require.NotNil(t, one)
+		assert.Empty(t, one.Keys)
+	}
 }

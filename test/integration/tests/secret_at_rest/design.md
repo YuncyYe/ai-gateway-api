@@ -21,19 +21,27 @@ DB 落盘加密是**存储层透明机制**（非业务域资源），被测面�
 | 热加载 | monitor 端口 `POST /reload/security`：重读 keyring 文件 → 校验 → 原子替换，失败保留旧 keyring |
 | sweep 收敛 | `POST /open-api/v1/security/reencrypt-sweeps`（异步任务，锁表单例互斥）+ `GET .../{task_id}`（含按表 summary）+ `GET .../reencrypt-sweeps`（历史列表：status/mode/scope/dry_run/started_at 区间过滤 + page/page_size 分页 + sort_by/sort_order，默认 started_at 倒序；2026-10-10 新增）；`mode=reencrypt`（收敛到 active 钥）/ `decrypt`（回滚预案，剥 marker 回明文） |
 
-**与常规模块的差异**：断言的核心证据在 **DB 文件字节层面**，而非 API 报文——本模块以
-`database/sql` + `sqlite-strip` 驱动（与 `testutil.InitTestDB` 同款，经 `replace` 引入的
-主模块 `stateful` 注册）**绕过服务进程直读 SQLite**，断言：
+**与常规模块的差异**：断言的核心证据在 **DB 字节层面**，而非 API 报文——本模块以
+`database/sql` **绕过服务进程直读被测库**（SQLite 用 `sqlite-strip` 驱动读库文件；MySQL 用
+`mysql` 驱动读测试库，DSN 由 `ServerManager.MySQLDSN()` 提供），断言：
 
 - 无 keyring：两列均为明文且不含 `enc$v1$` 前缀；
 - 有 keyring：两列均为 `enc$v1$` 信封，且 base64 解码首字节 keyID 等于预期（写死断言
   keyID=1 / 轮换后全部 keyID=2，而非仅断言"是密文"）；
 - 业务透明性：OpenAPI 读回与 InnerAPI 导出均为明文（且报文不含 `enc$v1$` 密文泄漏）。
 
-**实例模型**：各用例独立 `testutil.StartServerWithMonitor(extraTOML)`（本模块全部用例
+**实例模型**：各用例独立 `testutil.StartServerWithMonitorAuto(extraTOML)`（本模块全部用例
 需要 monitor 端口做 `/reload/security` 或保证能力一致），keyring 文件写在 `t.TempDir()`，
 extraTOML 注入 `[Security]` 段（路径经 `filepath.ToSlash` 转义）。共享 DB 场景
-（SAR-1-003）使用 `StartServerWithSharedInfra`。
+（SAR-1-003）使用 `StartServerWithSharedInfra`，仅 SQLite 后端可跑（MySQL 无等价形态，
+`requireSQLiteBackend` 跳过）。
+
+**后端选择**：设置 `AIAPI_MYSQL_DSN`（管理员 DSN，不带库名，形如
+`root:pass@tcp(127.0.0.1:3306)/`）时以 MySQL 启动——自动建库 `ai_gateway_it_*`、执行
+`db_ddl.sql`、用毕 DROP；否则保持 SQLite。**MySQL 是本模块的关键回归面**：
+`providers.api_keys` 若声明为 `JSON`，整列 `enc$v1$` 信封在 MySQL 严格模式下报
+`Error 3140`（写接口整条 500、sweep 任务 failed），而 SQLite 的 `TEXT` 列不校验 JSON，
+在 SQLite 上永远测不出来（issue #264）。
 
 ## 2. 关键实现技巧
 
@@ -57,8 +65,10 @@ extraTOML 注入 `[Security]` 段（路径经 `filepath.ToSlash` 转义）。共
 | SAR-3-001 | sweep 列表过滤与字段 | keyring（active=1）启动 | 顺序触发 dry-run（scope=providers）与正式任务并各等待 succeeded → 无参列表：HTTP 200 + `total=2` + 两任务均出现 + 元素字段完整（status/mode/dry_run/scope/active_key_id/started_at/finished_at/duration_ms/summary 按表分组）+ 报文含 `created_by` 键 + dry-run 任务 `error="dry_run"` → `status=succeeded`/`running` 过滤命中数 2/0 → `dry_run=true` 仅命中 dry-run 任务 → `mode=reencrypt`/`decrypt` 命中数 2/0 → `start_time`/`end_time` 闭区间命中 2，区间外（end 早于全部任务 start / start 晚于全部任务 start）命中 0 |
 | SAR-3-002 | sweep 列表分页与排序 | keyring（active=1）启动 | 顺序触发 3 个 dry-run 任务 → `page_size=2` 翻两页：并集 == 触发集合（无序比对，规避 started_at 同秒 tie）+ `total` 恒 3 → `page=99` 超界：200 + 空页 + `total` 不变 → `page_size=500` 截断为 100（响应回显）→ `sort_by=task_id&sort_order=asc`：全列表 task_id 严格升序 → `sort_by=evil&sort_order=sideways` 回落默认（首元素与无参列表一致） |
 | SAR-3-003 | sweep 列表参数校验 | keyring（active=1）启动 + 1 个已完成任务 | `status=done` / `mode=rot13` / `scope=everything` / `start_time` 非 RFC3339 / `end_time` 非 RFC3339 / `end_time` 早于 `start_time` → 各 HTTP 422 + `ErrNum=422` + `ErrMsg` 字段级归因 → 合法但无匹配（`status=failed`）：200 + 空列表 |
+| SAR-4-001 | Provider 写路径（MySQL 严格模式列类型，issue #264） | keyring（active=1）启动；MySQL 后端时额外校验列类型 | `POST /providers`（含 key）2xx → 直读 DB `providers.api_keys` 为 `enc$v1$` 信封且 keyID=1 → MySQL 下断言 `information_schema` 的 `DATA_TYPE != json` → `PATCH /providers/{name}`（含 keys + instance_pool + model_protocols）2xx 且信封刷新 → `POST /sweeps {scope:providers, mode:reencrypt}` 至 succeeded，全部 provider 行（含 seed `deepseek` 的明文 `[]`）均为信封 → `GET /providers/{name}` 读回明文、报文无信封。SQLite 后端同样执行（仅跳过列类型断言） |
 
-> 用例计数：9（SAR-1-xxx × 3、SAR-2-xxx × 3、SAR-3-xxx × 3）。编号在实现 `_test.go` 中以注释标注（`// SAR-x-xxx`）；SAR-3-xxx 在 `sweeps_list_test.go`。
+> 用例计数：10（SAR-1-xxx × 3、SAR-2-xxx × 3、SAR-3-xxx × 3、SAR-4-xxx × 1）。编号在实现 `_test.go` 中以注释标注（`// SAR-x-xxx`）；SAR-3-xxx 在 `sweeps_list_test.go`。
+> SAR-1-003 仅 SQLite 后端可执行；其余用例在两套后端下均执行。
 
 ## 4. 实现与合同偏差（测试断言以真实行为为准，合同建议后续对齐）
 
@@ -73,5 +83,7 @@ extraTOML 注入 `[Security]` 段（路径经 `filepath.ToSlash` 转义）。共
 cd ai-gateway-api && go build -o ai-gateway-api.exe .   # 先重建二进制
 cd ai-gateway-api/test/integration
 go vet ./tests/secret_at_rest/
-go test -v -count=1 -timeout 600s ./tests/secret_at_rest/...
+go test -v -count=1 -timeout 600s ./tests/secret_at_rest/...                 # SQLite 后端
+AIAPI_MYSQL_DSN='root:pass@tcp(127.0.0.1:3306)/' \
+  go test -v -count=1 -timeout 900s ./tests/secret_at_rest/...               # MySQL 后端（关键回归面）
 ```

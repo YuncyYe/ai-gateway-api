@@ -124,7 +124,7 @@ AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
 
 未设置 `AIAPI_MYSQL_DSN` 时上述用例自动 Skip；不带 `-tags mysql` 时不编译。
 
-### 双后端全量运行（StartServerAuto）
+### 双后端全量运行（StartServerAuto / StartServerWithMonitorAuto）
 
 批量特性新增包（`tests/batch/*`、`tests/model_price/batch_price`、
 `tests/api_key/batch_limits`）的 TestMain 使用 `testutil.StartServerAuto`：
@@ -139,6 +139,17 @@ AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
 # 三个模块全量用例跑到 MySQL 上（新包自动切换后端，既有包仍为 SQLite）
 AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
   go test -count=1 -timeout 900s ./tests/batch/... ./tests/model_price/... ./tests/api_key/...
+```
+
+`tests/secret_at_rest/`（DB 落盘加密）使用 `testutil.StartServerWithMonitorAuto`
+——与上面同一套后端选择，额外启用监控端口（`/reload/security`）。**该模块推荐在
+MySQL 后端上跑一遍**：`providers.api_keys` 若是 `JSON` 列，整列 `enc$v1$` 信封在
+MySQL 严格模式下写入报 `Error 3140`，而 SQLite 的 `TEXT` 列不校验 JSON、测不出来
+（issue #264，用例 SAR-4-001）：
+
+```bash
+AIAPI_MYSQL_DSN="root:pass@tcp(127.0.0.1:3306)/" \
+  go test -count=1 -timeout 900s ./tests/secret_at_rest/...
 ```
 
 ### 4. 清理运行时数据

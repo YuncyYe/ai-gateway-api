@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/bfenetworks/go-lib/log"
@@ -296,6 +297,125 @@ func anyCiphertextPresent(db *sql.DB) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// encryptedColumns lists the columns that receive whole-value enc$v1$
+// envelopes at the DAO boundary. A JSON column can never hold one: MySQL
+// validates JSON syntax on write, so the DAO's "one envelope per column" write
+// fails with Error 3140 and the whole INSERT/UPDATE is rejected (issue #264).
+var encryptedColumns = []struct{ Table, Column string }{
+	{Table: "providers", Column: "api_keys"},
+	{Table: "api_keys", Column: "api_key"},
+}
+
+// CheckEncryptedColumnTypes refuses to start when an envelope-carrying column
+// is still declared as JSON while a keyring is loaded — that combination can
+// only produce run-time write failures. Without a keyring the DAO writes
+// plaintext JSON, which a JSON column accepts, so the check is skipped there
+// and gradual enable keeps working.
+func CheckEncryptedColumnTypes() error {
+	if SecretRing() == nil {
+		return nil
+	}
+	db, err := BFEDB()
+	if err != nil {
+		return err
+	}
+
+	var inspect func(*sql.DB) ([]string, error)
+	switch dbDriver() {
+	case DriverMySQL:
+		inspect = jsonTypedColumnsMySQL
+	case DriverSQLite, "sqlite-strip":
+		inspect = jsonTypedColumnsSQLite
+	default:
+		// Unknown backend: do not invent a startup failure.
+		return nil
+	}
+	bad, err := inspect(db)
+	if err != nil {
+		return fmt.Errorf("security: inspect encrypted column types: %v", err)
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("security: column(s) %s declared as JSON but hold enc$v1$ envelopes; "+
+		"MySQL rejects the envelope on write (Error 3140) and every provider write fails. "+
+		"Run the schema change in database/db_ddl_upgrade_to_0.0.11.sql §1.6 "+
+		"(ALTER TABLE providers MODIFY COLUMN api_keys MEDIUMTEXT ..., ALGORITHM=COPY, LOCK=SHARED) "+
+		"and restart", strings.Join(bad, ", "))
+}
+
+// dbDriver returns the configured driver of the bfe_db datasource.
+func dbDriver() string {
+	if DefaultConfig == nil {
+		return ""
+	}
+	if conf := DefaultConfig.Databases[bfeDBName]; conf != nil {
+		return conf.Driver
+	}
+	return ""
+}
+
+// jsonTypedColumnsMySQL returns the envelope columns declared as JSON, read
+// from information_schema. Absent tables/columns are skipped: other startup
+// checks own that failure.
+func jsonTypedColumnsMySQL(db *sql.DB) ([]string, error) {
+	ctx := context.Background()
+	var bad []string
+	for _, col := range encryptedColumns {
+		var dataType string
+		err := db.QueryRowContext(ctx,
+			`SELECT DATA_TYPE FROM information_schema.COLUMNS
+			 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+			col.Table, col.Column).Scan(&dataType)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(dataType, "json") {
+			bad = append(bad, col.Table+"."+col.Column)
+		}
+	}
+	return bad, nil
+}
+
+// jsonTypedColumnsSQLite is the same check for SQLite deployments (the
+// shipped schema uses TEXT; a hand-migrated JSON column is still caught).
+func jsonTypedColumnsSQLite(db *sql.DB) ([]string, error) {
+	ctx := context.Background()
+	var bad []string
+	for _, col := range encryptedColumns {
+		rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", col.Table))
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var (
+				cid       int
+				name      string
+				declType  string
+				notNull   int
+				dfltValue sql.NullString
+				pk        int
+			)
+			if err := rows.Scan(&cid, &name, &declType, &notNull, &dfltValue, &pk); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if name == col.Column && strings.EqualFold(strings.TrimSpace(declType), "json") {
+				bad = append(bad, col.Table+"."+col.Column)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return bad, nil
 }
 
 // LoadPasswordHashCost validates [Security].PasswordHashCost and injects it

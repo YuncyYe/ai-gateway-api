@@ -14,11 +14,18 @@
 
 // DB 落盘加密（密钥静态加密）集成测试（模块前缀 SAR，场景登记见同目录 design.md）。
 // 被测对象为敏感列（providers.api_keys / api_keys.api_key）的透明加解密与
-// keyrotate 收敛任务；核心断言手段是绕过服务进程直读 SQLite 文件
-// （database/sql + sqlite-strip 驱动，与 testutil.InitTestDB 同款）：
+// keyrotate 收敛任务；核心断言手段是绕过服务进程直读被测库
+// （database/sql：SQLite 用 sqlite-strip 驱动，MySQL 用 mysql 驱动）：
 // 无 keyring 时两列必须明文、配置 keyring 后必须为 enc$v1$ 信封且 keyID
-// 正确、轮换收敛后全部行 keyID 切到 active。各用例独立 StartServerWithMonitor
-// 实例注入 [Security] 段（keyring 文件写在 t.TempDir()），用例内步骤串行。
+// 正确、轮换收敛后全部行 keyID 切到 active。各用例独立
+// StartServerWithMonitorAuto 实例注入 [Security] 段（keyring 文件写在
+// t.TempDir()），用例内步骤串行。
+//
+// 后端选择：设置 AIAPI_MYSQL_DSN（管理员 DSN，不带库名，形如
+// root:pass@tcp(127.0.0.1:3306)/）时以 MySQL 启动（自动建库、执行 db_ddl.sql、
+// 用毕 DROP），否则保持 SQLite。MySQL 后端是本模块的关键回归面：
+// providers.api_keys 若是 JSON 列，整列 enc$v1$ 信封写入必报
+// Error 3140（issue #264），而 SQLite 的 TEXT 列不校验 JSON、永远测不出来。
 package secret_at_rest_test
 
 import (
@@ -37,6 +44,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xcrypto"
 	"github.com/stretchr/testify/assert"
@@ -90,23 +98,41 @@ func securitySectionTOML(keyFile string) string {
 func startSARServer(t *testing.T, extraTOML string) *testutil.ServerManager {
 	t.Helper()
 
-	sm, err := testutil.StartServerWithMonitor(extraTOML)
+	sm, err := testutil.StartServerWithMonitorAuto(extraTOML)
 	require.NoError(t, err)
 	t.Cleanup(sm.Shutdown)
 	testutil.SetServerURL(sm.ServerURL)
 	return sm
 }
 
-// openRawDB 直读服务端 SQLite 文件；busy_timeout 与 createTempConfig 同款，
-// 避免与后台审计刷盘瞬态争用写锁。
-func openRawDB(t *testing.T, dbPath string) *sql.DB {
+// openRawDB 直读被测库：MySQL 后端（AIAPI_MYSQL_DSN）用 mysql 驱动连测试库，
+// 否则读服务端 SQLite 文件（busy_timeout 与 createTempConfig 同款，避免与后台
+// 审计刷盘瞬态争用写锁）。两套后端下断言语义一致，故统一收口到本函数。
+func openRawDB(t *testing.T, sm *testutil.ServerManager) *sql.DB {
 	t.Helper()
 
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(dbPath))
-	db, err := sql.Open("sqlite-strip", dsn)
+	dsn := sm.MySQLDSN()
+	if dsn != "" {
+		db, err := sql.Open("mysql", dsn)
+		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+
+	sqliteDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(sm.DBPath))
+	db, err := sql.Open("sqlite-strip", sqliteDSN)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// requireSQLiteBackend 跳过依赖「共享 SQLite 文件」基础设施的用例
+// （MySQL 后端没有等价的 StartServerWithSharedInfra 形态）。
+func requireSQLiteBackend(t *testing.T, sm *testutil.ServerManager) {
+	t.Helper()
+	if sm.MySQLDSN() != "" {
+		t.Skip("skip: case relies on shared SQLite file infra; run without AIAPI_MYSQL_DSN")
+	}
 }
 
 // allProviderSecrets 返回 providers.name -> api_keys 列原文（含 seed 行）。
@@ -366,7 +392,7 @@ func TestSAR1_001_PlaintextWithoutKeyring(t *testing.T) {
 	sm := startSARServer(t, "")
 	providerName, apiKeyID, apiKeyVal := createSecretFixtures(t)
 
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 
 	// 直读 SQLite：providers.api_keys 明文且不含 enc$v1$（seed deepseek 的 '[]' 亦断言）
 	provSecrets := allProviderSecrets(t, db)
@@ -396,7 +422,7 @@ func TestSAR1_002_EncryptedAtRestTransparentDecrypt(t *testing.T) {
 
 	providerName, apiKeyID, apiKeyVal := createSecretFixtures(t)
 
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 
 	// 直读 DB：两列均 enc$v1$ 信封且内嵌 keyID=1
 	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys")
@@ -419,13 +445,16 @@ func TestSAR1_002_EncryptedAtRestTransparentDecrypt(t *testing.T) {
 // 共享同一 DB 文件与 Redis、但不配置 [Security]——CheckSecretAtRest 发现密文
 // 却无 keyring，进程 fail-fast 退出，waitForReady 等满 10s 超时返回 error。
 // 注：这是全模块唯一接受 10s 超时的用例（进程退出后端口永不就绪，见 design.md）。
+// 仅 SQLite 后端可执行：共享 DB 文件的基础设施（StartServerWithSharedInfra）
+// 在 MySQL 后端没有等价形态。
 func TestSAR1_003_FailFastNoKeyringOnEncryptedDB(t *testing.T) {
 	krPath := filepath.Join(t.TempDir(), "master.keys")
 	writeKeyringFile(t, krPath, 1, map[int][]byte{1: newMasterKey(t)})
 	sm := startSARServer(t, securitySectionTOML(krPath))
+	requireSQLiteBackend(t, sm)
 
 	providerName, _, _ := createSecretFixtures(t)
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys")
 
 	_, err := testutil.StartServerWithSharedInfra(sm.Redis, sm.DBPath)
@@ -444,7 +473,7 @@ func TestSAR2_001_RotationConvergeFullChain(t *testing.T) {
 
 	providerName, apiKeyID, apiKeyVal := createSecretFixtures(t)
 
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys(before)")
 	requireEnvelope(t, apiKeySecret(t, db, apiKeyID), 1, "api_keys.api_key(before)")
 
@@ -505,7 +534,7 @@ func TestSAR2_002_DecryptRollback(t *testing.T) {
 
 	providerName, apiKeyID, apiKeyVal := createSecretFixtures(t)
 
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys(before)")
 	requireEnvelope(t, apiKeySecret(t, db, apiKeyID), 1, "api_keys.api_key(before)")
 
@@ -539,7 +568,7 @@ func TestSAR2_003_SweepAPISemantics(t *testing.T) {
 
 	_, _, _ = createSecretFixtures(t)
 
-	db := openRawDB(t, sm.DBPath)
+	db := openRawDB(t, sm)
 	seedBulkProviders(t, db, 300)
 
 	// T1：scope=all 正式收敛（300+ 行明文待重写，任务持续时间最长化）
@@ -593,7 +622,7 @@ func seedBulkProviders(t *testing.T, db *sql.DB, n int) {
 	require.NoError(t, err)
 	stmt, err := tx.Prepare(`
 		INSERT INTO providers (name, description, api_keys, instance_pool, model_protocols)
-		VALUES (?, 'sar bulk row', '["bulk-key"]', '[]', '[]')`)
+		VALUES (?, 'sar bulk row', '[{"name":"bulk","key":"bulk-key"}]', '[]', '[]')`)
 	require.NoError(t, err)
 	for i := 0; i < n; i++ {
 		_, err := stmt.Exec(fmt.Sprintf("sar-bulk-%s-%04d", testutil.RandomString(6), i))
@@ -601,4 +630,59 @@ func seedBulkProviders(t *testing.T, db *sql.DB, n int) {
 	}
 	require.NoError(t, stmt.Close())
 	require.NoError(t, tx.Commit())
+}
+
+// SAR-4-001 MySQL 严格模式下的 Provider 写路径（issue #264）：
+// providers.api_keys 承载「整列一条 enc$v1$ 信封」，列类型必须为文本类；
+// 若仍为 JSON，MySQL 严格模式写入报 Error 3140、POST/PATCH 整条 500。
+// 断言链：建 → 列类型 → 改（keys）→ sweep 收敛存量明文 → 读回明文。
+// SQLite 后端同样执行（其 TEXT 列天然通过），MySQL 后端额外锁定列类型。
+func TestSAR4_001_ProviderWritePathMySQLStrict(t *testing.T) {
+	krPath := filepath.Join(t.TempDir(), "master.keys")
+	writeKeyringFile(t, krPath, 1, map[int][]byte{1: newMasterKey(t)})
+	sm := startSARServer(t, securitySectionTOML(krPath))
+
+	// 1) 创建（含 keys）：修复前 MySQL 上必然 HTTP 500 + Error 3140
+	providerName, _, _ := createSecretFixtures(t)
+
+	db := openRawDB(t, sm)
+	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys(create)")
+
+	// 2) 列类型断言（MySQL 专属）：不允许 json
+	if sm.MySQLDSN() != "" {
+		var dataType string
+		err := db.QueryRow(`SELECT DATA_TYPE FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'providers' AND COLUMN_NAME = 'api_keys'`).
+			Scan(&dataType)
+		require.NoError(t, err)
+		require.NotEqual(t, "json", strings.ToLower(dataType),
+			"providers.api_keys must be a text type (see db_ddl_upgrade_to_0.0.11.sql §1.6)")
+	}
+
+	// 3) PATCH 携带 keys：与创建同一条 DAO 写入路径（provider.go toDAOParamForUpdate）。
+	//    契约上 instance_pool / model_protocols 在 instance_pool 模式下必填，故一并携带。
+	r := doRaw(t, http.MethodPatch, sm.ServerURL+"/open-api/v1/providers/"+providerName,
+		map[string]interface{}{
+			"keys": []interface{}{map[string]interface{}{"name": "key-rotated", "key": providerPlainKey}},
+			"instance_pool": []interface{}{
+				map[string]interface{}{"addr": "10.0.0.1", "weight": 100, "port": 8080},
+			},
+			"model_protocols": []string{"openai"},
+		})
+	require.Equal(t, http.StatusOK, r.Status, "raw=%s", r.Raw)
+	require.Equal(t, 200, r.ErrNum, "raw=%s", r.Raw)
+	requireEnvelope(t, allProviderSecrets(t, db)[providerName], 1, "providers.api_keys(patch)")
+
+	// 4) reencrypt sweep（scope=providers）：存量明文行（seed deepseek 的 '[]'）
+	//    在 MySQL 上走同一条 UPDATE，修复前同样 3140 导致任务 failed
+	r, trig := triggerSweep(t, sm.ServerURL, map[string]interface{}{"scope": "providers", "mode": "reencrypt"})
+	require.Equal(t, http.StatusOK, r.Status, "raw=%s", r.Raw)
+	require.Equal(t, 200, r.ErrNum, "raw=%s", r.Raw)
+	waitSweepSucceeded(t, sm.ServerURL, trig.TaskID, 30*time.Second)
+	for name, val := range allProviderSecrets(t, db) {
+		requireEnvelope(t, val, 1, "providers.api_keys(sweep, "+name+")")
+	}
+
+	// 5) 读回业务明文（透明解密），报文不含信封
+	assertProviderKeyPlaintext(t, providerName)
 }

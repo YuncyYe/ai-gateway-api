@@ -40,6 +40,12 @@ import (
 // 返回的 ServerManager 不接管全局 client（调用方应以 sm.ServerURL 自建
 // Client）；Shutdown 时自动 DROP DATABASE。
 func StartServerWithMySQL(adminDSN string) (*ServerManager, error) {
+	return startServerWithMySQL(adminDSN, "", 0)
+}
+
+// startServerWithMySQL 是 MySQL 后端的统一入口：monitorPortMode 语义同
+// startServer（1=启用随机监控端口），extraTOML 追加在默认配置之后。
+func startServerWithMySQL(adminDSN, extraTOML string, monitorPortMode int) (*ServerManager, error) {
 	if strings.TrimSpace(adminDSN) == "" {
 		return nil, fmt.Errorf("adminDSN is empty")
 	}
@@ -112,7 +118,7 @@ ConnMaxLifetimeInMs  = 5000000`,
 		strconv.Quote(cfg.User),
 		strconv.Quote(cfg.Passwd))
 
-	sm, err := startServer(nil, "", "", &dbPatch{driver: "mysql", section: section}, 0)
+	sm, err := startServer(nil, "", extraTOML, &dbPatch{driver: "mysql", section: section}, monitorPortMode)
 	if err != nil {
 		if admin, oErr := sql.Open("mysql", adminDSN); oErr == nil {
 			admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
@@ -152,6 +158,24 @@ func StartServerAuto() (*ServerManager, error) {
 		return sm, nil
 	}
 	return StartServer()
+}
+
+// StartServerWithMonitorAuto 是 StartServerAuto 的「启用监控端口」版本：
+// 设置 AIAPI_MYSQL_DSN 时以 MySQL 启动（monitorPortMode=1，MonitorURL 可用），
+// 否则等价 StartServerWithMonitor（SQLite）。extraTOML 原样注入两套后端，
+// 使 secret_at_rest 这类需要 [Security] 段 + /reload/security 的用例
+// 在两套后端下同一份实现运行。
+func StartServerWithMonitorAuto(extraTOML string) (*ServerManager, error) {
+	dsn := strings.TrimSpace(os.Getenv("AIAPI_MYSQL_DSN"))
+	if dsn != "" {
+		sm, err := startServerWithMySQL(dsn, extraTOML, 1)
+		if err != nil {
+			return nil, err
+		}
+		SetServerURL(sm.ServerURL)
+		return sm, nil
+	}
+	return StartServerWithMonitor(extraTOML)
 }
 
 // execDDLFile 在已选定的库上执行项目 db_ddl.sql。该文件开头含库级语句

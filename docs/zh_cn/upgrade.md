@@ -18,6 +18,21 @@
 
 > 完整的 v0.0.10 → v0.0.11 增量升级脚本见 `database/db_ddl_upgrade_to_0.0.11.sql`（覆盖 EPP runtime、api_key_hash、k8s 实例池、批量任务、ai-cache/context/mirror/intent 等全部 schema 变更；`api_key_hash` 回填等手动步骤见脚本末尾）。新装库请直接执行 `db_ddl.sql`。下面仅以 ai-cache 语义缓存二期为例给出存量加列语句。
 
+> **启用 DB 落盘加密的部署必读（issue #264）**：`providers.api_keys` 在脚本 §1.6 中由 `JSON` 改为
+> `MEDIUMTEXT`（列内存的是整列 `enc$v1$` 信封，不是合法 JSON，MySQL 严格模式会拒绝写入 →
+> Provider 创建/修改 500、`scope=providers` 的收敛任务 failed）。该 `ALTER` 使用
+> `ALGORITHM=COPY, LOCK=SHARED`，迁移期间阻塞写、允许读，请在发布窗口执行。
+> **已在 2026-10-20 之前执行过本脚本的存量库**，只需补执行 §1.6 这一条语句（脚本非幂等，勿整体重跑）：
+>
+> ```
+> ALTER TABLE `providers`
+>   MODIFY COLUMN `api_keys` MEDIUMTEXT NULL COMMENT 'API key 列表（列加密整列信封，enc$v1$ 前缀；无前缀为明文 JSON 兼容）',
+>   ALGORITHM=COPY, LOCK=SHARED;
+> ```
+>
+> 新版本启动时会自检该列类型（仅当配置了 keyring）：若仍为 `JSON`，进程拒绝启动并在错误信息中给出上述语句，
+> 而不是等到调用 Provider 接口时才 500。SQLite 部署无需任何操作（该列本就是 `TEXT`）。
+
 ```
 ALTER TABLE ai_cache_rules ADD COLUMN `enable_semantic_cache` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否启用语义缓存: 0-否, 1-是（二期）';
 

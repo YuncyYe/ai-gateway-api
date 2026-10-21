@@ -67,6 +67,12 @@ lib/xcrypto/
 - model/endpoints 全程明文，无感知。
 - `APIKeyFilter.Key` → storager 层转 `KeyHash` 下发 SQL（`model` 零改动）；按值唯一性校验改走 hash。
 
+> **修订注记（2026-10-21，issue #264，见 `modifications/2026-10-21-issue-264-provider-api-keys-column-type/`）**：
+> 本节「Marshal 后 Encrypt」使 `providers.api_keys` 整列成为**一条信封**，而该列在建库 SQL 中声明为 `JSON`；
+> MySQL 严格模式对 `JSON` 列做语法校验 → `Error 3140`，Provider 写接口整条失败。结论：「信封列必须是文本类」
+> 是 §4 的**隐含前置条件**，不是可选优化——`providers.api_keys` 改为 `MEDIUMTEXT`，并新增启动期列类型自检
+> `stateful.CheckEncryptedColumnTypes`（见 §5 下方补注）。
+
 ## 5. DDL（双写）
 
 ```sql
@@ -100,6 +106,13 @@ CREATE TABLE keyrotate_sweep_lock (
 );
 INSERT INTO keyrotate_sweep_lock (id) VALUES (1);   -- sqlite 同
 ```
+
+> **补注（2026-10-21，issue #264）**：本文 §5 的变更清单漏了信封列的**列类型**。实际落地为：
+> `providers.api_keys` 由 `JSON` 改为 `MEDIUMTEXT`（新建库 `db_ddl.sql`，存量库
+> `database/db_ddl_upgrade_to_0.0.11.sql` §1.6，`ALGORITHM=COPY, LOCK=SHARED`）；SQLite 侧 `TEXT` 不变。
+> 另新增启动期自检 `stateful.CheckEncryptedColumnTypes`（keyring 已加载时校验
+> `providers.api_keys` / `api_keys.api_key` 非 `JSON`，命中即拒启动），防止「换二进制未改表结构」的
+> 半升级部署以运行期 500 暴露。
 
 ## 6. sweep 管理器（`model/keyrotate/`）
 
@@ -166,6 +179,8 @@ COMMIT；游标推进；批级死锁回退重试（业务优先）
 
 - 单测：xcrypto 往返/marker/多 keyID/HKDF/keyring 文件加载；provider/api_key storager 明文兼容、写后密文、读回一致；hash filter；sweep 判定与双模式；锁表互斥与接管（可注入时钟）。
 - 集成 `test/integration/tests/secret_at_rest/`：**直读 SQLite 文件断言无明文与 `enc$v1$` 前缀**；API 读回/导出明文一致；错误密钥启动 fail-fast；导入唯一性回归；**轮换全链路：热加载 → dry-run（核对 active_key_id）→ 正式 sweep → 摘钥 → 旧钥读失败**；**回滚预案：mode=decrypt → 复核无残留 → 模拟旧版本明文直读**；**多实例（共享 DB）：A 触发 B 查询、B 重复触发 409、杀执行实例后接管**。
+- **MySQL 严格模式（2026-10-21 补，issue #264）**：SAR 模块支持 MySQL 后端（`AIAPI_MYSQL_DSN`），新增用例断言
+  Provider 建/改在真实 MySQL 下 2xx、落库为信封、列类型非 `JSON`，并覆盖 `scope=providers` 的 sweep 收敛。
 - 回归：既有 api_key/provider 全部用例。
 
 ## 10. WBS
