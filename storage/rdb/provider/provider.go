@@ -286,13 +286,21 @@ func fromDAO(one *dao.TProvider) (*iprovider.Provider, error) {
 		k8sPoolName = &one.K8sPoolName
 	}
 
+	keys, err := unmarshalKeys(keysJSON)
+	if err != nil {
+		// The api_keys column is a text column (it carries an enc$v1$
+		// envelope at rest), so the DB no longer rejects malformed JSON for
+		// us: surface the corruption instead of silently dropping the keys.
+		return nil, fmt.Errorf("provider %s: parse api_keys: %v", one.Name, err)
+	}
+
 	return &iprovider.Provider{
 		ID:              one.ID,
 		Name:            one.Name,
 		Description:     one.Description,
 		ModelEndpoint:   unmarshalEndpoint(one.ModelEndpoint),
 		Models:          unmarshalStringSlice(one.Models),
-		Keys:            unmarshalKeys(keysJSON),
+		Keys:            keys,
 		InstancePool:    unmarshalInstancePool(one.InstancePool),
 		InstanceSource:  instanceSource,
 		K8sPoolName:     k8sPoolName,
@@ -432,15 +440,17 @@ func unmarshalStringSlice(s string) []string {
 	return rst
 }
 
-func unmarshalKeys(s string) []iprovider.ProviderKey {
+func unmarshalKeys(s string) ([]iprovider.ProviderKey, error) {
 	if s == "" || s == "null" {
-		return nil
+		return nil, nil
 	}
 	var rst []iprovider.ProviderKey
 	if err := json.Unmarshal([]byte(s), &rst); err != nil {
-		return nil
+		// Deliberately do not echo the value: it may be plaintext key
+		// material or an envelope.
+		return nil, fmt.Errorf("invalid key list json")
 	}
-	return rst
+	return rst, nil
 }
 
 func unmarshalInstancePool(s string) []iprovider.ProviderInstance {

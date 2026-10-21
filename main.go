@@ -113,6 +113,13 @@ func main() {
 		stateful.Exit("CheckSecretAtRest", err, -1)
 	}
 
+	// A keyring plus a JSON-typed envelope column can only produce run-time
+	// write failures (Error 3140), so refuse to start with an actionable
+	// message instead (issue #264).
+	if err := stateful.CheckEncryptedColumnTypes(); err != nil {
+		stateful.Exit("CheckEncryptedColumnTypes", err, -1)
+	}
+
 	serverStartUp()
 }
 

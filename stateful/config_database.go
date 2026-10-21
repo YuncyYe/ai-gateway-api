@@ -29,6 +29,9 @@ const (
 	DriverMySQL      = "mysql"
 	DriverSQLite     = "sqlite"
 	DriverClickHouse = "clickhouse"
+
+	// bfeDBName is the datasource key of the control-plane database.
+	bfeDBName = "bfe_db"
 )
 
 type DbConfig struct {
@@ -140,7 +143,7 @@ func BFEDB(db ...*sql.DB) (*sql.DB, error) {
 		return db[0], nil
 	}
 
-	return DbGet("bfe_db")
+	return DbGet(bfeDBName)
 }
 
 func NewBFEDBContext(ctx context.Context, ops ...*lib.Op) (*lib.DBContext, error) {

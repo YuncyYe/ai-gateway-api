@@ -45,6 +45,14 @@ ALTER TABLE `providers`
 ALTER TABLE `rate_limit_policies`
   ADD COLUMN `batch_limits` TEXT COMMENT '批量限流配置（JSON对象）：max_create_rpm/max_active_batches/max_file_bytes/max_file_lines；省略/NULL=该策略不参与批量限流';
 
+-- 1.6 providers：api_keys 列扩容（加密态存储，issue #264）
+-- 该列入库的是「整列一条 enc$v1$ 信封」，而原声明 JSON：MySQL 严格模式对 JSON 列做语法校验，
+-- 信封不是合法 JSON → Error 3140 → Provider 创建/修改整条失败。JSON<->文本只能 COPY 算法，
+-- COPY 必须带锁（LOCK=SHARED：允许读、阻塞写）；providers 行数很小，锁窗口以毫秒计。
+ALTER TABLE `providers`
+  MODIFY COLUMN `api_keys` MEDIUMTEXT NULL COMMENT 'API key 列表（列加密整列信封，enc$v1$ 前缀；无前缀为明文 JSON 兼容）',
+  ALGORITHM=COPY, LOCK=SHARED;
+
 -- ---------------------------------------------------------------------------
 -- 2. 新增表
 -- ---------------------------------------------------------------------------
@@ -239,6 +247,16 @@ CREATE TABLE IF NOT EXISTS `batch_tasks` (
 -- 新装库（db_ddl.sql）已将 admin 初始口令写为 bcrypt 哈希。
 -- 存量库若仍为明文 'admin'，无需在此处理：应用登录时按需惰性重哈希
 -- （见 lib/xcrypto/password.go CheckPassword 的 needMigrate）。
+
+-- 3.3 已在 2026-10-20 之前执行过本脚本的存量库（issue #264 补丁）
+-- 只需补执行 §1.6 一条语句（脚本非幂等，不要整体重跑）：
+-- ALTER TABLE `providers`
+--   MODIFY COLUMN `api_keys` MEDIUMTEXT NULL COMMENT 'API key 列表（列加密整列信封，enc$v1$ 前缀；无前缀为明文 JSON 兼容）',
+--   ALGORITHM=COPY, LOCK=SHARED;
+-- 回滚（改回 JSON）前必须先执行 POST /open-api/v1/security/reencrypt-sweeps
+-- {"mode":"decrypt","scope":"all"} 并复核无 enc$v1$ 残留，否则 ALTER 会因信封不是
+-- 合法 JSON 而报 Error 3140；改回 JSON 后文本值需为合法 JSON 才能通过。SQLite 部署
+-- 无需此步骤（TEXT 无需变更）。
 
 -- ---------------------------------------------------------------------------
 -- 4. 删除列（EPP 单实例化，见 design-docs/modifications/2026-10-14-epp-single-instance/）

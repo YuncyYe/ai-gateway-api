@@ -482,6 +482,8 @@ CREATE TABLE providers (
   description TEXT NOT NULL DEFAULT '',
   model_endpoint TEXT,
   models TEXT,
+  -- 列加密整列信封（enc$v1$ 前缀）：信封不是 JSON，MySQL 侧必须 MEDIUMTEXT（见 db_ddl.sql）；
+  -- SQLite 不校验 JSON，TEXT 即可
   api_keys TEXT,
   instance_pool TEXT NOT NULL,
   instance_source TEXT NOT NULL DEFAULT 'instance_pool',
