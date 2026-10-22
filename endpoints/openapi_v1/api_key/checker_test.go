@@ -106,6 +106,41 @@ func TestCheckCreateAPIKey(t *testing.T) {
 			p.QuotaPlan = &shared.QuotaPlanParam{Quota: lib.PFloat64(100), Unit: &invalidUnit}
 			return p
 		}(), true},
+		{"valid batch limits", func() *api_key.APIKeyParam {
+			p := validAPIKeyParam()
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{
+						MaxCreateRPM:     60,
+						MaxActiveBatches: 10,
+						MaxFileBytes:     104857600,
+						MaxFileLines:     100000,
+					},
+				},
+			}
+			return p
+		}(), false},
+		{"enabled with only batch limits", func() *api_key.APIKeyParam {
+			p := validAPIKeyParam()
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{MaxActiveBatches: 5},
+				},
+			}
+			return p
+		}(), false},
+		{"invalid batch limits negative value", func() *api_key.APIKeyParam {
+			p := validAPIKeyParam()
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{MaxCreateRPM: -1},
+				},
+			}
+			return p
+		}(), true},
 		{"invalid route rules", func() *api_key.APIKeyParam {
 			p := validAPIKeyParam()
 			p.RouteRules = &shared.RouteRulesParam{Rules: []*shared.AiRouteRuleParam{}}
@@ -161,6 +196,41 @@ func TestCheckUpdateAPIKey(t *testing.T) {
 		{"invalid quota plan unit", func() *api_key.APIKeyParam {
 			p := &api_key.APIKeyParam{}
 			p.QuotaPlan = &shared.QuotaPlanParam{Quota: lib.PFloat64(100), Unit: &invalidUnit}
+			return p
+		}(), true},
+		{"valid batch limits", func() *api_key.APIKeyParam {
+			p := &api_key.APIKeyParam{}
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{
+						MaxCreateRPM:     60,
+						MaxActiveBatches: 10,
+						MaxFileBytes:     104857600,
+						MaxFileLines:     100000,
+					},
+				},
+			}
+			return p
+		}(), false},
+		{"enabled with only batch limits", func() *api_key.APIKeyParam {
+			p := &api_key.APIKeyParam{}
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{MaxActiveBatches: 5},
+				},
+			}
+			return p
+		}(), false},
+		{"invalid batch limits negative value", func() *api_key.APIKeyParam {
+			p := &api_key.APIKeyParam{}
+			p.RateLimitPolicy = &shared.RateLimitPolicyParam{
+				Enabled: lib.PBool(true),
+				Rules: &shared.RateLimitRules{
+					BatchLimits: &shared.BatchLimits{MaxCreateRPM: -1},
+				},
+			}
 			return p
 		}(), true},
 		{"invalid rate limit window", func() *api_key.APIKeyParam {

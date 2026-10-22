@@ -96,6 +96,7 @@
 - `allow_models` 每个元素类型为 [AIModel](./00-common.md#5-ai-模型名称aimodel)；包含 `"*"` 时表示允许访问所有模型。
 - `block_models` 每个元素为非空字符串；包含 `"*"` 时表示禁止访问所有模型；元素无需为已配置的 `AIModel`（不必出现在 `/clusters` 的 `llm_config.models` 中）。
 - `quota_plan`、`rate_limit_policy`、`route_rules` 的字段及合法性条件分别见 [QuotaPlan](./00-common.md#公共参数类型)、[RateLimitPolicy](./00-common.md#公共参数类型)、[RouteRules](./00-common.md#公共参数类型) 公共类型定义。
+- `rate_limit_policy.rules` 中的 `batch_limits` 段（批量任务限流维度）与独立策略资源一致生效：四维度均按发起请求的 API-Key 计数（与本 Entity 挂载的 API-Key 各自的活跃批量任务数比对）、与 `model` 无关，省略/`null` 表示该策略不参与批量限流，不配置不代表批量不限流（仍受数据面 `mod_ai_batch.data` 全局硬顶约束）；字段定义见 [RateLimitPolicy](./00-common.md#公共参数类型)。
 
 **HTTP BODY参数示例**
 
@@ -123,7 +124,13 @@
             "rpm": [
                 {"name": "rpm_1min", "model": "*", "window_minutes": 1, "max_requests": 100}
             ],
-            "max_concurrency": 50
+            "max_concurrency": 50,
+            "batch_limits": {
+                "max_create_rpm": 60,
+                "max_active_batches": 10,
+                "max_file_bytes": 104857600,
+                "max_file_lines": 1000000
+            }
         }
     },
     "route_rules": {
@@ -402,6 +409,7 @@
 - `name` 必填；类型为 [EntityName](./00-common.md#17-entity-名称entityname)；全局唯一，不可与其他Entity冲突。
 - `description` 非必填；若传入，长度 0-255 字节（按 UTF-8 字节计）；不能包含控制字符。**全量语义下省略 `description` 将清空已有描述（重置为空字符串）**。
 - `quota_plan`、`rate_limit_policy`、`route_rules` 的字段及合法性条件分别见 [QuotaPlan](./00-common.md#公共参数类型)、[RateLimitPolicy](./00-common.md#公共参数类型)、[RouteRules](./00-common.md#公共参数类型) 公共类型定义。
+- `rate_limit_policy.rules` 中的 `batch_limits` 段（批量任务限流维度）与独立策略资源一致生效：四维度均按发起请求的 API-Key 计数（与本 Entity 挂载的 API-Key 各自的活跃批量任务数比对）、与 `model` 无关，省略/`null` 表示该策略不参与批量限流，不配置不代表批量不限流（仍受数据面 `mod_ai_batch.data` 全局硬顶约束）；字段定义见 [RateLimitPolicy](./00-common.md#公共参数类型)。
 
 **执行逻辑**
 
@@ -455,6 +463,7 @@
 - `name` 必填；类型为 [EntityName](./00-common.md#17-entity-名称entityname)；全局唯一，不可与其他Entity冲突。
 - `description` 非必填；若传入，长度 0-255 字节（按 UTF-8 字节计）；不能包含控制字符。省略时保持原值；显式传入空字符串 `""` 表示清空描述。
 - `quota_plan`、`rate_limit_policy`、`route_rules` 的字段及合法性条件分别见 [QuotaPlan](./00-common.md#公共参数类型)、[RateLimitPolicy](./00-common.md#公共参数类型)、[RouteRules](./00-common.md#公共参数类型) 公共类型定义。
+- `rate_limit_policy.rules` 中的 `batch_limits` 段（批量任务限流维度）与独立策略资源一致生效：四维度均按发起请求的 API-Key 计数（与本 Entity 挂载的 API-Key 各自的活跃批量任务数比对）、与 `model` 无关，省略/`null` 表示该策略不参与批量限流，不配置不代表批量不限流（仍受数据面 `mod_ai_batch.data` 全局硬顶约束）；字段定义见 [RateLimitPolicy](./00-common.md#公共参数类型)。
 - 修改 `quota_plan.quota`（单位不变）时，保留 `balance.used`，按 `新quota - used` 重新计算 `balance.remaining`；修改 `quota_plan.unit` 或 `quota_plan.unlimited` 时，会重置 `balance.used = 0`；仅修改 `quota_plan` 其他字段不会调整 balance。
 - 若修改 `route_rules`，视为全量替换该路由规则配置。
 

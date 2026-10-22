@@ -163,6 +163,56 @@ func TestValidateEntityParam(t *testing.T) {
 			requireNameType: false,
 			wantErr:         true,
 		},
+		{
+			name: "create valid batch limits",
+			param: &entity.EntityParam{
+				Name: &validName,
+				Type: &validType,
+				RateLimitPolicy: &shared.RateLimitPolicyParam{
+					Enabled: lib.PBool(true),
+					Rules: &shared.RateLimitRules{
+						BatchLimits: &shared.BatchLimits{
+							MaxCreateRPM:     60,
+							MaxActiveBatches: 10,
+							MaxFileBytes:     104857600,
+							MaxFileLines:     100000,
+						},
+					},
+				},
+			},
+			requireNameType: true,
+			wantErr:         false,
+		},
+		{
+			name: "create enabled with only batch limits",
+			param: &entity.EntityParam{
+				Name: &validName,
+				Type: &validType,
+				RateLimitPolicy: &shared.RateLimitPolicyParam{
+					Enabled: lib.PBool(true),
+					Rules: &shared.RateLimitRules{
+						BatchLimits: &shared.BatchLimits{MaxActiveBatches: 5},
+					},
+				},
+			},
+			requireNameType: true,
+			wantErr:         false,
+		},
+		{
+			name: "create invalid batch limits negative value",
+			param: &entity.EntityParam{
+				Name: &validName,
+				Type: &validType,
+				RateLimitPolicy: &shared.RateLimitPolicyParam{
+					Enabled: lib.PBool(true),
+					Rules: &shared.RateLimitRules{
+						BatchLimits: &shared.BatchLimits{MaxCreateRPM: -1},
+					},
+				},
+			},
+			requireNameType: true,
+			wantErr:         true,
+		},
 	}
 
 	for _, tc := range cases {
