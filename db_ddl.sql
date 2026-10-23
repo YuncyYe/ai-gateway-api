@@ -631,7 +631,8 @@ CREATE TABLE `operation_logs` (
   KEY `idx_resource_parent` (`resource_parent_id`),
   KEY `idx_operator_name_created` (`operator_name`, `created_at`),
   KEY `idx_status_created` (`status`, `created_at`),
-  KEY `idx_resource_name_created` (`resource_name`, `created_at`)
+  KEY `idx_resource_name_created` (`resource_name`, `created_at`),
+  KEY `idx_resource_id_created` (`resource_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI 网关配置操作日志表';
 
 -- insert default user

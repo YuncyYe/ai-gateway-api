@@ -279,6 +279,31 @@ ALTER TABLE `epp_assignments` DROP COLUMN `primary_instance_id`;
 --   ) AS g ON a.group_name = g.group_name
 --   SET a.primary_instance_id = g.first_id;
 
+-- ---------------------------------------------------------------------------
+-- 5. 新增索引（operation-logs 过滤列组合索引，issue #280）
+-- ---------------------------------------------------------------------------
+-- 背景：issue #275（commit 75d0c51）已为 db_ddl.sql（全量建库）定义
+-- idx_operator_name_created / idx_status_created / idx_resource_name_created
+-- 三个过滤列组合索引，但本脚本此前未包含对应 ALTER，按本脚本升级的存量库
+-- 过滤查询仍全表扫描（25 万行规模首页 3.6-20 s，issue #280）。
+-- 本期再补 idx_resource_id_created：现有 idx_resource(resource_type, resource_id)
+-- 前导列是 resource_type，resource_id 单独过滤用不上（实测 17.4 s vs 56 ms）。
+-- 已在 2026-10-23 之前执行过本脚本的存量库：无需重跑全文，只需补执行本节
+-- （脚本非幂等，重复执行会报 "Duplicate key"，跳过即可）。
+ALTER TABLE `operation_logs`
+  ADD INDEX `idx_operator_name_created` (`operator_name`, `created_at`),
+  ADD INDEX `idx_status_created` (`status`, `created_at`),
+  ADD INDEX `idx_resource_name_created` (`resource_name`, `created_at`),
+  ADD INDEX `idx_resource_id_created` (`resource_id`, `created_at`),
+  ALGORITHM=INPLACE, LOCK=NONE;
+
+-- 回滚（仅供应急）：
+-- ALTER TABLE `operation_logs`
+--   DROP INDEX `idx_operator_name_created`,
+--   DROP INDEX `idx_status_created`,
+--   DROP INDEX `idx_resource_name_created`,
+--   DROP INDEX `idx_resource_id_created`;
+
 -- ===========================================================================
 -- 升级完成。完整新装 schema 见 db_ddl.sql。
 -- ===========================================================================
