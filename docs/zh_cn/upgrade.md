@@ -16,7 +16,7 @@
 2. 替换 ai-gateway-api 的可执行程序
 3. mysql 数据库表结构更新
 
-> 完整的 v0.0.10 → v0.0.11 增量升级脚本见 `database/db_ddl_upgrade_to_0.0.11.sql`（覆盖 EPP runtime、api_key_hash、k8s 实例池、批量任务、ai-cache/context/mirror/intent 等全部 schema 变更；`api_key_hash` 回填等手动步骤见脚本末尾）。新装库请直接执行 `db_ddl.sql`。下面仅以 ai-cache 语义缓存二期为例给出存量加列语句。
+> 完整的 v0.0.10 → v0.0.11 增量升级脚本见 `database/db_ddl_upgrade_to_0.0.11.sql`（覆盖 EPP runtime、api_key_hash、k8s 实例池、批量任务、ai-cache/context/mirror/intent、operation-logs 过滤索引等全部 schema 变更；`api_key_hash` 回填等手动步骤见脚本末尾）。新装库请直接执行 `db_ddl.sql`。下面仅以 ai-cache 语义缓存二期为例给出存量加列语句。
 
 > **启用 DB 落盘加密的部署必读（issue #264）**：`providers.api_keys` 在脚本 §1.6 中由 `JSON` 改为
 > `MEDIUMTEXT`（列内存的是整列 `enc$v1$` 信封，不是合法 JSON，MySQL 严格模式会拒绝写入 →

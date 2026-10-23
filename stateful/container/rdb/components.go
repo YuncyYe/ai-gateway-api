@@ -98,7 +98,8 @@ import (
 func Init() error {
 	container.TxnStoragerSingleton = txn.NewRDBTxnStorager(stateful.NewBFEDBContext)
 	container.VersionControlStoragerSingleton = version_control.NewVersionControllerStorage(stateful.NewBFEDBContext)
-	container.OperationLogStorager = operationLogStorage.NewOperationLogStorager(stateful.NewBFEDBContext)
+	container.OperationLogStorager = operationLogStorage.NewOperationLogStorager(
+		stateful.NewBFEDBContext, stateful.DefaultClientSet.RedisClient)
 	container.KeyRotateStorager = keyrotateStorage.NewStorager(
 		stateful.NewBFEDBContext, container.TxnStoragerSingleton, keyrotate.DefaultHeartbeatTTL)
 	container.KeyRotateManager = keyrotate.NewManager(container.KeyRotateStorager, stateful.NewBFEDBContext)

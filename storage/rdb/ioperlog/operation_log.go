@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/bfenetworks/bfe/bfe_util/redis_client"
+
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ioperlog"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao"
@@ -26,12 +28,16 @@ import (
 // OperationLogStorager implements ioperlog.OperationLogStorager.
 type OperationLogStorager struct {
 	dbCtxFactory lib.DBContextFactory
+	counter      *countCache
 }
 
-// NewOperationLogStorager creates a new OperationLogStorager.
-func NewOperationLogStorager(dbCtxFactory lib.DBContextFactory) *OperationLogStorager {
+// NewOperationLogStorager creates a new OperationLogStorager. counterRedis
+// backs the exact pagination-total cache; nil disables it (every count runs
+// against the database).
+func NewOperationLogStorager(dbCtxFactory lib.DBContextFactory, counterRedis redis_client.Client) *OperationLogStorager {
 	return &OperationLogStorager{
 		dbCtxFactory: dbCtxFactory,
+		counter:      newCountCache(counterRedis),
 	}
 }
 
@@ -54,7 +60,31 @@ func (s *OperationLogStorager) BatchCreate(ctx context.Context, entries []*ioper
 	}
 
 	_, err = dao.TOperationLogCreate(dbCtx, params...)
+	if err == nil && s.counter != nil {
+		// Flushed entries must be visible to totals immediately: bump the
+		// generation so per-filter cached counts are not served again.
+		s.counter.invalidate()
+	}
 	return err
+}
+
+// count returns the exact filtered total, served from the per-filter cache
+// when possible. On any cache miss or Redis failure it runs the live count
+// and back-fills the cache (issue #280).
+func (s *OperationLogStorager) count(dbCtx lib.DBContexter, where *dao.TOperationLogParam, filter *ioperlog.OperationLogFilter) (int64, error) {
+	if s.counter != nil {
+		if total, ok := s.counter.get(filter); ok {
+			return total, nil
+		}
+	}
+	total, err := dao.TOperationLogCount(dbCtx, where)
+	if err != nil {
+		return 0, err
+	}
+	if s.counter != nil {
+		s.counter.set(filter, total)
+	}
+	return total, nil
 }
 
 // List queries operation logs with the given filter.
@@ -66,7 +96,7 @@ func (s *OperationLogStorager) List(ctx context.Context, filter *ioperlog.Operat
 
 	where := filterToParam(filter)
 
-	total, err := dao.TOperationLogCount(dbCtx, where)
+	total, err := s.count(dbCtx, where, filter)
 	if err != nil {
 		return nil, 0, err
 	}
