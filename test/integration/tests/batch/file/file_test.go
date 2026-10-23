@@ -80,7 +80,9 @@ func TestBatchFile_Found(t *testing.T) {
 	assert.Equal(t, tag, data["file_id"])
 	assert.Equal(t, "deepseek", data["provider"])
 	assert.Equal(t, tag+"-ak", data["api_key_id"])
-	assert.Equal(t, helper.TestProductName, data["product_name"])
+	// issue #276：product_name 为内部字段，从对外契约剔除，不得出现。
+	_, hasProductName := data["product_name"]
+	assert.False(t, hasProductName, "product_name must not exist in file response (issue #276)")
 	assert.Equal(t, "input", data["direction"])
 	assert.Equal(t, "batch_input", data["purpose"])
 	// issue #254：filename 由 provider File 对象落库后透出
@@ -111,7 +113,7 @@ func TestBatchFile_ProviderRequired(t *testing.T) {
 	testutil.AssertErrCode(t, resp, 422)
 }
 
-// ---------- BT-4-004 产品线隔离：其它产品线的文件按不存在处理 ----------
+// ---------- BT-4-004 非默认产品线不可见：其它产品线的文件按不存在处理 ----------
 
 func TestBatchFile_ProductIsolation(t *testing.T) {
 	helper.RequireBatchAPI(t)

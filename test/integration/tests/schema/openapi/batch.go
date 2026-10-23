@@ -40,11 +40,13 @@ var BatchFileMetaSchema = &testutil.ObjectSchema{
 // request_counts/usage_source 契约未定义空值、batch_files 仅详情填充）。
 // issue #271 起 est_lines/usage_*/reserve_units/settle_units（int64 零值必现）
 // 与 output_file_id/terminal_at（空串必现）移入 Required——零值/空值显式输出。
+// issue #276 起 product_name 从契约剔除（内部字段，不入参不返回），
+// 不得出现在响应中（键缺席由 BT-2-002 定向锁覆盖）。
 // 内部字段（id/key_name/idem_key）为已记录的契约超集遗留，不列入 schema
 //（未声明键不校验，由 BT-2-002 定向锁覆盖）。
 var BatchTaskDetailSchema = &testutil.ObjectSchema{
 	Required: []string{
-		"batch_id", "api_key_id", "product_name", "provider", "status",
+		"batch_id", "api_key_id", "provider", "status",
 		"output_file_id", "est_lines",
 		"usage_input_tokens", "usage_output_tokens",
 		"reserve_units", "settle_units",
@@ -58,7 +60,6 @@ var BatchTaskDetailSchema = &testutil.ObjectSchema{
 	Fields: map[string]testutil.FieldSpec{
 		"batch_id":            {Type: testutil.TypeString},
 		"api_key_id":          {Type: testutil.TypeString},
-		"product_name":        {Type: testutil.TypeString},
 		"entity_id":           {Type: testutil.TypeString},
 		"provider":            {Type: testutil.TypeString},
 		"endpoint":            {Type: testutil.TypeString},

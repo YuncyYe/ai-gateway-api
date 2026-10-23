@@ -25,11 +25,12 @@ import (
 
 // resolveProduct 解析本组端点的产品线：优先取 McProductProbe 已注入的
 // 上下文（请求路径携带 product_id/product_name 时）；本组路由自身不
-// 含产品路径变量，ProductProbe 无从注入，此时回退到配置的默认产品线
-// AIRouteInnerProductName（与 ai_route 等模块的 default_product.go
-// 同模式）。设计文档"产品线由中间件强制注入"的凭证→产品线解析
-//（真实 token 绑定产品线）在 McUserProbe 侧补齐前，由该回退保证
-// 管控 API 可用。
+// 含产品路径变量，ProductProbe 无从注入，故按配置的默认产品线
+// AIRouteInnerProductName 解析（与 ai_route 等模块的 default_product.go
+// 同模式）。Token 不绑定产品线（2026-07-27 权限模型收敛决策，见
+// design-docs/modifications/2026-07-27-openapi-optimize/design-changes.md
+// §2.4），不存在凭证→产品线解析；对外口径见 batches.md §1/§6
+//（issue #276，2026-10-23 校准）。
 func resolveProduct(ctx context.Context) (*ibasic.Product, error) {
 	if product, err := ibasic.MustGetProduct(ctx); err == nil {
 		return product, nil

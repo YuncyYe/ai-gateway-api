@@ -70,7 +70,7 @@ func TestBatchList_Empty(t *testing.T) {
 	assert.Equal(t, float64(0), cursor, "empty table next_cursor should be 0")
 }
 
-// ---------- BT-1-002 过滤（status / provider / api_key_id / 产品线隔离） ----------
+// ---------- BT-1-002 过滤（status / provider / api_key_id / 非默认产品线不可见） ----------
 
 func TestBatchList_Filters(t *testing.T) {
 	helper.RequireBatchAPI(t)
@@ -82,7 +82,7 @@ func TestBatchList_Filters(t *testing.T) {
 		{BatchID: tag + "-a", APIKeyID: ak1, ProductName: helper.TestProductName, Provider: "deepseek", Status: "completed"},
 		{BatchID: tag + "-b", APIKeyID: ak1, ProductName: helper.TestProductName, Provider: "deepseek", Status: "in_progress"},
 		{BatchID: tag + "-c", APIKeyID: ak2, ProductName: helper.TestProductName, Provider: "openai", Status: "completed"},
-		// 其它产品线的行必须被隔离，任何过滤组合都不可见
+		// 其它产品线（非默认产品线）的行不可见，任何过滤组合都不出现
 		{BatchID: tag + "-x", APIKeyID: ak1, ProductName: "OTHER_product", Provider: "deepseek", Status: "completed"},
 	}
 	for i := range rows {

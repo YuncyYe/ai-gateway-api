@@ -183,7 +183,8 @@ type BatchFile struct {
 }
 
 // BatchTaskFilter 任务查询过滤条件。ListTasks 中 ProductName 为强制条件
-// （产品线隔离，不接受外部缺失）；CursorID/Limit 构成主键游标分页。
+// （服务端按默认产品线解析，不接受外部传参）；CursorID/Limit 构成主键
+// 游标分页。
 type BatchTaskFilter struct {
 	ID           *int64
 	BatchID      *string

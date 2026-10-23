@@ -25,11 +25,12 @@ import (
 // ibatch.BatchTask 的 omitempty 规则——后者同时承担 Redis 回源合并的
 // 读模型语义（未携带 = 未知），与对外契约无关。terminal_at 以 string
 // 输出：未终结时为空串（§3.2/§3.3 示例），不出现 null。
+// product_name 为内部字段，按 issue #276（2026-10-23）从对外契约剔除，
+// 不出现在本组接口的入参与返回值中。
 type batchTaskView struct {
 	ID                int64                 `json:"id"`
 	BatchID           string                `json:"batch_id"`
 	APIKeyID          string                `json:"api_key_id"`
-	ProductName       string                `json:"product_name"`
 	EntityID          string                `json:"entity_id,omitempty"`
 	Provider          string                `json:"provider"`
 	KeyName           string                `json:"key_name,omitempty"`
@@ -65,7 +66,6 @@ func newBatchTaskView(task *ibatch.BatchTask) *batchTaskView {
 		ID:                task.ID,
 		BatchID:           task.BatchID,
 		APIKeyID:          task.APIKeyID,
-		ProductName:       task.ProductName,
 		EntityID:          task.EntityID,
 		Provider:          task.Provider,
 		KeyName:           task.KeyName,
@@ -103,4 +103,48 @@ func newBatchTaskViews(tasks []*ibatch.BatchTask) []*batchTaskView {
 		views = append(views, newBatchTaskView(task))
 	}
 	return views
+}
+
+// batchFileView 是 batch-files 查询的对外响应形状：与 ibatch.BatchFile
+// 实体同字段集，但按 issue #276（2026-10-23）剔除 product_name（内部
+// 字段，不出现在对外契约中）；其余内部字段（direction / api_key_id /
+// lines / key_name 等）的外泄收敛为 issue #249 遗留，不在本卡范围。
+type batchFileView struct {
+	ID          int64      `json:"id"`
+	FileID      string     `json:"file_id"`
+	Provider    string     `json:"provider"`
+	KeyName     string     `json:"key_name,omitempty"`
+	APIKeyID    string     `json:"api_key_id"`
+	Direction   string     `json:"direction"`
+	Purpose     string     `json:"purpose,omitempty"`
+	Filename    string     `json:"filename,omitempty"`
+	Lines       int64      `json:"lines,omitempty"`
+	Bytes       int64      `json:"bytes,omitempty"`
+	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
+	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// newBatchFileView 将文件实体投影为对外视图；nil 入参返回 nil。
+func newBatchFileView(file *ibatch.BatchFile) *batchFileView {
+	if file == nil {
+		return nil
+	}
+	return &batchFileView{
+		ID:          file.ID,
+		FileID:      file.FileID,
+		Provider:    file.Provider,
+		KeyName:     file.KeyName,
+		APIKeyID:    file.APIKeyID,
+		Direction:   file.Direction,
+		Purpose:     file.Purpose,
+		Filename:    file.Filename,
+		Lines:       file.Lines,
+		Bytes:       file.Bytes,
+		FirstSeenAt: file.FirstSeenAt,
+		LastSeenAt:  file.LastSeenAt,
+		CreatedAt:   file.CreatedAt,
+		UpdatedAt:   file.UpdatedAt,
+	}
 }

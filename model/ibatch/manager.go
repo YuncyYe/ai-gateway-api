@@ -171,7 +171,7 @@ var _ BatchManager = (*Manager)(nil)
 // FetchTask 查询任务详情：DB 优先（batch_id + product_name 强制）；
 // miss 且允许回源时读 Redis BATCH_TASK hash 组装（覆盖对账 job 落库前
 // 窗口）。均 miss 返回 (nil, nil)。Redis 回源任务经 apiKey 解析校验
-// product_name（不匹配按 miss 处理，保持产品线隔离）。
+// product_name（不匹配按 miss 处理，保持 product_name 过滤口径一致）。
 func (m *Manager) FetchTask(ctx context.Context, batchID, productName string, allowRedisFallback bool) (*BatchTask, error) {
 	task, err := m.storager.FetchBatchTask(ctx, &BatchTaskFilter{
 		BatchID:     &batchID,

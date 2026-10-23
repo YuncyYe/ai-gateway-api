@@ -125,6 +125,8 @@ provider HTTP client、解密器，全部复用现有组件）。
 | `POST /open-api/v1/batches/{batch_id}/cancel` | 五步：查任务（DB→Redis）→ 取 provider key + 拼地址（实例 + protocol_paths.openai）→ 出网 POST cancel（不可达 502 / provider 404 / 已终态 409）→ DB 条件更新抢占（`UPDATE ... SET status='cancelling' WHERE batch_id=? AND status NOT IN (终态)`，affected_rows=0 → 409）+ Redis `BatchRelease` 幂等释放 → operation_logs 审计 |
 | `GET /open-api/v1/batch-files/{file_id}` | 文件元数据查询 |
 
+> 2026-10-23 修订（issue #276）：上表中"`product_name` 强制注入（McProductProbe）"的表述被取代——本组路由不含产品路径变量、`McProductProbe` 无从注入，且 Token 不绑定产品线（2026-07-27 决策），实际口径为服务端解析默认产品线 `AIRouteInnerProductName`；本条原表述保留作历史记录，现行口径见 `modifications/2026-10-23-issue-276-batch-product-name-contract-fix/` 与 `api-define/OpenAPI接口定义/batches.md` §1/§6。
+
 竞态（与对账 job、与 BFE 查询路径）：共用 `BATCH_SETTLED`（结算去重）与
 `reserved_units 清零`（释放去重）两把锁，cancel×job、cancel×cancel 均收敛；
 cancel 后 provider 实际跑完（cancelling→completed）按 completed 正常结算。
