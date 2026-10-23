@@ -101,6 +101,7 @@ batch/
 | BT-2-005 | purpose 按方向映射（issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行，`purpose` 列写 provider 原值 `batch`、`filename` 留空 | 200；`purpose` 分别为 `batch_input`/`batch_output`（列内原值不外泄）；`filename` 键缺席（omitempty）；原始报文无 `direction` |
 | BT-2-006 | 零值终态任务零值键必现（issue #271） | 返回数据 | 直写 `settled` / `released` 零值行各 1 行（金额 0、`terminal_at=NULL`） | 200；`est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0（map `ok` 存在性 + 原始报文整数 token 双锁），`output_file_id` / `terminal_at` 键存在且为 `""`，报文不含 `"terminal_at":null`；`usage_source` 键缺席（契约缺口，锁现行为） |
 | BT-2-007 | 非零回归（issue #271） | 返回数据 | 直写 `settled` 非零行 1 行（`settle_units=180000000`、`terminal_at` 非空） | 200；`settle_units` 为整数 token 180000000（不 ÷1e8）；`terminal_at` 为 RFC3339 字符串而非 `""`——防"无条件输出 0/空串"过修；修复前后都应通过 |
+| BT-2-008 | 对账落库路径 filename 不丢（issue #272） | 返回数据 | 任务行 helper 直写；文件行经**生产 upsert 通路**（`batch.NewBatchStorager` + `UpsertBatchFile`，模拟对账 sync 写入）登记 input 文件（filename 非空），随后二次 upsert 传空 filename | 200；`batch_files[0]`（input）`filename` 键存在且值为种子值（map `ok` 存在性 + 原始报文 token `"filename":"input.jsonl"` 双锁）；二次空值 upsert 后键仍在（`NULLIF+COALESCE` 不回退）；修复前本用例必须失败（DAO 丢列 → DB 行 filename 恒 NULL → 键缺席），修复后通过 |
 
 **断言要点（BT-2-002，合同锁定）**
 

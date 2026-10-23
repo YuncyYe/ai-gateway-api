@@ -15,6 +15,7 @@
 package detail_test
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -24,6 +25,9 @@ import (
 
 	helper "github.com/rainway-ai-gateway/ai-gateway-api/integration/tests/batch/helper"
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibatch"
+	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/batch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -383,3 +387,71 @@ func TestBatchDetail_NonZeroValues(t *testing.T) {
 	token := strings.TrimSpace(rest[:end])
 	assert.Equal(t, "180000000", token, "settle_units must serialize as integer token")
 }
+
+// ---------- BT-2-008 对账落库路径：batch_files[].filename 经生产 upsert 落库并输出（issue #272） ----------
+
+// TestBatchDetail_FilenameFromUpsertPath 锁定 issue #272 的修复：batch_files
+// 唯一生产写入路径（storage/rdb/batch.UpsertBatchFile → DAO
+// TBatchFileUpsertByFileProvider）落库时不得丢弃 filename——种子走生产
+// upsert 通路（而非 helper 直写 SQL），模拟对账 sync 的真实写入；随后
+// 二次 upsert 传空 filename，验证冲突更新的 COALESCE 保护（不回退 NULL）。
+// 键存在性走 map `ok` 判定 + 原始报文 token 双锁（沿用 BT-2-006 断言法）。
+// 判据属性：修复前本用例必须失败（DB 行 filename 恒 NULL → 键缺席），
+// 修复后通过。
+func TestBatchDetail_FilenameFromUpsertPath(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-008")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "in_progress", SettleStatus: "reserved",
+		InputFileID: tag + "-in", SyncSource: "log", IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
+
+	// 种子走生产写入路径（对账 sync 的实际通路），filename 非空。
+	storager := batch.NewBatchStorager(func(ctx context.Context, ops ...*lib.Op) (*lib.DBContext, error) {
+		return lib.NewDBContext(ctx, db), nil
+	})
+	_, err := storager.UpsertBatchFile(context.Background(), &ibatch.BatchFile{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch",
+		Filename: "input.jsonl", Bytes: 1024,
+	})
+	require.NoError(t, err)
+
+	// 二次 upsert 传空 filename（模拟 provider 未给的刷新）：COALESCE
+	// 保护下 DB 已有值不得回退为 NULL。
+	_, err = storager.UpsertBatchFile(context.Background(), &ibatch.BatchFile{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch",
+		Bytes: 1024,
+	})
+	require.NoError(t, err)
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	filesVal, ok := data["batch_files"]
+	require.True(t, ok, "Data.batch_files must exist")
+	files, ok := filesVal.([]interface{})
+	require.True(t, ok, "Data.batch_files must be array")
+	require.Equal(t, 1, len(files))
+	f, ok := files[0].(map[string]interface{})
+	require.True(t, ok, "batch_files element must be object")
+	assert.Equal(t, tag+"-in", f["file_id"])
+
+	// 键存在性必须走 map 的 ok 判定（结构体解码会给缺席键填零值）。
+	filename, hasFilename := f["filename"]
+	require.True(t, hasFilename, "input 元素必须含 filename 键（provider 已给，§2.2）")
+	assert.Equal(t, "input.jsonl", filename)
+
+	// 原始报文 token 精确匹配（防解码容忍造成假通过）。
+	assert.Contains(t, string(resp.RawBody), `"filename":"input.jsonl"`)
+}
+

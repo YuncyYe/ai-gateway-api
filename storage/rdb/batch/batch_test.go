@@ -226,7 +226,7 @@ func TestBatchFileConversions(t *testing.T) {
 	file := &ibatch.BatchFile{
 		FileID: "f-1", Provider: "openai", KeyName: "k1", APIKeyID: "ak",
 		ProductName: "p1", Direction: "output", Purpose: "batch",
-		Lines: 5, Bytes: 100,
+		Filename: "output.jsonl", Lines: 5, Bytes: 100,
 	}
 	param := batchFileDataToParam(file)
 	require.NotNil(t, param)
@@ -236,10 +236,15 @@ func TestBatchFileConversions(t *testing.T) {
 	row := &dao.TBatchFile{
 		ID: 3, FileID: "f-1", Provider: "openai", APIKeyID: "ak",
 		ProductName: "p1", Direction: "output", Lines: 5, Bytes: 100,
+		Filename: "output.jsonl",
 	}
 	restored := batchFileParamToData(row)
 	assert.Equal(t, int64(3), restored.ID)
 	assert.Equal(t, int64(100), restored.Bytes)
+	// upsert 往返：参数层带 filename，读出后值不丢。
+	assert.Equal(t, "output.jsonl", restored.Filename)
+	require.NotNil(t, param.Filename)
+	assert.Equal(t, "output.jsonl", *param.Filename)
 
 	assert.Nil(t, batchFileFilterToParam(nil))
 	fp := batchFileFilterToParam(&ibatch.BatchFileFilter{FileID: strp("f-1"), Provider: strp("openai")})
