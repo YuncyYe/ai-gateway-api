@@ -17,8 +17,11 @@ package dao
 import (
 	"time"
 
+	"github.com/didi/gendry/scanner"
+
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
+	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao/internal"
 )
 
@@ -72,6 +75,52 @@ func TOperationLogList(dbCtx lib.DBContexter, where *TOperationLogParam) ([]*TOp
 	return nil, err
 }
 
+// TOperationLogListDeferred queries one page via deferred join: the inner
+// derived table walks the covering index to collect page ids only, then the
+// outer join fetches full rows by primary key. Deep-page cost therefore stays
+// flat instead of growing linearly with the LIMIT offset (issue #275).
+func TOperationLogListDeferred(dbCtx lib.DBContexter, where *TOperationLogParam) ([]*TOperationLog, error) {
+	innerWhere := internal.Struct2Where(where)
+	innerBuild := internal.NewSelectBuilder(tOperationLogTableName, innerWhere, []string{"id"})
+	innerSQL, args, err := innerBuild.Compile()
+	if err != nil {
+		return nil, xerror.WrapDaoError(err)
+	}
+	// MySQL rejects LIMIT inside an IN subquery (ERROR 1235), so the id set
+	// must come from a JOIN derived table; all filter values stay bound
+	// placeholders, identical to the plain query path.
+	sqlText := "SELECT t.* FROM " + tOperationLogTableName +
+		" t JOIN (" + innerSQL + ") AS x ON t.id = x.id " +
+		"ORDER BY t.created_at DESC, t.id DESC"
+
+	now := time.Now()
+	rows, err := dbCtx.Execer().QueryContext(dbCtx, sqlText, args...)
+	record := &stateful.SQLRecord{
+		SQL:  sqlText,
+		Args: args,
+		Err:  err,
+		Cost: time.Since(now),
+	}
+	defer record.Print(dbCtx)
+
+	if err != nil {
+		return nil, xerror.WrapDaoError(err)
+	}
+	defer rows.Close()
+
+	list := []*TOperationLog{}
+	record.Err = scanner.Scan(rows, &list)
+	if record.Err == scanner.ErrEmptyResult {
+		// An empty page is a normal outcome (no match or all rows skipped by
+		// the offset), not a not-found condition.
+		return []*TOperationLog{}, nil
+	}
+	if record.Err != nil {
+		return nil, xerror.WrapDaoError(record.Err)
+	}
+	return list, nil
+}
+
 type TOperationLogParam struct {
 	ID               *int64     `db:"id"`
 	LogID            *string    `db:"log_id"`
@@ -114,7 +163,15 @@ func TOperationLogCount(dbCtx lib.DBContexter, where *TOperationLogParam) (int64
 		return 0, xerror.WrapDaoError(err)
 	}
 
+	now := time.Now()
 	rows, err := dbCtx.Execer().QueryContext(dbCtx, sql, args...)
+	record := &stateful.SQLRecord{
+		SQL:  sql,
+		Args: args,
+		Err:  err,
+		Cost: time.Since(now),
+	}
+	defer record.Print(dbCtx)
 	if err != nil {
 		return 0, xerror.WrapDaoError(err)
 	}
@@ -123,6 +180,7 @@ func TOperationLogCount(dbCtx lib.DBContexter, where *TOperationLogParam) (int64
 	for rows.Next() {
 		var c countResult
 		if err := rows.Scan(&c.Count); err != nil {
+			record.Err = err
 			return 0, xerror.WrapDaoError(err)
 		}
 		list = append(list, &c)
