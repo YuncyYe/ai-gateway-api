@@ -117,7 +117,7 @@ func TestBatchTaskListAction(t *testing.T) {
 		assert.Equal(t, int64(1), resp.NextCursor)
 
 		require.NotNil(t, gotFilter)
-		assert.Equal(t, "p1", *gotFilter.ProductName, "product_name 强制取自中间件注入")
+		assert.Equal(t, "p1", *gotFilter.ProductName, "查询过滤按服务端解析的产品线（默认产品线口径，issue #276）")
 		assert.Equal(t, "ak-1", *gotFilter.APIKeyID)
 		assert.Equal(t, "e-1", *gotFilter.EntityID)
 		assert.Equal(t, "openai", *gotFilter.Provider)
@@ -370,7 +370,9 @@ func TestBatchFileOneAction(t *testing.T) {
 		req := withPathVars(newProductRequest(t, http.MethodGet, "/batch-files/f-1?provider=openai"), map[string]string{"file_id": "f-1"})
 		data, err := BatchFileOneAction(req)
 		require.NoError(t, err)
-		file := data.(*ibatch.BatchFile)
+		// issue #276：handler 返回对外视图（product_name 已剔除），
+		// 不再透传内部实体。
+		file := data.(*batchFileView)
 		assert.Equal(t, int64(3), file.Lines)
 	})
 

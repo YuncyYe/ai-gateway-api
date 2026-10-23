@@ -25,7 +25,9 @@ import (
 
 // BatchFileOneAction GET /open-api/v1/batch-files/{file_id}：文件元数据
 // 查询。file_id + provider 唯一定位（api-changes.md §4.4：provider 必填
-// query 参数）；product_name 强制隔离，DB miss 回源 Redis。
+// query 参数）；服务端内部按默认产品线过滤（resolveProduct），DB miss
+// 回源 Redis。响应经 batchFileView 投影，product_name 不出现在返回值中
+//（issue #276）。
 func BatchFileOneAction(req *http.Request) (interface{}, error) {
 	product, err := resolveProduct(req.Context())
 	if err != nil {
@@ -47,5 +49,5 @@ func BatchFileOneAction(req *http.Request) (interface{}, error) {
 	if file == nil {
 		return nil, xerror.WrapRecordNotExist("BatchFile")
 	}
-	return file, nil
+	return newBatchFileView(file), nil
 }

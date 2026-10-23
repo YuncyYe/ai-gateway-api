@@ -102,6 +102,7 @@ func TestBatchTaskView_NonZero(t *testing.T) {
 // TestBatchTaskView_KeySet 键集合锁定：字段集合与修复前一致——五个
 // int64 + output_file_id/terminal_at 转为必现，契约超集字段
 // id/key_name/idem_key 保留，未标注"为空"语义的字段维持省略。
+// issue #276 起 product_name 从契约剔除，不得出现在键集合中。
 func TestBatchTaskView_KeySet(t *testing.T) {
 	raw, err := json.Marshal(newBatchTaskView(zeroStateTask("b-keys", "completed", "settled")))
 	require.NoError(t, err)
@@ -113,7 +114,7 @@ func TestBatchTaskView_KeySet(t *testing.T) {
 		keys = append(keys, k)
 	}
 	assert.ElementsMatch(t, []string{
-		"id", "batch_id", "api_key_id", "product_name", "provider",
+		"id", "batch_id", "api_key_id", "provider",
 		"output_file_id", "status", "est_lines",
 		"usage_input_tokens", "usage_output_tokens",
 		"reserve_units", "settle_units", "settle_status", "over_reserved",

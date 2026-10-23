@@ -42,7 +42,8 @@ type batchTaskListResponse struct {
 
 // BatchTaskListAction GET /open-api/v1/batches：过滤 + 主键游标分页。
 // 金额字段为 1e-8 定点整数（RMB），直接以 JSON 整数输出（api-changes.md
-// §4.1）。product_name 强制取中间件注入值。
+// §4.1）。查询按服务端解析的默认产品线过滤（resolveProduct），
+// product_name 不出现在返回值中（issue #276）。
 func BatchTaskListAction(req *http.Request) (interface{}, error) {
 	product, err := resolveProduct(req.Context())
 	if err != nil {

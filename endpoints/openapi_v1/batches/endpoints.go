@@ -14,8 +14,9 @@
 
 // Package batches 实现批量任务管控 Open API（api-changes.md §4）：
 // 任务列表/详情（DB miss 回源 Redis）/取消（控制面直调 provider）与
-// 批量文件元数据查询。product_name 由 McProductProbe 中间件强制注入，
-// 本包全部处理器经 ibasic.MustGetProduct 取值，不接受外部传参。
+// 批量文件元数据查询。product_name 由服务端解析（resolveProduct）为
+// 默认产品线，本包全部处理器经 resolveProduct 取值，不接受外部传参；
+// 对外口径见 batches.md §1/§6（issue #276，2026-10-23 校准）。
 package batches
 
 import (

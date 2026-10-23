@@ -125,6 +125,8 @@
 `product_name` 由中间件强制注入，不接受外部传参。响应为 `batch_tasks` 行
 列表 + next_cursor；金额字段为 1e-8 定点整数，单位 RMB。
 
+> 2026-10-23 修订（issue #276）：上文"`product_name` 由中间件强制注入"的表述被取代，现行口径为服务端解析默认产品线 `AIRouteInnerProductName`（本组路由无产品路径变量、Token 不绑定产品线）；本条原表述保留作历史记录，见 `modifications/2026-10-23-issue-276-batch-product-name-contract-fix/`。
+
 ### 4.2 `GET /open-api/v1/batches/{batch_id}`
 
 任务详情。查询顺序：DB → Redis `BATCH_TASK` 回源（job 落库前窗口）→ 404。

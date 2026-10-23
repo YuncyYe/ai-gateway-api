@@ -123,7 +123,9 @@ func TestBatchDetail_FullFields(t *testing.T) {
 	// 任务字段在 Data 顶层（§2.1）。
 	assert.Equal(t, tag, data["batch_id"])
 	assert.Equal(t, tag+"-ak", data["api_key_id"])
-	assert.Equal(t, helper.TestProductName, data["product_name"])
+	// issue #276：product_name 为内部字段，从对外契约剔除，不得出现。
+	_, hasProductName := data["product_name"]
+	assert.False(t, hasProductName, "product_name must not exist in detail response (issue #276)")
 	assert.Equal(t, tag+"-entity", data["entity_id"])
 	assert.Equal(t, "deepseek", data["provider"])
 	assert.Equal(t, "/v1/batches", data["endpoint"])
@@ -264,7 +266,7 @@ func TestBatchDetail_NoFiles(t *testing.T) {
 	assert.False(t, hasFiles, "batch_files must be omitted when no associated files (omitempty)")
 }
 
-// ---------- BT-2-003 产品线隔离：其它产品线的任务按不存在处理 ----------
+// ---------- BT-2-003 非默认产品线不可见：其它产品线的任务按不存在处理 ----------
 
 func TestBatchDetail_ProductIsolation(t *testing.T) {
 	helper.RequireBatchAPI(t)

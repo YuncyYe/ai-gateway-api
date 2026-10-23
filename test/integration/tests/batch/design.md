@@ -18,10 +18,10 @@ Batch 模块覆盖"批量与异步任务支持（一期）"的控制面管控 Op
 
 | 目标 | 说明 |
 |------|------|
-| 列表 | 空表返回空数组 + `next_cursor`；status/provider/api_key_id 过滤生效；产品线隔离；limit >200 钳制为 200；cursor 翻页不重复不遗漏 |
+| 列表 | 空表返回空数组 + `next_cursor`；status/provider/api_key_id 过滤生效；非默认产品线不可见（默认产品线过滤）；limit >200 钳制为 200；cursor 翻页不重复不遗漏 |
 | 详情 | 不存在 → 404（BATCH_NOT_FOUND）；直写一行 → 200 且字段完整（settle_status / reserve_units 定点整数 / over_reserved / sync_source）；关联 batch_files 按 §2.2 形状组装在 Data 顶层（无 task/files 包装层，issue #249 合同锁定） |
 | 取消 | 不存在 → 404；已终态（completed）→ 409；cancelling（受理中）重放 → 200 幂等（重发 cancel，issue #274）；keyless provider（keys: []）→ 200 且无鉴权出网（issue #274）；非终态但 provider 不可达 → 502；provider 记录缺失 → 500（实现语义，见 §4.3）；成功 → 200 cancelling + operation_logs 审计 |
-| 文件 | 直写 batch_files → 200 字段正确；不存在 → 404；provider 缺失 → 422；产品线隔离 |
+| 文件 | 直写 batch_files → 200 字段正确；不存在 → 404；provider 缺失 → 422；非默认产品线不可见 |
 
 ### 2.2 测试环境
 
@@ -41,12 +41,19 @@ Batch 模块覆盖"批量与异步任务支持（一期）"的控制面管控 Op
 导致处理器 `ibasic.MustGetProduct` 在任何环境下都失败
 （422 `Fail To Get Product`），业务逻辑不可达。
 
-**修复（本轮随 MySQL 验证落地，endpoints/openapi_v1/batches/product.go）**：
-`resolveProduct` 优先取已注入的产品线上下文；未注入时回退到配置的
-默认产品线 `AIRouteInnerProductName`（与 ai_route 等模块的
-`default_product.go` 同模式）。设计文档"产品线由调用凭证解析"的
-token→产品线注入（McUserProbe 侧）仍是后续增强，本组端点在凭证解析
-补齐前对系统管理员/默认产品线可用。
+**修复（2026-10-07 随 MySQL 验证落地，endpoints/openapi_v1/batches/product.go）**：
+`resolveProduct` 优先取已注入的产品线上下文；未注入时按配置的
+默认产品线 `AIRouteInnerProductName` 解析（与 ai_route 等模块的
+`default_product.go` 同模式），本组端点对系统管理员/默认产品线可用。
+
+**口径校准（2026-10-23 登记，issue #276）**：`batches.md` §1 原表述
+「产品线由调用凭证解析并强制注入」与认证设计互斥（Token 不绑定产品线，
+见 `design-changes.md` §2.4 of modifications/2026-07-27-openapi-optimize），
+已改写为「服务端按默认产品线解析」的单一口径（见
+`design-docs/modifications/2026-10-23-issue-276-batch-product-name-contract-fix/`）。
+本条用例的断言（`OTHER_product` 行/文件按不存在处理）与校准后契约
+「非默认产品线不可见」逐字对应，**断言零改动**；「产品线隔离」相关
+命名统一更名为「非默认产品线不可见（默认产品线过滤）」。
 
 **测试承载**：`BT-x-000` 为可达性冒烟（验证端点进入业务语义而非
 422）；`RequireBatchAPI` 守卫保留为产品线解析回归时的防御性跳过。
@@ -77,7 +84,7 @@ batch/
 |------|------|---------|---------|------|
 | BT-1-000 | 可达性冒烟：产品线回退后端点可进入业务逻辑 | 冒烟 | - | 200（不再 422 `Fail To Get Product`） |
 | BT-1-001 | 空表列表 | 正常参数 | 空表 | 200；`list=[]`（非 null）；`next_cursor=0` |
-| BT-1-002 | status / provider / api_key_id 过滤 + 产品线隔离 | 正常参数 | 直写 4 行（含其它产品线 1 行） | 各过滤仅命中目标行；`OTHER_product` 行任何组合不可见 |
+| BT-1-002 | status / provider / api_key_id 过滤 + 非默认产品线不可见 | 正常参数 | 直写 4 行（含其它产品线 1 行） | 各过滤仅命中目标行；`OTHER_product` 行任何组合不可见 |
 | BT-1-003 | limit 上限钳制 | 边界值 | 直写 205 行 | `limit=250` 返回 200 行；`next_cursor != 0` |
 | BT-1-004 | cursor 翻页 | 正常参数 | 直写 7 行 | `limit=3` 翻至 `next_cursor=0`；收集 id 无重复无遗漏 |
 | BT-1-005 | 列表元素零值键必现（issue #271） | 返回数据 | 直写零值行 1 行（`settled`，金额 0） | 200；`Data.list[0]` 的 `est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0，`output_file_id` / `terminal_at` 键存在且为 `""`；原始报文 token 精确匹配；防"只修详情、列表残留" |
@@ -95,8 +102,8 @@ batch/
 |------|------|---------|---------|------|
 | BT-2-000 | 可达性冒烟（ghost → 404 业务语义） | 冒烟 | - | 404 |
 | BT-2-001 | 任务不存在 | 异常参数 | - | 404 |
-| BT-2-002 | 直写一行 → 字段完整（**2026-10-16 按合同重写**，issue #249；**2026-10-19 补 filename**，issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行（含 filename） | 200；Data 顶层即任务字段（§2.1，无 task/files 包装层）；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`batch_files` 恰含输入/输出两条，元素键集合精确为 §2.2 六字段（file_id/provider/purpose/filename/bytes/created_at），`filename` 为 `input.jsonl`/`output.jsonl`，原始报文无 direction 等内部字段 |
-| BT-2-003 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 行 1 行 | 404（按不存在处理） |
+| BT-2-002 | 直写一行 → 字段完整（**2026-10-16 按合同重写**，issue #249；**2026-10-19 补 filename**，issue #254；**2026-10-23 锁 `product_name` 键缺席**，issue #276） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行（含 filename） | 200；Data 顶层即任务字段（§2.1，无 task/files 包装层）；`product_name` 键缺席（issue #276：内部字段从契约剔除，不入参不返回）；`reserve_units=250000000` 且原始报文为整数 token（1e-8 定点，不做 ÷1e8）；`batch_files` 恰含输入/输出两条，元素键集合精确为 §2.2 六字段（file_id/provider/purpose/filename/bytes/created_at），`filename` 为 `input.jsonl`/`output.jsonl`，原始报文无 direction 等内部字段 |
+| BT-2-003 | 非默认产品线不可见 | 正常参数 | 直写 `OTHER_product` 行 1 行 | 404（按不存在处理） |
 | BT-2-004 | 无关联文件 | 返回数据 | 直写任务 1 行（无输入/输出文件 ID） | 200；`batch_files` 键缺席（omitempty，无文件不输出空数组） |
 | BT-2-005 | purpose 按方向映射（issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行，`purpose` 列写 provider 原值 `batch`、`filename` 留空 | 200；`purpose` 分别为 `batch_input`/`batch_output`（列内原值不外泄）；`filename` 键缺席（omitempty）；原始报文无 `direction` |
 | BT-2-006 | 零值终态任务零值键必现（issue #271） | 返回数据 | 直写 `settled` / `released` 零值行各 1 行（金额 0、`terminal_at=NULL`） | 200；`est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0（map `ok` 存在性 + 原始报文整数 token 双锁），`output_file_id` / `terminal_at` 键存在且为 `""`，报文不含 `"terminal_at":null`；`usage_source` 键缺席（契约缺口，锁现行为） |
@@ -108,6 +115,9 @@ batch/
 - 顶层形状锁：`Data.task` / `Data.files` 必须**不存在**——合同（batches.md
   §3.2）规定 Data 即 BatchTask 对象本身（家族11：防包装层回归，客户端按
   单对象解码静默得到全零值）
+- issue #276 契约剔除锁：`product_name` 必须**不存在**于任务/文件响应
+  （内部字段，batches.md §1/§6；map `ok` 存在性断言 + schema 未声明键
+  不校验双锁）——防"内部字段重新透出"回归；BT-4-001 同步锁定
 - 任务字段全部在 Data 顶层取值；`key_name` 属内部字段，合同 §2.1 未列出，
   不作为断言依据
 - `batch_files` 元素键集合用 ElementsMatch 精确锁（防 #201 幻影键）；
@@ -154,10 +164,10 @@ batch/
 | 编号 | 场景 | 测试类型 | 数据准备 | 预期 |
 |------|------|---------|---------|------|
 | BT-4-000 | 可达性冒烟（ghost file → 404 业务语义） | 冒烟 | - | 404 |
-| BT-4-001 | 直写 batch_files → 200 | 返回数据 | 直写文件 1 行（含 filename） | 200；file_id/provider/api_key_id/product_name/direction/purpose/filename/lines/bytes 全字段匹配 |
+| BT-4-001 | 直写 batch_files → 200 | 返回数据 | 直写文件 1 行（含 filename） | 200；file_id/provider/api_key_id/direction/purpose/filename/lines/bytes 全字段匹配；`product_name` 键缺席（issue #276 契约剔除） |
 | BT-4-002 | 文件不存在 | 异常参数 | - | 404 |
 | BT-4-003 | provider query 缺失 | 必填校验 | - | 422 |
-| BT-4-004 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 文件 1 行 | 404 |
+| BT-4-004 | 非默认产品线不可见 | 正常参数 | 直写 `OTHER_product` 文件 1 行 | 404 |
 
 ### 4.5 Redis 回源说明
 
@@ -179,7 +189,7 @@ BT-3-007 以 `//go:build mysql` 隔离（未设 DSN 自动 Skip）。
 
 - 任务行：`batch_id` 以用例编号 tag 为前缀（如 `bt-1-002-xxxxx-a`），
   便于过滤与清理；`idem_key` 取 `batch_id + "-idem"` 满足唯一约束
-- `product_name=AI_product` 为"可见"行，`OTHER_product` 为隔离行
+- `product_name=AI_product`（= 默认产品线）为"可见"行，`OTHER_product` 为非默认产品线不可见行
 - 金额字段：`reserve_units=250000000`（2.5 RMB，1e-8 定点整数）
 - provider 直写：`instance_pool` / `api_keys` 为 JSON 文本；
   `protocol_paths={"openai":"/v1"}`，cancel 出网路径即 `/v1/batches/{id}/cancel`
