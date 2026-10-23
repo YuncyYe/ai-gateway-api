@@ -88,13 +88,18 @@ type BatchTaskRow struct {
 	Status       string
 	SettleStatus string
 	ReserveUnits int64
+	SettleUnits  int64
 	OverReserved int
 	SyncSource   string
 	IdemKey      string
+	// TerminalAt 非 nil 时写入该时间；nil 时落 NULL（未终结）。
+	TerminalAt *time.Time
 }
 
 // InsertBatchTask 向 batch_tasks 直写一行，返回自增 id。
-// 时间列由 Go 侧 time.Now() 传入，SQL 双方言通用。
+// 时间列由 Go 侧 time.Now() 传入，SQL 双方言通用。est_lines /
+// usage_input_tokens / usage_output_tokens 固定为 0、usage_source 固定
+// 为空串（issue #271 零值用例的种子形态）。
 func InsertBatchTask(t *testing.T, db *sql.DB, row BatchTaskRow) int64 {
 	t.Helper()
 	if row.SettleStatus == "" {
@@ -111,11 +116,11 @@ func InsertBatchTask(t *testing.T, db *sql.DB, row BatchTaskRow) int64 {
 			est_lines, usage_input_tokens, usage_output_tokens, usage_source,
 			reserve_units, settle_units, settle_status, over_reserved,
 			sync_source, idem_key, created_at, updated_at, terminal_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 0, 0, 0, '', ?, 0, ?, ?, ?, ?, ?, ?, NULL)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 0, 0, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, row.BatchID, row.APIKeyID, row.ProductName, row.EntityID, row.Provider,
 		row.KeyName, row.Endpoint, row.InputFileID, row.OutputFileID, row.Status,
-		row.ReserveUnits, row.SettleStatus, row.OverReserved, row.SyncSource, row.IdemKey,
-		now, now)
+		row.ReserveUnits, row.SettleUnits, row.SettleStatus, row.OverReserved, row.SyncSource, row.IdemKey,
+		now, now, row.TerminalAt)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()
 	require.NoError(t, err)

@@ -36,19 +36,24 @@ var BatchFileMetaSchema = &testutil.ObjectSchema{
 
 // BatchTaskDetailSchema 批量任务详情响应（batches.md §3.2：Data 即
 // BatchTask 对象本身，字段同 §2.1 含 batch_files）。
-// Required 为恒输出键；Optional 为 omitempty 键（未完成无输出文件、未结算
-// 无金额等场景缺席）。内部字段（id/key_name/idem_key）为已记录的契约超集
-// 遗留，不列入 schema（未声明键不校验，由 BT-2-002 定向锁覆盖）。
+// Required 为恒输出键；Optional 为 omitempty 键（标识类字段无值时缺席、
+// request_counts/usage_source 契约未定义空值、batch_files 仅详情填充）。
+// issue #271 起 est_lines/usage_*/reserve_units/settle_units（int64 零值必现）
+// 与 output_file_id/terminal_at（空串必现）移入 Required——零值/空值显式输出。
+// 内部字段（id/key_name/idem_key）为已记录的契约超集遗留，不列入 schema
+//（未声明键不校验，由 BT-2-002 定向锁覆盖）。
 var BatchTaskDetailSchema = &testutil.ObjectSchema{
 	Required: []string{
 		"batch_id", "api_key_id", "product_name", "provider", "status",
-		"settle_status", "over_reserved", "sync_source", "created_at", "updated_at",
+		"output_file_id", "est_lines",
+		"usage_input_tokens", "usage_output_tokens",
+		"reserve_units", "settle_units",
+		"settle_status", "over_reserved", "sync_source",
+		"terminal_at", "created_at", "updated_at",
 	},
 	Optional: []string{
-		"entity_id", "endpoint", "input_file_id", "output_file_id",
-		"request_counts", "est_lines",
-		"usage_input_tokens", "usage_output_tokens", "usage_source",
-		"reserve_units", "settle_units", "terminal_at", "batch_files",
+		"entity_id", "endpoint", "input_file_id",
+		"request_counts", "usage_source", "batch_files",
 	},
 	Fields: map[string]testutil.FieldSpec{
 		"batch_id":            {Type: testutil.TypeString},

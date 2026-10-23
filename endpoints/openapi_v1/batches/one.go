@@ -26,8 +26,8 @@ import (
 
 // BatchTaskOneAction GET /open-api/v1/batches/{batch_id}：DB 优先，miss
 // 回源 Redis BATCH_TASK（覆盖对账 job 落库前窗口），再 miss 404。
-// 返回 *ibatch.BatchTask：Data 顶层即任务字段，关联文件填充 batch_files
-//（batches.md §3.2，元素形状 §2.2）。
+// 返回 batchTaskView：Data 顶层即任务字段（batches.md §2.1 必现规则，
+// issue #271），关联文件填充 batch_files（batches.md §3.2，元素形状 §2.2）。
 func BatchTaskOneAction(req *http.Request) (interface{}, error) {
 	product, err := resolveProduct(req.Context())
 	if err != nil {
@@ -59,5 +59,5 @@ func BatchTaskOneAction(req *http.Request) (interface{}, error) {
 		task.BatchFiles = append(task.BatchFiles, file.ToMeta())
 	}
 
-	return task, nil
+	return newBatchTaskView(task), nil
 }

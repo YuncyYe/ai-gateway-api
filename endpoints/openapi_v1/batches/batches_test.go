@@ -248,7 +248,7 @@ func TestBatchTaskOneAction(t *testing.T) {
 		data, err := BatchTaskOneAction(req)
 		require.NoError(t, err)
 		// 契约（batches.md §3.2）：Data 顶层即任务字段，关联文件在 batch_files。
-		task := data.(*ibatch.BatchTask)
+		task := data.(*batchTaskView)
 		assert.Equal(t, "b-1", task.BatchID)
 		require.Len(t, task.BatchFiles, 2)
 		meta := task.BatchFiles[0]
@@ -276,7 +276,7 @@ func TestBatchTaskOneAction(t *testing.T) {
 		req := withPathVars(newProductRequest(t, http.MethodGet, "/batches/b-2"), map[string]string{"batch_id": "b-2"})
 		data, err := BatchTaskOneAction(req)
 		require.NoError(t, err)
-		task := data.(*ibatch.BatchTask)
+		task := data.(*batchTaskView)
 		require.Len(t, task.BatchFiles, 1)
 		assert.Equal(t, "f-in", task.BatchFiles[0].FileID)
 	})
@@ -303,7 +303,7 @@ func TestBatchTaskCancelAction(t *testing.T) {
 		req := withPathVars(newProductRequest(t, http.MethodPost, "/batches/b-1/cancel"), map[string]string{"batch_id": "b-1"})
 		data, err := BatchTaskCancelAction(req)
 		require.NoError(t, err)
-		task := data.(*ibatch.BatchTask)
+		task := data.(*batchTaskView)
 		assert.Equal(t, ibatch.TaskStatusCancelling, task.Status)
 	})
 

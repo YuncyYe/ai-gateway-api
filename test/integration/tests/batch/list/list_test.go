@@ -215,3 +215,49 @@ func TestBatchList_CursorPagination(t *testing.T) {
 		assert.Equal(t, 1, n, "row %s must not repeat across pages", bid)
 	}
 }
+
+// ---------- BT-1-005 列表元素零值键必现（issue #271） ----------
+
+// TestBatchList_ZeroValuesExplicit 锁定列表元素与详情同规则：零值 int64
+// 与空串必须显式出现（batches.md §2.1"字段必现规则"）。防"只修详情、
+// 列表残留"——one.go 与 list.go 必须同批改。当前 HEAD 上本用例必须失败。
+func TestBatchList_ZeroValuesExplicit(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-1-005")
+	ak := helper.Unique("ak")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: ak, ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "completed", SettleStatus: "settled",
+		ReserveUnits: 0, SettleUnits: 0, IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches", map[string]string{"api_key_id": ak})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	list, err := testutil.GetDataListField(resp, "list")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	entry, ok := list[0].(map[string]interface{})
+	require.True(t, ok)
+
+	for _, k := range []string{"est_lines", "usage_input_tokens", "usage_output_tokens",
+		"reserve_units", "settle_units"} {
+		v, ok := entry[k]
+		require.True(t, ok, "列表元素键 %s 必须显式出现", k)
+		assert.Equal(t, float64(0), v, "列表元素键 %s 的值必须为 0", k)
+	}
+	for _, k := range []string{"output_file_id", "terminal_at"} {
+		v, ok := entry[k]
+		require.True(t, ok, "列表元素键 %s 必须显式出现", k)
+		assert.Equal(t, "", v, "列表元素键 %s 的值必须为空串", k)
+	}
+
+	body := string(resp.RawBody)
+	for _, token := range []string{`"reserve_units":0`, `"settle_units":0`, `"terminal_at":""`} {
+		assert.Contains(t, body, token, "原始报文必须含 %s", token)
+	}
+}

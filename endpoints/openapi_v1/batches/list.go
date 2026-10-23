@@ -36,8 +36,8 @@ type batchTaskListFilter struct {
 }
 
 type batchTaskListResponse struct {
-	List       []*ibatch.BatchTask `json:"list"`
-	NextCursor int64               `json:"next_cursor"`
+	List       []*batchTaskView `json:"list"`
+	NextCursor int64            `json:"next_cursor"`
 }
 
 // BatchTaskListAction GET /open-api/v1/batches：过滤 + 主键游标分页。
@@ -82,9 +82,5 @@ func BatchTaskListAction(req *http.Request) (interface{}, error) {
 		return nil, err
 	}
 
-	list := result.Tasks
-	if list == nil {
-		list = []*ibatch.BatchTask{}
-	}
-	return &batchTaskListResponse{List: list, NextCursor: result.NextCursor}, nil
+	return &batchTaskListResponse{List: newBatchTaskViews(result.Tasks), NextCursor: result.NextCursor}, nil
 }

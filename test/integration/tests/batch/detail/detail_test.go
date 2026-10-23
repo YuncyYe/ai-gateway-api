@@ -15,14 +15,19 @@
 package detail_test
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	helper "github.com/rainway-ai-gateway/ai-gateway-api/integration/tests/batch/helper"
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibatch"
+	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/batch"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -276,3 +281,177 @@ func TestBatchDetail_ProductIsolation(t *testing.T) {
 	require.NoError(t, err)
 	testutil.AssertErrCode(t, resp, 404)
 }
+
+// ---------- BT-2-006 零值终态任务：§2.1 必现键显式输出 0/""（issue #271） ----------
+
+// TestBatchDetail_ZeroValuesExplicit 锁定 batches.md §2.1"字段必现规则"
+//（issue #271）：int64 零值与空串必须显式出现，不得被 omitempty 吞掉。
+// settled 与 released 两种终态各一行（issue 复现面）；种子经 helper
+// 直写（est_lines/usage/settle_units=0、usage_source=''、terminal_at=NULL），
+// 与 issue 的 Redis 回读数据同形。当前 HEAD 上本用例必须失败（复现
+// issue），修复后通过。
+func TestBatchDetail_ZeroValuesExplicit(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-006")
+	rows := []helper.BatchTaskRow{
+		{BatchID: tag + "-settled", APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+			Provider: "deepseek", Status: "completed", SettleStatus: "settled",
+			ReserveUnits: 0, SettleUnits: 0, IdemKey: tag + "-settled-idem"},
+		{BatchID: tag + "-released", APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+			Provider: "deepseek", Status: "failed", SettleStatus: "released",
+			ReserveUnits: 0, SettleUnits: 0, IdemKey: tag + "-released-idem"},
+	}
+	for _, r := range rows {
+		helper.InsertBatchTask(t, db, r)
+		defer helper.DeleteBatchTask(t, db, r.BatchID)
+	}
+
+	// 键存在性必须走 map 的 ok 判定：结构体解码会给缺席键填零值，
+	// "值正确"断言无法发现键缺席（本 issue 的缺陷形态正是键缺席）。
+	intZeroKeys := []string{"est_lines", "usage_input_tokens", "usage_output_tokens",
+		"reserve_units", "settle_units"}
+	strEmptyKeys := []string{"output_file_id", "terminal_at"}
+	rawZeroTokens := []string{`"est_lines":0`, `"usage_input_tokens":0`,
+		`"usage_output_tokens":0`, `"reserve_units":0`, `"settle_units":0`,
+		`"output_file_id":""`, `"terminal_at":""`}
+
+	for _, r := range rows {
+		resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + r.BatchID)
+		require.NoError(t, err)
+		testutil.AssertSuccess(t, resp)
+
+		var data map[string]interface{}
+		require.NoError(t, json.Unmarshal(resp.Data, &data))
+		for _, k := range intZeroKeys {
+			v, ok := data[k]
+			require.True(t, ok, "键 %s 必须显式出现（batch %s, settle=%s）", k, r.BatchID, r.SettleStatus)
+			assert.Equal(t, float64(0), v, "键 %s 的值必须为 0", k)
+		}
+		for _, k := range strEmptyKeys {
+			v, ok := data[k]
+			require.True(t, ok, "键 %s 必须显式出现（batch %s, settle=%s）", k, r.BatchID, r.SettleStatus)
+			assert.Equal(t, "", v, "键 %s 的值必须为空串", k)
+		}
+		// usage_source 契约缺口（枚举无空值）：维持省略，锁现行为
+		_, ok := data["usage_source"]
+		assert.False(t, ok, "usage_source 空值时键必须省略（契约缺口，现行为）")
+
+		// 原始报文 token 精确匹配（防解码容忍造成假通过；整数字段
+		// 不得出现小数点/字符串化）
+		body := string(resp.RawBody)
+		for _, token := range rawZeroTokens {
+			assert.Contains(t, body, token, "原始报文必须含 %s", token)
+		}
+		assert.NotContains(t, body, `"terminal_at":null`, "terminal_at 只允许空串，不允许 null")
+	}
+}
+
+// ---------- BT-2-007 非零回归：金额按定点整数输出、terminal_at 为 RFC3339（issue #271） ----------
+
+// TestBatchDetail_NonZeroValues 防"无条件输出 0/空串"的过修回归：金额
+// 非零时原样输出（1e-8 定点整数，不 ÷1e8），terminal_at 非空时为
+// RFC3339 字符串。本用例修复前后都应通过。
+func TestBatchDetail_NonZeroValues(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-007")
+	terminalAt := time.Date(2026, 10, 6, 10, 20, 0, 0, time.UTC)
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "completed", SettleStatus: "settled",
+		ReserveUnits: 250000000, SettleUnits: 180000000, // 2.5 / 1.8 RMB
+		OutputFileID: tag + "-out", TerminalAt: &terminalAt, IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	assert.Equal(t, float64(180000000), data["settle_units"])
+	assert.Equal(t, "2026-10-06T10:20:00Z", data["terminal_at"])
+	assert.Equal(t, tag+"-out", data["output_file_id"])
+
+	// 原始报文整数 token 精确匹配（沿用 BT-2-002 的断言法）
+	needle := strconv.Quote("settle_units") + ":"
+	idx := strings.LastIndex(string(resp.RawBody), needle)
+	require.NotEqual(t, -1, idx)
+	rest := string(resp.RawBody)[idx+len(needle):]
+	end := strings.IndexAny(rest, ",}")
+	require.NotEqual(t, -1, end)
+	token := strings.TrimSpace(rest[:end])
+	assert.Equal(t, "180000000", token, "settle_units must serialize as integer token")
+}
+
+// ---------- BT-2-008 对账落库路径：batch_files[].filename 经生产 upsert 落库并输出（issue #272） ----------
+
+// TestBatchDetail_FilenameFromUpsertPath 锁定 issue #272 的修复：batch_files
+// 唯一生产写入路径（storage/rdb/batch.UpsertBatchFile → DAO
+// TBatchFileUpsertByFileProvider）落库时不得丢弃 filename——种子走生产
+// upsert 通路（而非 helper 直写 SQL），模拟对账 sync 的真实写入；随后
+// 二次 upsert 传空 filename，验证冲突更新的 COALESCE 保护（不回退 NULL）。
+// 键存在性走 map `ok` 判定 + 原始报文 token 双锁（沿用 BT-2-006 断言法）。
+// 判据属性：修复前本用例必须失败（DB 行 filename 恒 NULL → 键缺席），
+// 修复后通过。
+func TestBatchDetail_FilenameFromUpsertPath(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-2-008")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "in_progress", SettleStatus: "reserved",
+		InputFileID: tag + "-in", SyncSource: "log", IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
+
+	// 种子走生产写入路径（对账 sync 的实际通路），filename 非空。
+	storager := batch.NewBatchStorager(func(ctx context.Context, ops ...*lib.Op) (*lib.DBContext, error) {
+		return lib.NewDBContext(ctx, db), nil
+	})
+	_, err := storager.UpsertBatchFile(context.Background(), &ibatch.BatchFile{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch",
+		Filename: "input.jsonl", Bytes: 1024,
+	})
+	require.NoError(t, err)
+
+	// 二次 upsert 传空 filename（模拟 provider 未给的刷新）：COALESCE
+	// 保护下 DB 已有值不得回退为 NULL。
+	_, err = storager.UpsertBatchFile(context.Background(), &ibatch.BatchFile{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch",
+		Bytes: 1024,
+	})
+	require.NoError(t, err)
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	filesVal, ok := data["batch_files"]
+	require.True(t, ok, "Data.batch_files must exist")
+	files, ok := filesVal.([]interface{})
+	require.True(t, ok, "Data.batch_files must be array")
+	require.Equal(t, 1, len(files))
+	f, ok := files[0].(map[string]interface{})
+	require.True(t, ok, "batch_files element must be object")
+	assert.Equal(t, tag+"-in", f["file_id"])
+
+	// 键存在性必须走 map 的 ok 判定（结构体解码会给缺席键填零值）。
+	filename, hasFilename := f["filename"]
+	require.True(t, hasFilename, "input 元素必须含 filename 键（provider 已给，§2.2）")
+	assert.Equal(t, "input.jsonl", filename)
+
+	// 原始报文 token 精确匹配（防解码容忍造成假通过）。
+	assert.Contains(t, string(resp.RawBody), `"filename":"input.jsonl"`)
+}
+

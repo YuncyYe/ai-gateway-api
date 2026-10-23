@@ -100,6 +100,13 @@
 | `terminal_at` | string | 进入终态时间（RFC3339） | 未终结为空 |
 | `batch_files` | array | 关联批量文件元数据列表 | 元素结构见 §2.2 |
 
+> **字段必现规则**（issue #271 起显式化）：`est_lines` / `usage_input_tokens` /
+> `usage_output_tokens` / `reserve_units` / `settle_units` 五个 int64 字段约束为 `≥0`，
+> `0` 是合法值，响应中必须显式出现（值为 `0`），不得用省略键表达"为零 / 未知"；
+> `output_file_id`（未完成时为空）与 `terminal_at`（未终结为空）必须显式出现，
+> 空值输出为空串 `""`。其余未标注"为空"语义的字段，取不到值时按省略处理
+> （键不出现在响应中）。
+
 ### 2.2 BatchFile（批量文件元数据）
 
 ```json

@@ -81,6 +81,7 @@ CREATE TABLE batch_files (
   product_name TEXT NOT NULL,
   direction TEXT NOT NULL,
   purpose TEXT,
+  filename TEXT,
   line_count INTEGER,
   bytes INTEGER,
   first_seen_at DATETIME,
@@ -313,12 +314,18 @@ func TestTBatchFileUpsertByFileProvider(t *testing.T) {
 		ProductName: lib.PString("p1"),
 		Direction:   lib.PString("input"),
 		Purpose:     lib.PString("batch"),
+		Filename:    lib.PString("input.jsonl"),
 		Lines:       lib.PInt64(5),
 		Bytes:       lib.PInt64(100),
 	}
 	id, err := TBatchFileUpsertByFileProvider(dbCtx, data)
 	require.NoError(t, err)
 	assert.Greater(t, id, int64(0))
+
+	one, err := TBatchFileOne(dbCtx, &TBatchFileParam{FileID: lib.PString("f-1"), Provider: lib.PString("openai")})
+	require.NoError(t, err)
+	require.NotNil(t, one)
+	assert.Equal(t, "input.jsonl", one.Filename, "首次 insert 必须落库 filename")
 
 	// 幂等刷新。
 	data.Lines = lib.PInt64(9)
@@ -329,11 +336,23 @@ func TestTBatchFileUpsertByFileProvider(t *testing.T) {
 	_, err = TBatchFileUpsertByFileProvider(dbCtx, data)
 	require.NoError(t, err)
 
-	one, err := TBatchFileOne(dbCtx, &TBatchFileParam{FileID: lib.PString("f-1"), Provider: lib.PString("openai")})
+	one, err = TBatchFileOne(dbCtx, &TBatchFileParam{FileID: lib.PString("f-1"), Provider: lib.PString("openai")})
 	require.NoError(t, err)
 	require.NotNil(t, one)
 	assert.Equal(t, int64(9), one.Lines)
 	assert.Equal(t, int64(100), one.Bytes)
+	assert.Equal(t, "input.jsonl", one.Filename)
+
+	// 二次 upsert 传空串 filename（参数层 PString 空串为非 nil，
+	// 生产路径实际形态）：NULLIF+COALESCE 保护，DB 值不回退为空。
+	data.Filename = lib.PString("")
+	_, err = TBatchFileUpsertByFileProvider(dbCtx, data)
+	require.NoError(t, err)
+
+	one, err = TBatchFileOne(dbCtx, &TBatchFileParam{FileID: lib.PString("f-1"), Provider: lib.PString("openai")})
+	require.NoError(t, err)
+	require.NotNil(t, one)
+	assert.Equal(t, "input.jsonl", one.Filename, "空 filename 不得把已有值刷空")
 
 	// (file_id, provider) 复合唯一：同 file 不同 provider 两条。
 	_, err = TBatchFileUpsertByFileProvider(dbCtx, &TBatchFileParam{

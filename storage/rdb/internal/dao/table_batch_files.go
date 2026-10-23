@@ -115,7 +115,9 @@ func TBatchFileCreate(dbCtx lib.DBContexter, data ...*TBatchFileParam) (int64, e
 // TBatchFileUpsertByFileProvider 按 (file_id, provider) 唯一键幂等 upsert：
 // MySQL ON DUPLICATE KEY UPDATE / SQLite ON CONFLICT(file_id, provider)
 // DO UPDATE。已存在行刷新可变字段（key_name/api_key_id/product_name/
-// direction/purpose/line_count/bytes/last_seen_at/updated_at）；
+// direction/purpose/filename/line_count/bytes/last_seen_at/updated_at）；
+// filename 冲突更新带 NULLIF+COALESCE 保护：新值为空（NULL 或 ''，
+// 参数层空串经 PString 为非 nil）不覆盖已有值；
 // first_seen_at 为 insert 时事实不回退。返回自增 ID（冲突更新时为 0）。
 func TBatchFileUpsertByFileProvider(dbCtx lib.DBContexter, data *TBatchFileParam) (int64, error) {
 	if data.FileID == nil || *data.FileID == "" || data.Provider == nil || *data.Provider == "" {
@@ -130,26 +132,28 @@ func TBatchFileUpsertByFileProvider(dbCtx lib.DBContexter, data *TBatchFileParam
 
 	args := []interface{}{
 		data.FileID, data.Provider, data.KeyName, data.APIKeyID, data.ProductName,
-		data.Direction, data.Purpose, data.Lines, data.Bytes,
+		data.Direction, data.Purpose, data.Filename, data.Lines, data.Bytes,
 		data.FirstSeenAt, data.LastSeenAt, data.CreatedAt, data.UpdatedAt,
 	}
 
 	var query string
 	if isMySQL(dbCtx.Conn()) {
 		query = `INSERT INTO batch_files
-(file_id, provider, key_name, api_key_id, product_name, direction, purpose, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+(file_id, provider, key_name, api_key_id, product_name, direction, purpose, filename, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
 key_name=VALUES(key_name), api_key_id=VALUES(api_key_id), product_name=VALUES(product_name),
-direction=VALUES(direction), purpose=VALUES(purpose), line_count=VALUES(line_count), bytes=VALUES(bytes),
+direction=VALUES(direction), purpose=VALUES(purpose), filename=COALESCE(NULLIF(VALUES(filename), ''), filename),
+line_count=VALUES(line_count), bytes=VALUES(bytes),
 last_seen_at=VALUES(last_seen_at), updated_at=VALUES(updated_at)`
 	} else {
 		query = `INSERT INTO batch_files
-(file_id, provider, key_name, api_key_id, product_name, direction, purpose, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+(file_id, provider, key_name, api_key_id, product_name, direction, purpose, filename, line_count, bytes, first_seen_at, last_seen_at, created_at, updated_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(file_id, provider) DO UPDATE SET
 key_name=excluded.key_name, api_key_id=excluded.api_key_id, product_name=excluded.product_name,
-direction=excluded.direction, purpose=excluded.purpose, line_count=excluded.line_count, bytes=excluded.bytes,
+direction=excluded.direction, purpose=excluded.purpose, filename=COALESCE(NULLIF(excluded.filename, ''), batch_files.filename),
+line_count=excluded.line_count, bytes=excluded.bytes,
 last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at`
 	}
 
