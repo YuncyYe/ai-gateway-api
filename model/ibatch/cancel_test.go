@@ -33,6 +33,13 @@ import (
 // setupCancelFixture 组装 cancel 测试夹具：httptest provider +
 // Manager。handler 为 provider 侧行为；preempt 为抢占 affected。
 func setupCancelFixture(t *testing.T, handler http.HandlerFunc, preempt int64) (*Manager, *fakeBatchStorager, *fakeRedisClient, *fakeOperationLogRecorder, *httptest.Server) {
+	return setupCancelFixtureWithKeys(t, handler, preempt,
+		[]iprovider.ProviderKey{{Name: "k1", Key: "sk-test"}})
+}
+
+// setupCancelFixtureWithKeys 与 setupCancelFixture 相同，但允许指定 provider
+// keys（nil/空切片 = keyless provider，issue #274）。
+func setupCancelFixtureWithKeys(t *testing.T, handler http.HandlerFunc, preempt int64, keys []iprovider.ProviderKey) (*Manager, *fakeBatchStorager, *fakeRedisClient, *fakeOperationLogRecorder, *httptest.Server) {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -69,7 +76,7 @@ func setupCancelFixture(t *testing.T, handler http.HandlerFunc, preempt int64) (
 			name := "openai"
 			return &iprovider.Provider{
 				Name:          name,
-				Keys:          []iprovider.ProviderKey{{Name: "k1", Key: "sk-test"}},
+				Keys:          keys,
 				InstancePool:  []iprovider.ProviderInstance{{Addr: addr, Port: port}},
 				ProtocolPaths: map[string]string{"openai": "/v1/"},
 			}, nil
@@ -379,4 +386,187 @@ func TestNormalizeProviderPath(t *testing.T) {
 	assert.Equal(t, "/v1", normalizeProviderPath("/v1/"))
 	assert.Equal(t, "/v1", normalizeProviderPath("v1"))
 	assert.Equal(t, "/openai/v1", normalizeProviderPath("/openai/v1/"))
+}
+
+// issue #274：keyless provider（keys: []）是合法配置（providers.md keys 条款），
+// cancel 应无鉴权出网并 200。修复前此用例失败（500 errProviderUnavailable）。
+func TestCancel_KeylessProvider(t *testing.T) {
+	var gotPath string
+	var authPresent bool
+	m, _, redis, _, _ := setupCancelFixtureWithKeys(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, authPresent = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}, 1, nil)
+
+	redis.hGetAllFn = func(ctx context.Context, key string) (map[string]string, error) {
+		return map[string]string{"plan-a": "500"}, nil
+	}
+
+	task, err := m.Cancel(context.Background(), "b-1", "p1")
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, TaskStatusCancelling, task.Status)
+	assert.Equal(t, "/v1/batches/b-1/cancel", gotPath)
+	assert.False(t, authPresent, "keyless provider 不得携带 Authorization 头")
+}
+
+// issue #274：已 cancelling 任务的重放为幂等 200（重发 provider cancel 保证意图
+// 落地，释放为幂等 no-op）。修复前此用例失败（409 errBatchConflict 假冲突）。
+func TestCancel_ReplayIdempotent(t *testing.T) {
+	cancelCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancelCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	addr, port := splitAddrPort(t, server.URL)
+	storager := &fakeBatchStorager{
+		fetchTaskFn: func(ctx context.Context, filter *BatchTaskFilter) (*BatchTask, error) {
+			return &BatchTask{
+				ID: 11, BatchID: "b-1", ProductName: "p1",
+				Provider: "openai", KeyName: "k1", Status: TaskStatusCancelling,
+			}, nil
+		},
+		preemptCancelFn: func(ctx context.Context, batchID, productName string) (int64, error) {
+			return 0, nil
+		},
+	}
+	providers := &fakeProviderQuerier{
+		fetchFn: func(ctx context.Context, filter *iprovider.ProviderFilter) (*iprovider.Provider, error) {
+			return &iprovider.Provider{
+				Name:         "openai",
+				Keys:         []iprovider.ProviderKey{{Name: "k1", Key: "sk"}},
+				InstancePool: []iprovider.ProviderInstance{{Addr: addr, Port: port}},
+			}, nil
+		},
+	}
+	m := NewManager(storager, &fakeRedisClient{},
+		&fakeAPIKeyQuerier{}, providers, &fakePriceQuerier{},
+		func() *http.Client { return server.Client() }, &fakeClock{})
+
+	task, err := m.Cancel(context.Background(), "b-1", "p1")
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, TaskStatusCancelling, task.Status)
+	assert.Equal(t, 1, cancelCalls, "幂等重放应重发 provider cancel 保证意图落地")
+}
+
+// 终态任务重放仍 409——防 R3 把终态误判为幂等重放。
+func TestCancel_ReplayTerminalConflict(t *testing.T) {
+	storager := &fakeBatchStorager{
+		fetchTaskFn: func(ctx context.Context, filter *BatchTaskFilter) (*BatchTask, error) {
+			return &BatchTask{
+				ID: 11, BatchID: "b-1", ProductName: "p1",
+				Provider: "openai", Status: TaskStatusCompleted,
+			}, nil
+		},
+		preemptCancelFn: func(ctx context.Context, batchID, productName string) (int64, error) {
+			return 0, nil
+		},
+	}
+	providers := &fakeProviderQuerier{
+		fetchFn: func(ctx context.Context, filter *iprovider.ProviderFilter) (*iprovider.Provider, error) {
+			t.Errorf("终态冲突不应解析 provider 或出网")
+			return nil, nil
+		},
+	}
+	m := NewManager(storager, &fakeRedisClient{},
+		&fakeAPIKeyQuerier{}, providers, &fakePriceQuerier{}, nil, &fakeClock{})
+
+	_, err := m.Cancel(context.Background(), "b-1", "p1")
+	require.Error(t, err)
+	assert.Equal(t, 409, xerror.Resolve(err).ErrNo)
+}
+
+// issue #274：resolveProviderAccess 三分支——keyless 放行（authHeader 空）、
+// keyName 命中与回退、配置了 key 但无可用明文报数据异常。
+func TestResolveProviderAccess_KeylessAndBranches(t *testing.T) {
+	mkManager := func(pq *fakeProviderQuerier) *Manager {
+		return NewManager(&fakeBatchStorager{}, &fakeRedisClient{},
+			&fakeAPIKeyQuerier{}, pq, &fakePriceQuerier{}, nil, &fakeClock{})
+	}
+	fetchFixed := func(p *iprovider.Provider, err error) func(context.Context, *iprovider.ProviderFilter) (*iprovider.Provider, error) {
+		return func(ctx context.Context, filter *iprovider.ProviderFilter) (*iprovider.Provider, error) {
+			return p, err
+		}
+	}
+	pool := []iprovider.ProviderInstance{{Addr: "10.0.0.1", Port: 8080}}
+
+	t.Run("keys nil → 无鉴权头", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name: "openai", InstancePool: pool}, nil)}
+		access, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "k1")
+		require.NoError(t, err)
+		require.NotNil(t, access)
+		assert.Empty(t, access.authHeader)
+		assert.Empty(t, access.authValue)
+		assert.Equal(t, "http://10.0.0.1:8080", access.baseURL)
+	})
+
+	t.Run("keys 空切片 → 无鉴权头", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name: "openai", Keys: []iprovider.ProviderKey{}, InstancePool: pool}, nil)}
+		access, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "")
+		require.NoError(t, err)
+		require.NotNil(t, access)
+		assert.Empty(t, access.authHeader)
+	})
+
+	t.Run("keyName 命中", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name:         "openai",
+			Keys:         []iprovider.ProviderKey{{Name: "k1", Key: "sk1"}, {Name: "k2", Key: "sk2"}},
+			InstancePool: pool}, nil)}
+		access, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "k2")
+		require.NoError(t, err)
+		assert.Equal(t, "Authorization", access.authHeader)
+		assert.Equal(t, "Bearer sk2", access.authValue)
+	})
+
+	t.Run("keyName 缺失回退第一个可用明文", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name:         "openai",
+			Keys:         []iprovider.ProviderKey{{Name: "k1", Key: "sk1"}},
+			InstancePool: pool}, nil)}
+		access, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "ghost")
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer sk1", access.authValue)
+	})
+
+	t.Run("keyName 为空回退第一个可用明文", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name:         "openai",
+			Keys:         []iprovider.ProviderKey{{Name: "k1", Key: "sk1"}},
+			InstancePool: pool}, nil)}
+		access, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "")
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer sk1", access.authValue)
+	})
+
+	t.Run("配置了 key 但无可用明文 → 数据异常 500", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name:         "openai",
+			Keys:         []iprovider.ProviderKey{{Name: "k1", Key: ""}},
+			InstancePool: pool}, nil)}
+		_, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "")
+		require.Error(t, err)
+		assert.Equal(t, 500, xerror.Resolve(err).ErrNo)
+	})
+
+	t.Run("provider 不存在 → 500", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(nil, nil)}
+		_, err := mkManager(pq).resolveProviderAccess(context.Background(), "ghost", "")
+		require.Error(t, err)
+		assert.Equal(t, 500, xerror.Resolve(err).ErrNo)
+	})
+
+	t.Run("无可用实例 → 500", func(t *testing.T) {
+		pq := &fakeProviderQuerier{fetchFn: fetchFixed(&iprovider.Provider{
+			Name: "openai"}, nil)}
+		_, err := mkManager(pq).resolveProviderAccess(context.Background(), "openai", "")
+		require.Error(t, err)
+		assert.Equal(t, 500, xerror.Resolve(err).ErrNo)
+	})
 }

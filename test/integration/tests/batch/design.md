@@ -20,7 +20,7 @@ Batch 模块覆盖"批量与异步任务支持（一期）"的控制面管控 Op
 |------|------|
 | 列表 | 空表返回空数组 + `next_cursor`；status/provider/api_key_id 过滤生效；产品线隔离；limit >200 钳制为 200；cursor 翻页不重复不遗漏 |
 | 详情 | 不存在 → 404（BATCH_NOT_FOUND）；直写一行 → 200 且字段完整（settle_status / reserve_units 定点整数 / over_reserved / sync_source）；关联 batch_files 按 §2.2 形状组装在 Data 顶层（无 task/files 包装层，issue #249 合同锁定） |
-| 取消 | 不存在 → 404；已终态（completed）→ 409；cancelling（受理中）→ 409；非终态但 provider 不可达 → 502；provider 记录缺失 → 500（实现语义，见 §4.3）；成功 → 200 cancelling + operation_logs 审计 |
+| 取消 | 不存在 → 404；已终态（completed）→ 409；cancelling（受理中）重放 → 200 幂等（重发 cancel，issue #274）；keyless provider（keys: []）→ 200 且无鉴权出网（issue #274）；非终态但 provider 不可达 → 502；provider 记录缺失 → 500（实现语义，见 §4.3）；成功 → 200 cancelling + operation_logs 审计 |
 | 文件 | 直写 batch_files → 200 字段正确；不存在 → 404；provider 缺失 → 422；产品线隔离 |
 
 ### 2.2 测试环境
@@ -64,7 +64,7 @@ batch/
 ├── detail/
 │   └── detail_test.go       # BT-2-000 ~ BT-2-007
 ├── cancel/
-│   └── cancel_test.go       # BT-3-000 ~ BT-3-008（BT-3-007 为 MySQL 并发用例）
+│   └── cancel_test.go       # BT-3-000 ~ BT-3-009（BT-3-007 为 MySQL 并发用例）
 └── file/
     └── file_test.go         # BT-4-000 ~ BT-4-004
 ```
@@ -131,12 +131,13 @@ batch/
 | BT-3-000 | 可达性冒烟（ghost cancel → 404 业务语义） | 冒烟 | - | 404 |
 | BT-3-001 | 任务不存在 | 异常参数 | - | 404 |
 | BT-3-002 | 已终态（completed） | 业务规则 | 直写 completed 行 | 409（抢占 affected=0） |
-| BT-3-003 | cancelling（受理中中间态）→ 409 | 业务规则 | 直写 cancelling 行 | 409（**语义修复后双方言一致**：抢占 WHERE 显式排除终态与 cancelling，仅首个完成状态转换的调用受理成功；对 cancelling 行重放——本实例重试或他实例并发——返回 409，防惊群重复出网。原实现依赖方言差异：MySQL 同值 UPDATE affected=0 恰好表现为 409，而 SQLite changes() 按命中计数表现为 200；存储层 WHERE 收敛后两边一致。修复：storage/rdb/batch.PreemptBatchTaskCancel） |
+| BT-3-003 | cancelling（受理中中间态）重放 → 200 幂等（issue #274） | 业务规则 | 直写 cancelling 行 + provider 指向本进程 httptest 假 upstream | 200；Data.status=cancelling；假 upstream 恰好收到 1 次重发 cancel；审计 status=1（**issue #274 契约**：抢占 affected=0 时按当前状态判别——终态 409；已 cancelling → 200 幂等重放，重发 provider cancel 保证意图落地，释放为幂等 no-op。修复前为 409 假冲突：无并发实例在处理，409 是上个请求抢占残留的误导语义，且抢占可能是首次出网未落地的崩溃空洞。存储层"仅首个转换者成功"互斥语义不变） |
 | BT-3-004 | 非终态 provider 不可达 | 异常路径 | 直写 in_progress 行 + provider 实例指向 `127.0.0.1:9` | 502（连接拒绝 → ErrUpstreamUnreachable） |
 | BT-3-005 | provider 记录缺失 | 异常路径 | 直写 in_progress 行（provider 不存在） | **500**（实现语义：`errProviderUnavailable` 为模型错误 WrapModelErrorWithMsg，endpoints 未映射 502；api-changes.md §5 表述为"可映射 502 或 500"，以实际运行为准钉死） |
 | BT-3-006 | cancel 成功 + 审计 | 正常参数 + 审计 | 直写 in_progress 行 + provider 指向本进程 httptest 假 upstream | 200；Data.status=cancelling；出网路径 `/v1/batches/{id}/cancel`；SQLite `operation_logs` 出现 `resource_type=batch_task`、`resource_id={batch_id}`、`action=update`、`status=1`、change_summary 含 batch_id 与 cancelling |
-| BT-3-007 | 并发 cancel 抢占原子性（MySQL） | 并发正确性（家族10，`//go:build mysql`） | MySQL 后端；20 goroutine 同时 cancel 同一 in_progress 行；provider 指向本进程 httptest 假 upstream | 恰好 1 个 200、其余 19 个 409；假 upstream 仅收到 1 次出网；`operation_logs` 恰好 1 条成功审计（status=1）且总审计数=20（实现按尝试记账，含冲突失败 status=2）；任务最终 cancelling |
+| BT-3-007 | 并发 cancel 抢占原子性（MySQL） | 并发正确性（家族10，`//go:build mysql`） | MySQL 后端；20 goroutine 同时 cancel 同一 in_progress 行；provider 指向本进程 httptest 假 upstream | **issue #274 契约**：恰好 1 个抢占受理（主路径出网）+ 19 个幂等重放（affected=0 且读回 cancelling → 200 重发 cancel）→ 全部 20 个 200；假 upstream 收到 20 次幂等 cancel；`operation_logs` 20 条成功审计（status=1，每次尝试各记一条）；任务最终 cancelling（修复前契约：1×200 + 19×409 + upstream 恰好 1 次——防惊群；#274 裁定并发重放出网均幂等，改判 200） |
 | BT-3-008 | 取消响应零值键必现（issue #271） | 返回数据 | 直写零值非终态行（`reserve_units=0`）+ provider 指向本进程 httptest 假 upstream | 200；Data 中 `est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0，`output_file_id` / `terminal_at` 键存在且为 `""`（同 BT-2-006 规则）；防"只修详情、取消残留" |
+| BT-3-009 | keyless provider（keys: []）cancel（issue #274） | 业务规则 | provider `api_keys=[]`（keyless 合法配置）+ 实例指向本进程 httptest 假 upstream + 直写 in_progress 行 | 200；Data.status=cancelling；假 upstream 收到的 cancel **不含 Authorization 头**（map 存在性断言）；与数据面 keyless cluster 转发语义一致。修复前为 500 `batch provider unavailable`（不出网、抢占残留、重试 409 假冲突） |
 
 **断言要点**
 

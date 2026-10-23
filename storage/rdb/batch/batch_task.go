@@ -75,8 +75,10 @@ func (s *BatchStorager) ListBatchTasks(ctx context.Context, filter *ibatch.Batch
 //
 // 语义：抢占为"状态转换受理权"——仅首个将任务从非终态转为 cancelling
 // 的调用受理成功（affected=1，调用方继续出网 cancel）；对已是 cancelling
-// 的行重放（本实例重试或他实例并发）必须返回 0 → 上层 409，避免惊群
-// 重复出网（批量任务与对账.md §6 五步流程：他实例处理中 → 409）。
+// 的行重放（本实例重试或他实例并发）返回 0，由上层 model 按任务当前状态
+// 判别：终态 → 409；已 cancelling → 200 幂等重放（重发 provider cancel，
+// 幂等，见 batches.md §3.3 处理逻辑 1 与 issue #274）。存储层维持"仅首个
+// 转换者成功"的互斥语义不变，不在存储层区分终态与受理中。
 //
 // 双方言一致性：MySQL 默认 CLIENT_FOUND_ROWS=off，同值 UPDATE
 //（命中但无实际列变化）天然返回 affected=0；SQLite changes() 按命中行

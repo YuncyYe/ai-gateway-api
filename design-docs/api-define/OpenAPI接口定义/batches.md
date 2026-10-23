@@ -301,6 +301,7 @@
 **前置依赖**
 
 - 控制面 → provider **出网**可达（降级部署无出网时，本接口退化为不可用，批量任务仅支持展示）。
+- provider 未配置 API-Key（`keys: []`，见 `providers.md` keys 条款）时，取消请求**不携带鉴权头**出网——与数据面对 keyless cluster 的转发语义一致（issue #274）。
 
 **输入参数（URI）**
 
@@ -314,7 +315,7 @@
 
 **处理逻辑**
 
-1. **DB 条件更新抢占**：`UPDATE ... SET status='cancelling' WHERE batch_id=? AND status NOT IN (终态)`；`affected_rows=0` → 返回 409（已终态，或其他实例正在处理）；
+1. **DB 条件更新抢占**：`UPDATE ... SET status='cancelling' WHERE batch_id=? AND status NOT IN (终态, cancelling)`——**affected_rows=0 时取任务当前状态判别**：已终态 → 返回 409；已为 `cancelling` → **200 幂等重放**（重发 provider cancel 保证取消意图落地，provider cancel 幂等；预留释放为幂等 no-op，不新增 release/charge/settlement transition）；
 2. **出网调用 provider**：向任务所属 provider 的 cancel 端点发起 `POST`（透传取消语义）；
 3. **成功处理**：置 `status=cancelling`，Redis **幂等**释放该任务的金额预留（重复 cancel / 重复释放安全）；
 4. **审计**：写入 operation_logs（`resource_type=batch`，含操作者、`batch_id`、处理结果）。
@@ -362,7 +363,7 @@
 | - | - |
 | 401 / 402 | 未认证 / 无 FeatureBatch 取消权限 |
 | 404 | 任务不存在（DB 与 Redis 均 miss）；或 provider 侧 batch 不存在 |
-| 409 | 任务已终态，或他实例正在处理（条件更新抢占失败） |
+| 409 | 任务已终态（`cancelling` 受理中的重放返回 200，见处理逻辑 1） |
 | 502 | provider 不可达（出网调用失败） |
 
 ---

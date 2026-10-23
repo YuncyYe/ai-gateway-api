@@ -109,26 +109,53 @@ func TestBatchCancel_TerminalCompleted(t *testing.T) {
 	testutil.AssertErrCode(t, resp, 409)
 }
 
-// ---------- BT-3-003 cancelling（受理中中间态）→ 409 ----------
+// ---------- BT-3-003 cancelling（受理中中间态）重放 → 200 幂等（issue #274） ----------
 
-// 语义（双方言一致）：抢占 WHERE 显式排除终态与 cancelling——仅首个
-// 完成"非终态 → cancelling"转换的调用受理成功；对已是 cancelling 的
-// 行重放（本实例重试或他实例并发）返回 409（受理中，防惊群重复出网）。
-// 该语义为存储层修复后的设计行为（design.md §4.3 记录）。
-func TestBatchCancel_CancellingConflict(t *testing.T) {
+// 语义（issue #274 修复，batches.md §3.3 处理逻辑 1）：抢占 affected=0 时
+// 按任务当前状态判别——已终态 → 409；已 cancelling → 200 幂等重放：重发
+// provider cancel 保证取消意图落地（provider cancel 幂等），释放为幂等
+// no-op，不新增 release/charge/settlement transition。修复前本用例断言 409
+//（假冲突：无并发实例在处理，是上个请求的残留受理态），design.md §4.3 记录。
+func TestBatchCancel_CancellingReplay(t *testing.T) {
 	helper.RequireBatchAPI(t)
 	db := helper.OpenDB(t, sm)
 
 	tag := helper.Unique("bt-3-003")
+	provider := tag + "-provider"
+
+	// 本地假 provider：重放出网打回本测试进程，验证重发确实发生。
+	cancelCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancelCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, upstreamPort, err := net.SplitHostPort(upstream.URL[len("http://"):])
+	require.NoError(t, err)
+
+	helper.InsertProvider(t, db, provider,
+		`[{"addr":"127.0.0.1","port":`+upstreamPort+`,"weight":100}]`,
+		`[{"name":"key-primary","key":"sk-test"}]`)
+	defer helper.DeleteProvider(t, db, provider)
+
 	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
 		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
-		Provider: "deepseek", Status: "cancelling", IdemKey: tag + "-idem",
+		Provider: provider, KeyName: "key-primary", Status: "cancelling", IdemKey: tag + "-idem",
 	})
 	defer helper.DeleteBatchTask(t, db, tag)
 
 	resp, err := testutil.GetClient().Post(cancelPath(tag), map[string]interface{}{})
 	require.NoError(t, err)
-	testutil.AssertErrCode(t, resp, 409)
+	testutil.AssertSuccess(t, resp)
+
+	var task map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &task))
+	assert.Equal(t, "cancelling", task["status"])
+	assert.Equal(t, 1, cancelCalls, "幂等重放应重发一次 provider cancel")
+
+	audit := waitCancelAudit(t, db, tag)
+	assert.Equal(t, int64(1), audit["status"], "重放成功审计 status must be success(1)")
 }
 
 // ---------- BT-3-004 非终态但 provider 不可达 → 502 ----------
@@ -289,4 +316,52 @@ func TestBatchCancel_ZeroValuesExplicit(t *testing.T) {
 	for _, token := range []string{`"reserve_units":0`, `"settle_units":0`, `"terminal_at":""`} {
 		assert.Contains(t, body, token, "原始报文必须含 %s", token)
 	}
+}
+
+// ---------- BT-3-009 keyless provider（keys: []）cancel → 200 且无鉴权头（issue #274） ----------
+
+// keyless 是合法配置（providers.md keys 条款：非必填、默认 []；clusters.md：
+// 空数组 = 不配置 API-Key），取消请求不携带鉴权头出网，与数据面 keyless
+// cluster 转发语义一致。修复前本用例失败（500 batch provider unavailable，
+// 且抢占残留导致后续 409 假冲突与三视图分裂）。
+func TestBatchCancel_KeylessProvider(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-3-009")
+	provider := tag + "-provider"
+
+	var gotPath string
+	var authPresent bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, authPresent = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, upstreamPort, err := net.SplitHostPort(upstream.URL[len("http://"):])
+	require.NoError(t, err)
+
+	// keys 为空数组 = 不配置 API-Key（keyless provider）。
+	helper.InsertProvider(t, db, provider,
+		`[{"addr":"127.0.0.1","port":`+upstreamPort+`,"weight":100}]`,
+		`[]`)
+	defer helper.DeleteProvider(t, db, provider)
+
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: provider, Status: "in_progress", IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	resp, err := testutil.GetClient().Post(cancelPath(tag), map[string]interface{}{})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var task map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &task))
+	assert.Equal(t, "cancelling", task["status"])
+	assert.Equal(t, "/v1/batches/"+tag+"/cancel", gotPath)
+	assert.False(t, authPresent, "keyless provider 不得携带 Authorization 头")
 }
