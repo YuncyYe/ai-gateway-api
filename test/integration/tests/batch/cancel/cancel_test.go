@@ -229,3 +229,64 @@ func TestBatchCancel_SuccessWithAudit(t *testing.T) {
 	assert.Contains(t, audit["change_summary"], tag)
 	assert.Contains(t, audit["change_summary"], "cancelling")
 }
+
+// ---------- BT-3-008 取消响应零值键必现（issue #271） ----------
+
+// TestBatchCancel_ZeroValuesExplicit 锁定取消接口与详情/列表同视图规则：
+// 零值 int64 与空串必须显式出现（batches.md §2.1"字段必现规则"）。防
+// "只修详情、取消残留"——cancel.go 必须同批改。当前 HEAD 上本用例必须失败。
+func TestBatchCancel_ZeroValuesExplicit(t *testing.T) {
+	helper.RequireBatchAPI(t)
+	db := helper.OpenDB(t, sm)
+
+	tag := helper.Unique("bt-3-008")
+	provider := tag + "-provider"
+
+	// 本地假 provider：cancel 出网打回本测试进程并返回 200（同 BT-3-006）。
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	_, upstreamPort, err := net.SplitHostPort(upstream.URL[len("http://"):])
+	require.NoError(t, err)
+
+	helper.InsertProvider(t, db, provider,
+		`[{"addr":"127.0.0.1","port":`+upstreamPort+`,"weight":100}]`,
+		`[{"name":"key-primary","key":"sk-test"}]`)
+	defer helper.DeleteProvider(t, db, provider)
+
+	// 零值种子：未预留金额（reserve_units=0）、未结算（settle_units=0）、
+	// 未终结（terminal_at=NULL）——与 issue 复现数据同形。
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: provider, KeyName: "key-primary", Status: "in_progress",
+		ReserveUnits: 0, SettleUnits: 0, IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+
+	resp, err := testutil.GetClient().Post(cancelPath(tag), map[string]interface{}{})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &data))
+	assert.Equal(t, "cancelling", data["status"])
+
+	for _, k := range []string{"est_lines", "usage_input_tokens", "usage_output_tokens",
+		"reserve_units", "settle_units"} {
+		v, ok := data[k]
+		require.True(t, ok, "取消响应键 %s 必须显式出现", k)
+		assert.Equal(t, float64(0), v, "取消响应键 %s 的值必须为 0", k)
+	}
+	for _, k := range []string{"output_file_id", "terminal_at"} {
+		v, ok := data[k]
+		require.True(t, ok, "取消响应键 %s 必须显式出现", k)
+		assert.Equal(t, "", v, "取消响应键 %s 的值必须为空串", k)
+	}
+
+	body := string(resp.RawBody)
+	for _, token := range []string{`"reserve_units":0`, `"settle_units":0`, `"terminal_at":""`} {
+		assert.Contains(t, body, token, "原始报文必须含 %s", token)
+	}
+}

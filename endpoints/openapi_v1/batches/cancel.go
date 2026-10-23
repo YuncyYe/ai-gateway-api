@@ -52,5 +52,5 @@ func BatchTaskCancelAction(req *http.Request) (interface{}, error) {
 		}
 		return nil, err
 	}
-	return task, nil
+	return newBatchTaskView(task), nil
 }

@@ -60,11 +60,11 @@ batch/
 ├── helper/
 │   └── helper.go            # 探测守卫 + SQLite 直写种子工具
 ├── list/
-│   └── list_test.go         # BT-1-000 ~ BT-1-004
+│   └── list_test.go         # BT-1-000 ~ BT-1-005
 ├── detail/
-│   └── detail_test.go       # BT-2-000 ~ BT-2-005
+│   └── detail_test.go       # BT-2-000 ~ BT-2-007
 ├── cancel/
-│   └── cancel_test.go       # BT-3-000 ~ BT-3-007（BT-3-007 为 MySQL 并发用例）
+│   └── cancel_test.go       # BT-3-000 ~ BT-3-008（BT-3-007 为 MySQL 并发用例）
 └── file/
     └── file_test.go         # BT-4-000 ~ BT-4-004
 ```
@@ -80,6 +80,7 @@ batch/
 | BT-1-002 | status / provider / api_key_id 过滤 + 产品线隔离 | 正常参数 | 直写 4 行（含其它产品线 1 行） | 各过滤仅命中目标行；`OTHER_product` 行任何组合不可见 |
 | BT-1-003 | limit 上限钳制 | 边界值 | 直写 205 行 | `limit=250` 返回 200 行；`next_cursor != 0` |
 | BT-1-004 | cursor 翻页 | 正常参数 | 直写 7 行 | `limit=3` 翻至 `next_cursor=0`；收集 id 无重复无遗漏 |
+| BT-1-005 | 列表元素零值键必现（issue #271） | 返回数据 | 直写零值行 1 行（`settled`，金额 0） | 200；`Data.list[0]` 的 `est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0，`output_file_id` / `terminal_at` 键存在且为 `""`；原始报文 token 精确匹配；防"只修详情、列表残留" |
 
 **断言要点**
 
@@ -98,6 +99,8 @@ batch/
 | BT-2-003 | 产品线隔离 | 正常参数 | 直写 `OTHER_product` 行 1 行 | 404（按不存在处理） |
 | BT-2-004 | 无关联文件 | 返回数据 | 直写任务 1 行（无输入/输出文件 ID） | 200；`batch_files` 键缺席（omitempty，无文件不输出空数组） |
 | BT-2-005 | purpose 按方向映射（issue #254） | 返回数据 | 直写任务 1 行 + 输入/输出文件各 1 行，`purpose` 列写 provider 原值 `batch`、`filename` 留空 | 200；`purpose` 分别为 `batch_input`/`batch_output`（列内原值不外泄）；`filename` 键缺席（omitempty）；原始报文无 `direction` |
+| BT-2-006 | 零值终态任务零值键必现（issue #271） | 返回数据 | 直写 `settled` / `released` 零值行各 1 行（金额 0、`terminal_at=NULL`） | 200；`est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0（map `ok` 存在性 + 原始报文整数 token 双锁），`output_file_id` / `terminal_at` 键存在且为 `""`，报文不含 `"terminal_at":null`；`usage_source` 键缺席（契约缺口，锁现行为） |
+| BT-2-007 | 非零回归（issue #271） | 返回数据 | 直写 `settled` 非零行 1 行（`settle_units=180000000`、`terminal_at` 非空） | 200；`settle_units` 为整数 token 180000000（不 ÷1e8）；`terminal_at` 为 RFC3339 字符串而非 `""`——防"无条件输出 0/空串"过修；修复前后都应通过 |
 
 **断言要点（BT-2-002，合同锁定）**
 
@@ -114,6 +117,11 @@ batch/
 - issue #254 起 `filename` 由 provider File 对象落库并输出，元素键集合锁
   由"五键"扩为 §2.2 六键；`purpose` 的映射关系（列内 provider 原值 →
   视图契约枚举）由 BT-2-005 单独锁定，避免"按实现现状断言"再次固化
+- issue #271 起（BT-2-006/007）：键存在性必须走 map 的 `v, ok := data[k]`
+  + `require.True(ok)`，不允许只断言值——结构体解码会给缺席键填零值，
+  "值正确"断言发现不了键缺席（#271 的缺陷形态正是键缺席）；整数字段必须
+  对 `resp.RawBody` 做 token 精确匹配；BT-2-006 在当前 HEAD 上必须失败
+  （复现 #271），BT-2-007 修复前后都应通过
 
 ### 4.3 取消（BT-3）
 
@@ -127,6 +135,7 @@ batch/
 | BT-3-005 | provider 记录缺失 | 异常路径 | 直写 in_progress 行（provider 不存在） | **500**（实现语义：`errProviderUnavailable` 为模型错误 WrapModelErrorWithMsg，endpoints 未映射 502；api-changes.md §5 表述为"可映射 502 或 500"，以实际运行为准钉死） |
 | BT-3-006 | cancel 成功 + 审计 | 正常参数 + 审计 | 直写 in_progress 行 + provider 指向本进程 httptest 假 upstream | 200；Data.status=cancelling；出网路径 `/v1/batches/{id}/cancel`；SQLite `operation_logs` 出现 `resource_type=batch_task`、`resource_id={batch_id}`、`action=update`、`status=1`、change_summary 含 batch_id 与 cancelling |
 | BT-3-007 | 并发 cancel 抢占原子性（MySQL） | 并发正确性（家族10，`//go:build mysql`） | MySQL 后端；20 goroutine 同时 cancel 同一 in_progress 行；provider 指向本进程 httptest 假 upstream | 恰好 1 个 200、其余 19 个 409；假 upstream 仅收到 1 次出网；`operation_logs` 恰好 1 条成功审计（status=1）且总审计数=20（实现按尝试记账，含冲突失败 status=2）；任务最终 cancelling |
+| BT-3-008 | 取消响应零值键必现（issue #271） | 返回数据 | 直写零值非终态行（`reserve_units=0`）+ provider 指向本进程 httptest 假 upstream | 200；Data 中 `est_lines` / `usage_*` / `reserve_units` / `settle_units` 键存在且为 0，`output_file_id` / `terminal_at` 键存在且为 `""`（同 BT-2-006 规则）；防"只修详情、取消残留" |
 
 **断言要点**
 
