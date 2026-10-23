@@ -71,7 +71,26 @@ func (s *OperationLogStorager) List(ctx context.Context, filter *ioperlog.Operat
 		return nil, 0, err
 	}
 
-	list, err := dao.TOperationLogList(dbCtx, where)
+	paged := filter != nil && filter.Page != nil && filter.PageSize != nil
+	offset := 0
+	if paged {
+		offset = (*filter.Page - 1) * (*filter.PageSize)
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
+	var list []*dao.TOperationLog
+	switch {
+	case !paged:
+		list, err = dao.TOperationLogList(dbCtx, where)
+	case int64(offset) >= total:
+		// Beyond the last page: serve an empty page without touching the
+		// table, so an out-of-range page cannot degenerate into a full scan.
+		list = []*dao.TOperationLog{}
+	default:
+		list, err = dao.TOperationLogListDeferred(dbCtx, where)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
