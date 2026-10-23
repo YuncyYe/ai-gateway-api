@@ -33,8 +33,9 @@ import (
 //  1. 查任务：DB → Redis BATCH_TASK 回源，均 miss 返回 ErrBatchNotFound；
 //  2. DB 条件更新抢占 SET status='cancelling'
 //     WHERE batch_id=? AND product_name=? AND status NOT IN (终态, cancelling)，
-//     affected=0 返回 409 冲突（已终态或已受理中——仅首个转换者成功，
-//     双方言一致性见 storage/rdb/batch.PreemptBatchTaskCancel 注释）；
+//     affected=0 时按当前状态判别：已终态 → 409；已 cancelling → 200 幂等
+//     重放（见 cancelReplay；仅首个转换者成功，双方言一致性见
+//     storage/rdb/batch.PreemptBatchTaskCancel 注释）；
 //  3. 取 provider 记录与 key_name 对应明文 key，实例地址 +
 //     protocol_paths.openai 拼 cancel URL，出网 POST（超时控制）；
 //  4. 成功（2xx）后幂等释放 Redis 预留（BATCH_RESERVE_BATCH 簿记冲正，
@@ -77,6 +78,13 @@ func (m *Manager) Cancel(ctx context.Context, batchID, productName string) (*Bat
 			return nil, err
 		}
 		if affected == 0 {
+			// 抢占失败区分"已终态"（409）与"已 cancelling"（幂等重放 200，
+			// issue #274）：cancelling 可能来自首次抢占成功后出网失败/进程
+			// 崩溃的残留——重放重发 provider cancel 恢复取消意图落地。
+			if cur, ferr := m.FetchTask(ctx, batchID, productName, false); ferr == nil &&
+				cur != nil && cur.Status == TaskStatusCancelling {
+				return m.cancelReplay(ctx, cur)
+			}
 			err := errBatchConflict(batchID)
 			m.recordCancelOperation(ctx, batchID, prevStatus, err)
 			return nil, err
@@ -108,6 +116,32 @@ func (m *Manager) Cancel(ctx context.Context, batchID, productName string) (*Bat
 	return task, nil
 }
 
+// cancelReplay 已 cancelling 任务的幂等重放（issue #274）：重发 provider
+// cancel 保证取消意图落地（provider cancel 幂等）；预留释放为幂等 no-op
+//（簿记已删），不新增 release/charge/settlement transition；出网失败按原错误
+// 映射返回（502/超时），状态保持 cancelling，由下轮重放或对账补发恢复。
+func (m *Manager) cancelReplay(ctx context.Context, task *BatchTask) (*BatchTask, error) {
+	access, err := m.resolveProviderAccess(ctx, task.Provider, task.KeyName)
+	if err != nil {
+		m.recordCancelOperation(ctx, task.BatchID, TaskStatusCancelling, err)
+		return nil, err
+	}
+	cancelURL := access.baseURL + access.path + "/batches/" + task.BatchID + "/cancel"
+	if err := m.postProviderCancel(ctx, access, cancelURL); err != nil {
+		m.recordCancelOperation(ctx, task.BatchID, TaskStatusCancelling, err)
+		return nil, err
+	}
+	if m.redis != nil {
+		if err := m.releaseReserve(ctx, task.BatchID); err != nil {
+			// 释放失败不使重放失败：幂等语义保证下轮冲正不双倍。
+			stateful.AccessLogger.Warn("ibatch: cancel replay release reserve failed, batch=%s: %v", task.BatchID, err)
+		}
+	}
+	task.Status = TaskStatusCancelling
+	m.recordCancelOperation(ctx, task.BatchID, TaskStatusCancelling, nil)
+	return task, nil
+}
+
 // postProviderCancel 出网 POST provider cancel 端点。
 // 错误语义：网络错/超时/非 2xx（404 除外）→ ErrUpstreamUnreachable；
 // provider 404 → ErrUpstreamBatchNotFound（透传 provider 语义）。
@@ -119,7 +153,9 @@ func (m *Manager) postProviderCancel(ctx context.Context, access *providerAccess
 	if err != nil {
 		return err
 	}
-	req.Header.Set(access.authHeader, access.authValue)
+	if access.authHeader != "" {
+		req.Header.Set(access.authHeader, access.authValue)
+	}
 
 	resp, err := m.httpClientFactory().Do(req)
 	if err != nil {
@@ -140,6 +176,7 @@ func (m *Manager) postProviderCancel(ctx context.Context, access *providerAccess
 // providerAccess 是出网访问 provider 的解析结果（cancel / 状态推进 /
 // 兜底结算共用）：baseURL（scheme://host:port）、协议路径前缀
 // （protocol_paths.openai，规范化后无尾斜杠）与认证头。
+// authHeader 为空表示 keyless provider——出网请求不携带鉴权头（issue #274）。
 type providerAccess struct {
 	baseURL    string
 	path       string
@@ -148,7 +185,10 @@ type providerAccess struct {
 }
 
 // resolveProviderAccess 解析 provider 出网三要素。provider 记录不存在、
-// 无可用实例、无可用 key 时返回 errProviderUnavailable（控制面数据异常）。
+// 无可用实例、配置了 key 但无可用明文时返回 errProviderUnavailable（控制
+// 面数据异常）。provider keys 为空数组是合法 keyless 配置（providers.md
+// keys 条款：非必填、默认 []；clusters.md：空数组 = 不配置 API-Key），此时
+// 不携带鉴权头出网，与数据面 keyless cluster 转发语义一致（issue #274）。
 // key 在 storage 层已完成信封解密（providers.keys 读出即明文）。
 func (m *Manager) resolveProviderAccess(ctx context.Context, providerName, keyName string) (*providerAccess, error) {
 	if m.providerQuerier == nil {
@@ -166,25 +206,25 @@ func (m *Manager) resolveProviderAccess(ctx context.Context, providerName, keyNa
 	if inst == nil {
 		return nil, errProviderUnavailable(providerName)
 	}
-	baseURL := buildInstanceBaseURL(*inst)
 
-	path := "/v1"
+	access := &providerAccess{
+		baseURL: buildInstanceBaseURL(*inst),
+		path:    "/v1",
+	}
 	if p, ok := provider.ProtocolPaths["openai"]; ok && strings.TrimSpace(p) != "" {
-		path = normalizeProviderPath(p)
+		access.path = normalizeProviderPath(p)
 	}
 
+	if len(provider.Keys) == 0 {
+		// keyless provider：不携带鉴权头出网。
+		return access, nil
+	}
 	key := pickProviderKey(provider, keyName)
 	if key == nil {
 		return nil, errProviderUnavailable(providerName)
 	}
-	header, value := iprovider.BuildAuthHeader("openai", key.Key)
-
-	return &providerAccess{
-		baseURL:    baseURL,
-		path:       path,
-		authHeader: header,
-		authValue:  value,
-	}, nil
+	access.authHeader, access.authValue = iprovider.BuildAuthHeader("openai", key.Key)
+	return access, nil
 }
 
 // releaseReserve 幂等释放批量预留：读 BATCH_RESERVE_BATCH:<batch_id>

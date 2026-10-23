@@ -32,6 +32,13 @@ import (
 // setupAdvanceFixture 组装状态推进夹具：provider 侧由 handler 模拟，
 // DB 非终态任务列表由 tasks 给出。
 func setupAdvanceFixture(t *testing.T, tasks []*BatchTask, handler http.HandlerFunc) (*Manager, *fakeBatchStorager, *httptest.Server) {
+	return setupAdvanceFixtureWithKeys(t, tasks, handler,
+		[]iprovider.ProviderKey{{Name: "k1", Key: "sk"}})
+}
+
+// setupAdvanceFixtureWithKeys 与 setupAdvanceFixture 相同，但允许指定
+// provider keys（nil/空切片 = keyless provider，issue #274）。
+func setupAdvanceFixtureWithKeys(t *testing.T, tasks []*BatchTask, handler http.HandlerFunc, keys []iprovider.ProviderKey) (*Manager, *fakeBatchStorager, *httptest.Server) {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -52,7 +59,7 @@ func setupAdvanceFixture(t *testing.T, tasks []*BatchTask, handler http.HandlerF
 		fetchFn: func(ctx context.Context, filter *iprovider.ProviderFilter) (*iprovider.Provider, error) {
 			return &iprovider.Provider{
 				Name:          "openai",
-				Keys:          []iprovider.ProviderKey{{Name: "k1", Key: "sk"}},
+				Keys:          keys,
 				InstancePool:  []iprovider.ProviderInstance{{Addr: addr, Port: port}},
 				ProtocolPaths: map[string]string{"openai": "/v1"},
 			}, nil
@@ -389,4 +396,76 @@ func TestBackfillTerminalArtifacts_NoProviderQuerier(t *testing.T) {
 	backfilled, err := m.BackfillTerminalArtifacts(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, backfilled)
+}
+
+// issue #274：keyless provider 的状态推进 GET 不携带鉴权头。
+func TestAdvanceStatus_KeylessProviderNoAuthHeader(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 1, BatchID: "b-1", ProductName: "p1", Provider: "openai",
+		Status: TaskStatusInProgress, CreatedAt: time.Now().Add(-time.Hour),
+	}}
+	var authPresent bool
+	m, storager, _ := setupAdvanceFixtureWithKeys(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		_, authPresent = r.Header["Authorization"]
+		fmt.Fprint(w, `{"id":"b-1","status":"completed"}`)
+	}, nil)
+
+	advanced, err := m.AdvanceStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, advanced)
+	assert.False(t, authPresent, "keyless provider 的状态推进 GET 不得携带鉴权头")
+	require.Len(t, storager.progressPatches, 1)
+	assert.Equal(t, TaskStatusCompleted, *storager.progressPatches[0].Status)
+}
+
+// issue #274：取消意图不回退——本地 cancelling 且 provider 滞后仍报
+// in_progress 时，对账不得降级（验收判据 3），并补发一次幂等 cancel。
+// 修复前此用例失败（状态被降回 in_progress）。
+func TestAdvanceStatus_CancellingIntentHold(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 1, BatchID: "b-1", ProductName: "p1", Provider: "openai", KeyName: "k1",
+		Status: TaskStatusCancelling, CreatedAt: time.Now().Add(-time.Hour),
+	}}
+	cancelReissues := 0
+	m, storager, _ := setupAdvanceFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			cancelReissues++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		fmt.Fprint(w, `{"id":"b-1","status":"in_progress"}`)
+	})
+
+	advanced, err := m.AdvanceStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, advanced)
+	assert.Empty(t, storager.progressPatches, "cancelling 不得被对账降回 in_progress")
+	assert.Equal(t, 1, cancelReissues, "对账应补发一次幂等 cancel 保证意图落地")
+}
+
+// provider 回报终态 cancelled：正常收敛记 terminal_at，且不补发 cancel。
+func TestAdvanceStatus_CancellingConvergesToCancelled(t *testing.T) {
+	tasks := []*BatchTask{{
+		ID: 1, BatchID: "b-1", ProductName: "p1", Provider: "openai", KeyName: "k1",
+		Status: TaskStatusCancelling, CreatedAt: time.Now().Add(-time.Hour),
+	}}
+	cancelReissues := 0
+	m, storager, _ := setupAdvanceFixture(t, tasks, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			cancelReissues++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		fmt.Fprint(w, `{"id":"b-1","status":"cancelled"}`)
+	})
+
+	advanced, err := m.AdvanceStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, advanced)
+	assert.Equal(t, 0, cancelReissues, "provider 已回报终态时无需补发 cancel")
+	require.Len(t, storager.progressPatches, 1)
+	patch := storager.progressPatches[0]
+	require.NotNil(t, patch.Status)
+	assert.Equal(t, TaskStatusCancelled, *patch.Status)
+	require.NotNil(t, patch.TerminalAt)
 }

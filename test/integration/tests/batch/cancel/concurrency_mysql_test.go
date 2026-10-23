@@ -34,15 +34,23 @@ import (
 // TestBatchCancel_ConcurrentPreemptMySQL（BT-3-007）在 MySQL 后端下并发
 // cancel 同一 in_progress 任务，验证 DB 条件更新抢占
 // （UPDATE ... WHERE batch_id=? AND product_name=? AND status NOT IN (终态)）
-// 在真实 MySQL 行锁/原子语义下恰好一个受理、其余 409。
+// 在真实 MySQL 行锁/原子语义下的受理互斥，以及 issue #274 后的幂等重放契约：
+//
+//   - 恰好一个调用抢占受理（affected=1，主路径出网）；
+//   - 其余调用 affected=0 且读回状态为 cancelling → 走 200 幂等重放
+//     （重发 provider cancel，幂等；释放为幂等 no-op）；
+//   - 因此全部调用返回 200，upstream 收到 20 次幂等 cancel，全部审计
+//     为成功（status=1）。
 //
 // 需要真实 MySQL：DSN 取自 AIAPI_MYSQL_DSN（形如
 // root:pass@tcp(127.0.0.1:3306)/）。SQLite 单写者串行无法暴露该行锁
 // 竞态，本用例以 //go:build mysql 落盘（家族10，仿 traffic_mirror）。
 //
-// 审计语义说明：实现按"每次 cancel 尝试"记录审计（成功 status=1，
-// 冲突失败 status=2），故断言为"恰好一条成功审计 + 其余为失败审计"，
-// 而非仅一条审计（design.md §4.3 记录）。
+// 修复前契约为"1×200 + 19×409 + upstream 恰好 1 次出网"（防惊群）；
+// issue #274 裁定 cancelling 重放为 409 假冲突（误导排障，且抢占残留
+// 可能是首次出网未落地的崩溃空洞），改为幂等 200 并重发 cancel 恢复
+// 意图落地——并发重放出网均幂等，见 batches.md §3.3 处理逻辑 1 与
+// design.md §4.3。
 func TestBatchCancel_ConcurrentPreemptMySQL(t *testing.T) {
 	adminDSN := os.Getenv("AIAPI_MYSQL_DSN")
 	if adminDSN == "" {
@@ -59,7 +67,8 @@ func TestBatchCancel_ConcurrentPreemptMySQL(t *testing.T) {
 	tag := helper.Unique("bt-3-007")
 	provider := tag + "-provider"
 
-	// 本地假 provider：受理方出网打回本测试进程（唯一期望的一次）。
+	// 本地假 provider：受理方与重放方的出网都打到本测试进程
+	// （每次 cancel 均为幂等 POST，共期望 workers 次）。
 	var upstreamHits int
 	var upstreamMu sync.Mutex
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,16 +122,18 @@ func TestBatchCancel_ConcurrentPreemptMySQL(t *testing.T) {
 			other[code]++
 		}
 	}
-	assert.Equal(t, 1, okCount, "exactly one cancel must win the preempt")
-	assert.Equal(t, workers-1, conflictCount, "all losers must get 409")
+	// issue #274 契约：1 个抢占受理 + 19 个幂等重放，全部 200；
+	// 409 仅属于终态任务（本场景不存在）。
+	assert.Equal(t, workers, okCount, "1 个抢占受理 + workers-1 个幂等重放，全部 200")
+	assert.Equal(t, 0, conflictCount, "并发重放不得再返回 409 假冲突")
 	assert.Empty(t, other, "no unexpected error codes")
 
-	// 受理方恰好出网一次（幂等释放/重试不得重复出网）。
+	// 每次调用各出网一次幂等 cancel（1 主路径 + workers-1 重放）。
 	upstreamMu.Lock()
-	assert.Equal(t, 1, upstreamHits, "upstream must receive exactly one cancel POST")
+	assert.Equal(t, workers, upstreamHits, "upstream must receive one idempotent cancel POST per call")
 	upstreamMu.Unlock()
 
-	// 审计：恰好一条成功审计；其余尝试为失败审计（实现按尝试记账）。
+	// 审计：每次尝试各记一条成功审计（status=1）。
 	var successAudits, totalAudits int
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -138,9 +149,9 @@ func TestBatchCancel_ConcurrentPreemptMySQL(t *testing.T) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	assert.Equal(t, 1, successAudits, "exactly one success audit expected")
+	assert.Equal(t, workers, successAudits, "per-attempt audits all success after issue #274")
 	assert.Equal(t, workers, totalAudits,
-		"implementation records one audit per cancel attempt (success + conflicts)")
+		"implementation records one audit per cancel attempt")
 
 	// 终态校验：任务保持 cancelling（受理中），由状态推进对账收敛。
 	var status string

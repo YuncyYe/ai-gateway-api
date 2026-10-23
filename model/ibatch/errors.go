@@ -41,7 +41,9 @@ func errBatchConflict(batchID string) error {
 }
 
 // errProviderUnavailable 构造 provider 配置缺失错误（provider 记录不存在、
-// 无可用实例、key 缺失）。属控制面数据异常，endpoints 可映射 502 或 500。
+// 无可用实例、配置了 key 但无可用明文）。属控制面数据异常，endpoints 可映射
+// 502 或 500。provider keys 为空数组（keyless 合法配置）不视为异常——出网
+// 不携带鉴权头（issue #274）。
 func errProviderUnavailable(provider string) error {
 	return xerror.WrapModelErrorWithMsg("batch provider %s unavailable", provider)
 }

@@ -218,7 +218,20 @@ func (m *Manager) advanceOneTask(ctx context.Context, task *BatchTask) (bool, er
 	patch := &BatchTaskProgressPatch{
 		Status: &batchResp.Status,
 	}
-	changed := batchResp.Status != task.Status ||
+	statusHeld := false
+	if task.Status == TaskStatusCancelling &&
+		!IsTerminalStatus(batchResp.Status) && batchResp.Status != TaskStatusCancelling {
+		// 取消意图不回退（issue #274）：cancelling 是控制面断言状态，provider
+		// 滞后仍报 in_progress/queued 等非终态时本地保持；并补发一次 provider
+		// cancel（幂等）覆盖"首次出网未落地"空洞，失败 fail-open 下轮重试。
+		if err := m.postProviderCancel(ctx, access,
+			access.baseURL+access.path+"/batches/"+task.BatchID+"/cancel"); err != nil {
+			stateful.AccessLogger.Warn("ibatch: reissue cancel failed, batch=%s: %v", task.BatchID, err)
+		}
+		patch.Status = nil
+		statusHeld = true
+	}
+	changed := (!statusHeld && batchResp.Status != task.Status) ||
 		!equalCounts(batchResp.RequestCounts, task.RequestCounts)
 	if batchResp.RequestCounts != nil {
 		patch.RequestCounts = &batchResp.RequestCounts
@@ -310,7 +323,9 @@ func (m *Manager) getProvider(ctx context.Context, access *providerAccess, url s
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set(access.authHeader, access.authValue)
+	if access.authHeader != "" {
+		req.Header.Set(access.authHeader, access.authValue)
+	}
 
 	resp, err := m.httpClientFactory().Do(req)
 	if err != nil {
