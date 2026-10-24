@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/DATA-DOG/go-sqlmock v1.4.0
-	github.com/bfenetworks/bfe v1.8.8
+	github.com/bfenetworks/bfe v1.8.9
 	github.com/bfenetworks/go-lib v0.0.4
 	github.com/codegangsta/negroni v1.0.0
 	github.com/didi/gendry v1.7.0
@@ -79,7 +79,5 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
-
-replace github.com/bfenetworks/bfe => github.com/mileszhang2016/bfe v1.4.1-0.20261014135930-831135f2bfa5
 
 // 本地联调时可临时切换：replace github.com/bfenetworks/bfe => ../bfe
