@@ -11,6 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.0.11] - 2026-10-24
 
+### Added
+- Batch and async task management (phase 1): OpenAPI batch/file lifecycle aligned with the data plane's `mod_ai_batch` passthrough — terminal-field persistence, backstop settlement parsing on result-file download, and documented `batch_files` metadata.
+- Report query backends: ClickHouse and StarRocks (`[Report].Backend` third/fourth form, zero go.mod impact), Doris phase-2 aligned with the cache/mirror/intent dimensions, and report dimensions for the new `ai-cache` / `traffic-mirror` / `intent` access-log fields.
+- Security suite: user passwords stored as bcrypt hashes (SKIP backdoor removed, legacy plaintext lazily migrated on login); DB at-rest encryption for key material (envelope encryption + keyring + hot reload + convergence sweeps); field-level `enc$v1$` encryption for exported config files (control-plane landing of the data plane's `[Security]` keyring, BFE v1.8.9); management-plane IP allowlist (server config + middleware + hot reload).
+- Reencrypt-sweep history endpoint (`GET` list with filter/pagination/`created_by`) for auditing past sweep runs.
+- `ai_cache_rules` collection resource with `mod_ai_cache` config export, including the semantic-cache control plane (per-rule `enableSemantic` switch, global semantic settings, top-level `Semantic` export block).
+- `traffic_mirror_rules` collection resource with `mod_traffic_mirror` config export.
+- `intent_config` singleton resource with `mod-ai-intent` config export.
+- AI context compression control plane (rule set + global settings + top-level `Defaults` export block).
+- K8s provider instance pools: `instance_source` + `k8s_pools` maintenance for Kubernetes-discovered backends.
+- `clusters.llm_config.normalize_upstream_error` config for upstream error normalization (pairs with `AIConf.NormalizeUpstreamError` in BFE v1.8.9).
+- BFE condition primitive `time_weekday_in` support (aligned with the upgraded data-plane dependency).
+- Auth: system-administrator (read-only) role added; `is_admin` deprecated in favor of the unified `role`; API key responses masked.
+- Cluster EPP runtime parameters (`epp_runtime`) in cluster conf; new `database/` directory (`db_ddl_upgrade_to_0.0.11.sql` + report SQLite DDL).
+- SQLite single-machine local deployment; release package contents completed.
+
 ### Changed
 - **Breaking** `PATCH /epp-pool`: tighten group-size validation to exactly 1 instance per group (backup/standby pairs are no longer accepted); the `instances` field keeps its array form reserved for future multi-instance expansion.
 - **Breaking** `/epp-assignments`: assignment granularity is now the EPP group, not a single instance. The view is reduced to `{cluster, group}` (`primary`/`standby`/`instances`/`degraded` removed; instance details are derived from `/epp-pool` by group name); the PUT body is now `{"group_name"}` only. Clusters without a valid assignment (never assigned or dangling) are enumerated in `unassigned_clusters` and repaired by the periodic reconciler.
@@ -19,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `server_data_conf` `GslbBasic.EPPAddr` is now always a single-element list (the assigned group's instance addresses); no BFE change required.
 - Integration tests (`test/integration`) now default to a **MySQL** backend for `StartServer`/`StartServerWithMonitor`/`StartServerWithSharedInfra` (unique `ai_gateway_it_*` database per start, dropped on shutdown): SQLite's `TEXT` columns never validate JSON, which hid MySQL-only failures like the `providers.api_keys` `Error 3140` regression (issue #264) from the entire suite. Backend selection: `AIAPI_FORCE_SQLITE=1` (opt-out) → `AIAPI_MYSQL_DSN` (admin DSN without database name) → probe local `root@tcp(127.0.0.1:3306)/` → fall back to SQLite. `testutil.OpenDB(t, sm)` is the backend-agnostic way to read the database under test. See `design-docs/modifications/2026-10-21-integration-tests-mysql-default/`.
 - **Breaking** `GET/PUT /open-api/v1/ai-cache-rules`: rule entries no longer carry `created_at`/`updated_at`. A full-replace collection recreates every row on each PUT (ids renumbered), so per-rule timestamps only ever equalled the last PUT time; they are now server-maintained columns only, and audit time is available via `GET /operation-logs`. Submitted `created_at`/`updated_at` keys are ignored as unknown fields, so existing clients keep working. Aligns the resource with `/ai-context-rules` and `/global-route-rules`; see `design-docs/modifications/2026-10-20-issue-258-ai-cache-rules-drop-readonly-timestamps/`.
+- **Breaking** EPP exposed config refactored to load profile + admission watermark + bad-backend eviction; `scheduling_profile` and `cache_affinity` removed from the EPP config surface.
+- Upgrade data-plane dependency `github.com/bfenetworks/bfe` to v1.8.9 (formal release); the `replace` directive pinning a fork pseudo-version is removed, so the released module is consumed directly.
 
 ### Fixed
 - `GET /open-api/v1/batches/{batch_id}` now returns the task object itself at the `Data` top level with the associated files in `batch_files` (shape per `batches.md` §3.2), instead of the `{task, files}` wrapper; file entries follow the documented metadata shape and no longer expose internal fields (`id`/`direction`/`key_name`/…). This fixes the batch task detail page rendering empty panels in the dashboard (issue #249).
@@ -31,6 +49,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `POST /open-api/v1/providers` and `PATCH /open-api/v1/providers/{provider_name}` no longer fail with `500 Database Exception: Error 3140 ... for column 'providers.api_keys'` when DB at-rest encryption is enabled. `providers.api_keys` held a whole-column `enc$v1$` envelope while the column was declared `JSON`, which MySQL rejects on write (strict mode); it is now `MEDIUMTEXT` (`db_ddl.sql` for new installs, `database/db_ddl_upgrade_to_0.0.11.sql` §1.6 for existing ones — JSON→text conversion requires `ALGORITHM=COPY, LOCK=SHARED`). The same constraint also broke `scope=providers` reencrypt sweeps, so existing plaintext rows could not converge on MySQL. A new startup check (`stateful.CheckEncryptedColumnTypes`, active only with a keyring) refuses to start with an actionable message when the column is still `JSON`, and `fromDAO` now fails loudly on a corrupt key list instead of silently reading it as "no keys"; see `design-docs/modifications/2026-10-21-issue-264-provider-api-keys-column-type/`.
 - `PUT /open-api/v1/ai-cache-rules` now rejects duplicate `cond` values within the submitted collection (422, collection unchanged). Previously such a collection was accepted and exported verbatim, so BFE `mod_ai_cache` rejected the whole `ai_cache.data` (`can't have same cond`) while conf-agent retried the same unloadable version every poll and never switched the symlink — the caller only ever saw 200 while the data plane kept running the old rules. Aligns the resource with `/ai-context-rules` and `/traffic-mirror-rules`, which already validate `cond` uniqueness before the write (issue #261).
 - `PUT /open-api/v1/ai-cache-rules` no longer fails with `500 Database Exception: insert data not match` when the body mixes rules that carry `updated_at` (typically the `GET` readback) with rules that omit it. The mixed column set made gendry reject the bulk INSERT, and whether it failed depended on rule order — the natural "read, append, write back" edit path was blocked (issue #258).
+- `POST /open-api/v1/batches/{batch_id}/cancel` no longer blocks on keyless providers: the cancel is allowed, the cancel intent is not rolled back, and cancel is idempotent under replay (issue #274).
+- `batch_files` upsert now persists `filename`, fixing the missing `batch_files[].filename` key in task responses (issue #272).
+- Batch task responses now emit zero/empty fields explicitly instead of omitting them (issue #271).
+- Batch tasks now carry complete terminal fields plus backstop settlement parsing for the data plane's settle-on-download flow (issue #254).
+- Batch management API contract: `product_name` removed from parameters and responses (internal field); queries still filter by the default product line (issue #276).
+- `xreq` `BindForm`/`Bind`/`BindURI` type-conversion failures are now wrapped as 422 parameter errors instead of surfacing as 500 (issues #233, #237).
+- The built-in admin password can now be changed through the API: name-referenced endpoints use `UserNameRef` (issue #226).
+- DDL: `ai_cache_semantic_settings.updated_at` gains the missing `CURRENT_TIMESTAMP` default.
+- Report: `go-sql-driver` upgraded to v1.9.3, root-fixing the NULL-bitmap bug (StarRocks FE binary-row package defect); the text protocol is now fixed as the query path.
+- Report Doris: time-bucket `CAST` changed from `BIGINT` to `SIGNED` (compatible with real MySQL 8.4), and `LIMIT` is inlined as a literal (Doris does not support prepared placeholders).
+- Report detail-table dedup key gains `logid`, aligning with the BFE logid rewrite (bfenetworks/bfe#1417).
 
 ## [0.0.10] - 2026-09-24
 
