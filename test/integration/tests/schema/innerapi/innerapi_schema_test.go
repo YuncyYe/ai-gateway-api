@@ -16,8 +16,8 @@ package innerapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -49,6 +49,10 @@ func TestInnerAPI_Schema(t *testing.T) {
 	t.Run("mod_body_process", testModBodyProcessSchema)
 	t.Run("rate_limit_policy", testRateLimitPolicySchema)
 	t.Run("ai_route", testAIRouteSchema)
+	t.Run("ai_cache_rule", testAICacheRuleSchema)
+	t.Run("ai_context_rule", testAIContextRuleSchema)
+	t.Run("traffic_mirror_rule", testTrafficMirrorRuleSchema)
+	t.Run("mod_ai_intent", testModAIIntentSchema)
 	t.Run("epp_data", testEppDataSchema)
 	t.Run("server_data_conf_epp", testServerDataConfEppSchema)
 }
@@ -80,9 +84,9 @@ func setupAPIKeyWithRoute(t *testing.T, clusterName string) string {
 			"enabled": true,
 			"rules": []interface{}{
 				map[string]interface{}{
-					"name":    "default",
-					"cond":    "default_t()",
-					"targets": []interface{}{map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100}},
+					"name":      "default",
+					"cond":      "default_t()",
+					"targets":   []interface{}{map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100}},
 					"fallbacks": []interface{}{},
 				},
 			},
@@ -690,6 +694,421 @@ func testAIRouteSchema(t *testing.T) {
 	})
 }
 
+// ---------- ai_cache_rule ----------
+
+// phaseTwoAICacheFields 一期不得导出的二期/预留字段（ai-cache-rule.md §3.2 合同锁定）。
+var phaseTwoAICacheFields = []string{
+	"cacheKeyFrom", "cacheValueFrom", "cacheStreamValueFrom",
+	"cacheToolCallsFrom", "responseTemplate", "streamResponseTemplate",
+}
+
+func testAICacheRuleSchema(t *testing.T) {
+	// 自建集合：1 条仅 name+cond（默认值回填），1 条显式非默认。
+	validCond := `req_path_in("/v1/chat/completions", false)`
+	validCond2 := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "inner-schema-ac-2", false)`
+	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{"name": testutil.UniqueName("inner-schema-ac-1"), "cond": validCond},
+			map[string]interface{}{
+				"name": testutil.UniqueName("inner-schema-ac-2"), "cond": validCond2,
+				"cache_key_strategy": "allQuestions", "cache_ttl": 3600,
+				"max_body_bytes": 2097152, "max_value_bytes": 2097152,
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.ErrNum, putResp.ErrMsg)
+	t.Cleanup(func() {
+		_, _ = testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+
+	resp, err := testutil.GetClient().Get("/inner-api/v1/configs/ai-cache-rule")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	if resp.Data == nil || string(resp.Data) == "null" {
+		t.Fatal("first pull must return data")
+	}
+	testutil.AssertSchema(t, resp, AICacheRuleExportSchema)
+
+	// 定向断言 1：Version/Semantic/Config 存在，Config.AI_product 长度=2。
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &payload))
+	version, ok := payload["Version"].(string)
+	require.True(t, ok, "Version should be string")
+	require.NotEmpty(t, version)
+
+	// Semantic 块恒导出（二期）：空设置表时以默认值 1/0.15/lt 填充。
+	semantic, ok := payload["Semantic"].(map[string]interface{})
+	require.True(t, ok, "Semantic should be object")
+	assert.Equal(t, float64(1), semantic["topK"])
+	assert.InDelta(t, 0.15, semantic["threshold"], 1e-9)
+	assert.Equal(t, "lt", semantic["thresholdRelation"])
+
+	config, ok := payload["Config"].(map[string]interface{})
+	require.True(t, ok, "Config should be object")
+	productRules, ok := config["AI_product"].([]interface{})
+	require.True(t, ok, "Config.AI_product should be array")
+	require.Len(t, productRules, 2)
+
+	// 定向断言 2：每条规则恰含 6 个导出 tag（精确集合，防幻影键），值正确。
+	wantValues := []map[string]interface{}{
+		{
+			"cond": validCond, "cacheKeyStrategy": "lastQuestion",
+			"cacheTTL": float64(0), "maxBodyBytes": float64(1048576), "maxValueBytes": float64(1048576),
+			"enableSemanticCache": false,
+		},
+		{
+			"cond": validCond2, "cacheKeyStrategy": "allQuestions",
+			"cacheTTL": float64(3600), "maxBodyBytes": float64(2097152), "maxValueBytes": float64(2097152),
+			"enableSemanticCache": false,
+		},
+	}
+	wantKeys := []string{
+		"cond", "cacheKeyStrategy", "cacheTTL", "maxBodyBytes", "maxValueBytes",
+		"enableSemanticCache",
+	}
+	for i, item := range productRules {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok, "AI_product[%d] should be object", i)
+		keys := make([]string, 0, len(rule))
+		for k := range rule {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t, wantKeys, keys, "AI_product[%d] must carry exactly the 6 contract tags", i)
+		for k, v := range wantValues[i] {
+			assert.Equal(t, v, rule[k], "AI_product[%d].%s", i, k)
+		}
+	}
+
+	// 定向断言 3：二期 6 字段在整个导出 body 中缺席（合同锁定）。
+	body := string(resp.RawBody)
+	for _, field := range phaseTwoAICacheFields {
+		assert.NotContains(t, body, field, "phase-2 field %s must not appear in export", field)
+	}
+}
+
+// ---------- ai_context_rule ----------
+
+// phaseTwoAIContextFields 一期不得导出的二期字段（ai-context-rule.md §3.1/§3.3 合同锁定：
+// 规则级 override、Defaults 内 summary；BFE 未知字段忽略并计数告警，升级平滑）。
+var phaseTwoAIContextFields = []string{"override", "summary"}
+
+// testAIContextRuleSchema 覆盖 /configs/ai-context-rule 导出 schema。
+// Defaults 块恒导出（空设置表时以文档默认值填充，本包内无其他用例写 ai_context 设置），
+// 与 Version/Config 并列顶层键；规则恰含 4 个 camelCase 冻结 tag。
+func testAIContextRuleSchema(t *testing.T) {
+	// 自建集合：1 条 balanced 带显式预算 + 1 条 default_t() 兜底 off。
+	validCond := `req_path_in("/v1/chat/completions", false)`
+	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-context-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"cond": validCond, "mode": "balanced",
+				"max_context_tokens": 64000, "reserve_tokens": 8192,
+			},
+			map[string]interface{}{"cond": "default_t()", "mode": "off"},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.ErrNum, putResp.ErrMsg)
+	t.Cleanup(func() {
+		_, _ = testutil.GetClient().Put("/open-api/v1/ai-context-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+
+	resp, err := testutil.GetClient().Get("/inner-api/v1/configs/ai-context-rule")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	if resp.Data == nil || string(resp.Data) == "null" {
+		t.Fatal("first pull must return data")
+	}
+	testutil.AssertSchema(t, resp, AIContextRuleExportSchema)
+
+	// 定向断言 1：Version 非空；Defaults 块恒导出且空表时恰为文档默认值（8 项）。
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &payload))
+	version, ok := payload["Version"].(string)
+	require.True(t, ok, "Version should be string")
+	require.NotEmpty(t, version)
+
+	defaults, ok := payload["Defaults"].(map[string]interface{})
+	require.True(t, ok, "Defaults should always be exported")
+	assert.ElementsMatch(t,
+		[]string{
+			"triggerRatio", "keepLatestImages", "toolResultMaxChars",
+			"thinkingPolicy", "charsPerToken", "imageTokenEstimate", "rewrite",
+		}, keysOfInnerMap(defaults), "Defaults must carry exactly the 7 frozen top-level tags")
+	assert.InDelta(t, 0.7, defaults["triggerRatio"], 1e-9)
+	assert.Equal(t, float64(2), defaults["keepLatestImages"])
+	assert.Equal(t, float64(2000), defaults["toolResultMaxChars"])
+	assert.Equal(t, "trim-all-but-last", defaults["thinkingPolicy"])
+	assert.Equal(t, float64(4), defaults["charsPerToken"])
+	assert.Equal(t, float64(1200), defaults["imageTokenEstimate"])
+	defaultsRewrite, ok := defaults["rewrite"].(map[string]interface{})
+	require.True(t, ok, "rewrite should be object")
+	assert.Equal(t, "lite", defaultsRewrite["strength"])
+	assert.InDelta(t, 0.95, defaultsRewrite["protectedSurvivalRate"], 1e-9)
+
+	// 定向断言 2：Config.AI_product 长度=2，每条规则恰含 4 个导出 tag，值正确。
+	config, ok := payload["Config"].(map[string]interface{})
+	require.True(t, ok, "Config should be object")
+	productRules, ok := config["AI_product"].([]interface{})
+	require.True(t, ok, "Config.AI_product should be array")
+	require.Len(t, productRules, 2)
+
+	wantKeys := []string{"cond", "mode", "maxContextTokens", "reserveTokens"}
+	wantValues := []map[string]interface{}{
+		{
+			"cond": validCond, "mode": "balanced",
+			"maxContextTokens": float64(64000), "reserveTokens": float64(8192),
+		},
+		{
+			"cond": "default_t()", "mode": "off",
+			"maxContextTokens": float64(0), "reserveTokens": float64(0),
+		},
+	}
+	for i, item := range productRules {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok, "AI_product[%d] should be object", i)
+		assert.ElementsMatch(t, wantKeys, keysOfInnerMap(rule),
+			"AI_product[%d] must carry exactly the 4 contract tags", i)
+		for k, v := range wantValues[i] {
+			assert.Equal(t, v, rule[k], "AI_product[%d].%s", i, k)
+		}
+	}
+
+	// 定向断言 3：二期字段（override/summary）在整个导出 body 中缺席（合同锁定）。
+	body := string(resp.RawBody)
+	for _, field := range phaseTwoAIContextFields {
+		assert.NotContains(t, body, field, "phase-2 field %s must not appear in export", field)
+	}
+}
+
+// ---------- traffic_mirror_rule ----------
+
+// testTrafficMirrorRuleSchema 覆盖 /configs/traffic-mirror-rule 导出 schema。
+// 合同锁定：每条规则恰含 7 个导出 tag（全字段恒输出）；removeHeaders 两层默认语义
+// （缺省填默认黑名单、显式 [] 不剔除）以取值断言锁死。
+func testTrafficMirrorRuleSchema(t *testing.T) {
+	clusterName, err := testutil.CreateCluster(testutil.UniqueClusterName())
+	require.NoError(t, err)
+
+	validCond := `req_path_prefix_in("/v1/chat/completions", true)`
+	validCondB := `default_t()`
+	validCondC := `req_path_prefix_in("/v1/completions", true)`
+	defaultBlacklist := []string{"Authorization", "Cookie", "X-Api-Key"}
+
+	// 自建集合：1 条仅必填（缺省 remove_headers），1 条显式空黑名单，1 条全字段。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/traffic-mirror-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{"name": testutil.UniqueName("inner-schema-tm-1"), "cond": validCond, "mirror_cluster": clusterName},
+			map[string]interface{}{
+				"name": testutil.UniqueName("inner-schema-tm-2"), "cond": validCondB, "mirror_cluster": clusterName,
+				"remove_headers": []interface{}{},
+			},
+			map[string]interface{}{
+				"name": testutil.UniqueName("inner-schema-tm-3"), "cond": validCondC, "mirror_cluster": clusterName,
+				"percentage":     10,
+				"remove_headers": []interface{}{"X-Custom-Secret"},
+				"set_headers":    map[string]interface{}{"X-Shadow-Env": "pre-release"},
+				"body_rewrites":  []interface{}{map[string]interface{}{"path": "model", "value": "deepseek-v3"}},
+				"path_rewrite":   "/v1/internal/chat/completions",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.ErrNum, putResp.ErrMsg)
+	t.Cleanup(func() {
+		_, _ = testutil.GetClient().Put("/open-api/v1/traffic-mirror-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+
+	resp, err := testutil.GetClient().Get("/inner-api/v1/configs/traffic-mirror-rule")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	if resp.Data == nil || string(resp.Data) == "null" {
+		t.Fatal("first pull must return data")
+	}
+	testutil.AssertSchema(t, resp, TrafficMirrorRuleExportSchema)
+
+	// 定向断言 1：Version/Config 存在，Config.AI_product 长度=3、顺序=提交顺序。
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &payload))
+	version, ok := payload["Version"].(string)
+	require.True(t, ok, "Version should be string")
+	require.NotEmpty(t, version)
+	config, ok := payload["Config"].(map[string]interface{})
+	require.True(t, ok, "Config should be object")
+	productRules, ok := config["AI_product"].([]interface{})
+	require.True(t, ok, "Config.AI_product should be array")
+	require.Len(t, productRules, 3)
+
+	// 定向断言 2：每条规则恰含 7 个导出 tag（精确集合，防幻影键），值正确。
+	wantKeys := []string{
+		"cond", "mirrorCluster", "percentage", "removeHeaders", "setHeaders", "bodyRewrites", "pathRewrite",
+	}
+	type wantRule struct {
+		cond          string
+		percentage    float64
+		removeHeaders []string
+	}
+	wants := []wantRule{
+		{cond: validCond, percentage: 100, removeHeaders: defaultBlacklist}, // 缺省 → 默认黑名单
+		{cond: validCondB, percentage: 100, removeHeaders: []string{}},      // 显式 [] → 不剔除
+		{cond: validCondC, percentage: 10, removeHeaders: []string{"X-Custom-Secret"}},
+	}
+	for i, item := range productRules {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok, "AI_product[%d] should be object", i)
+		keys := make([]string, 0, len(rule))
+		for k := range rule {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t, wantKeys, keys, "AI_product[%d] must carry exactly the 7 export tags", i)
+		assert.Equal(t, wants[i].cond, rule["cond"], "AI_product[%d].cond", i)
+		assert.Equal(t, clusterName, rule["mirrorCluster"], "AI_product[%d].mirrorCluster", i)
+		assert.Equal(t, wants[i].percentage, rule["percentage"], "AI_product[%d].percentage", i)
+		gotRH, ok := rule["removeHeaders"].([]interface{})
+		require.True(t, ok, "AI_product[%d].removeHeaders should be array", i)
+		gotRHStr := make([]string, 0, len(gotRH))
+		for _, h := range gotRH {
+			gotRHStr = append(gotRHStr, h.(string))
+		}
+		assert.ElementsMatch(t, wants[i].removeHeaders, gotRHStr,
+			"AI_product[%d].removeHeaders 两层默认语义", i)
+	}
+
+	// 定向断言 3：两层默认语义的原始 body 文本形态（家族8/#102）。
+	body := string(resp.RawBody)
+	assert.Contains(t, body, `"removeHeaders":["Authorization","Cookie","X-Api-Key"]`)
+	assert.Contains(t, body, `"removeHeaders":[]`)
+	assert.Contains(t, body, `"removeHeaders":["X-Custom-Secret"]`)
+	assert.Contains(t, body, `"setHeaders":{}`)
+	assert.Contains(t, body, `"pathRewrite":""`)
+	assert.Contains(t, body, `"bodyRewrites":[{"path":"model","value":"deepseek-v3"}]`)
+}
+
+// ---------- mod_ai_intent ----------
+
+// intentConfigVersionPattern 锁定 Version 的时间戳格式（yyyyMMddHHmmss）。
+var intentConfigVersionPattern = regexp.MustCompile(`^\d{14}$`)
+
+// testModAIIntentSchema 覆盖 /configs/mod-ai-intent 导出 schema。
+// 合同锁定：Data 即 intent_questions.data 文件内容原样——Version 内嵌文件
+// （时间戳格式）、PascalCase 字段，无 Config 包装层（ai-route 形态，非 ai-cache
+// 两段结构）；choice/score 互斥键集合精确；version 增量参数（传当前 version）
+// 返回 Data:null（mod-ai-intent.md §3）。
+func testModAIIntentSchema(t *testing.T) {
+	const exportPath = "/inner-api/v1/configs/mod-ai-intent"
+
+	// 未发布首拉：Data 为 null（conf-agent 不落盘、不触发 reload）。
+	firstResp, err := testutil.GetClient().Get(exportPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, firstResp)
+	testutil.AssertDataNull(t, firstResp)
+
+	// 发布配置（1 choice + 1 score，含逐问题阈值覆盖）。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/intent-config", map[string]interface{}{
+		"min_confidence": 0.65,
+		"questions": []interface{}{
+			map[string]interface{}{
+				"name":         testutil.UniqueName("inner-schema-ic-choice"),
+				"type":         "choice",
+				"instructions": "这条请求属于哪类研发任务？",
+				"criteria": map[string]interface{}{
+					"coding":       "编写或修改代码、调试、重构、代码审查",
+					"test_writing": "编写测试用例、单元测试、集成测试、补充断言",
+				},
+			},
+			map[string]interface{}{
+				"name":           testutil.UniqueName("inner-schema-ic-score"),
+				"type":           "score",
+				"instructions":   "这个任务的复杂度如何？",
+				"min_confidence": 0.7,
+				"levels": []interface{}{
+					map[string]interface{}{"name": "simple", "description": "单步即可完成"},
+					map[string]interface{}{"name": "complex", "description": "需要深入推理或跨模块设计"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.ErrNum, putResp.ErrMsg)
+
+	// 发布后首拉：Data 非 null，符合 PascalCase 文件合同。
+	resp, err := testutil.GetClient().Get(exportPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	if resp.Data == nil || string(resp.Data) == "null" {
+		t.Fatal("first pull after publish must return data")
+	}
+	testutil.AssertSchema(t, resp, IntentConfigExportSchema)
+
+	// 定向断言 1：Version 时间戳格式；无 Config 包装层（顶层键精确 3 字段）。
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Data, &payload))
+	version, ok := payload["Version"].(string)
+	require.True(t, ok, "Version should be string")
+	require.True(t, intentConfigVersionPattern.MatchString(version),
+		"Version must be a yyyyMMddHHmmss timestamp, got %q", version)
+	assert.ElementsMatch(t, []string{"Version", "MinConfidence", "Questions"}, keysOfInnerMap(payload),
+		"export must be the file content verbatim (Version embedded, no Config wrapper)")
+	assert.InDelta(t, 0.65, payload["MinConfidence"], 1e-9)
+
+	// 定向断言 2：choice/score 互斥键集合精确（PascalCase，防幻影键）。
+	questions, ok := payload["Questions"].([]interface{})
+	require.True(t, ok, "Questions should be array")
+	require.Len(t, questions, 2)
+
+	choice, ok := questions[0].(map[string]interface{})
+	require.True(t, ok, "Questions[0] should be object")
+	assert.ElementsMatch(t,
+		[]string{"Name", "Type", "Instructions", "Criteria"}, keysOfInnerMap(choice),
+		"choice question must carry exactly the PascalCase contract keys (no Levels)")
+	criteria, ok := choice["Criteria"].(map[string]interface{})
+	require.True(t, ok, "Criteria should be object")
+	assert.Contains(t, criteria, "coding")
+
+	score, ok := questions[1].(map[string]interface{})
+	require.True(t, ok, "Questions[1] should be object")
+	assert.ElementsMatch(t,
+		[]string{"Name", "Type", "Instructions", "MinConfidence", "Levels"}, keysOfInnerMap(score),
+		"score question must carry exactly the PascalCase contract keys (no Criteria)")
+	assert.InDelta(t, 0.7, score["MinConfidence"], 1e-9)
+	levels, ok := score["Levels"].([]interface{})
+	require.True(t, ok, "Levels should be array")
+	require.Len(t, levels, 2)
+	for i, item := range levels {
+		level, ok := item.(map[string]interface{})
+		require.True(t, ok, "Levels[%d] should be object", i)
+		assert.ElementsMatch(t, []string{"Name", "Description"}, keysOfInnerMap(level),
+			"Levels[%d] must not leak internal fields", i)
+	}
+
+	// 定向断言 3：原始 body 无 Config 包装层、无小写词汇泄漏。
+	body := string(resp.RawBody)
+	assert.NotContains(t, body, `"Config"`)
+	assert.NotContains(t, body, `"questions"`)
+	assert.NotContains(t, body, `"min_confidence"`)
+
+	// version 增量参数：传当前 version → Data:null（conf-agent 不落盘、不 reload）。
+	unchangedResp, err := testutil.GetClient().Get(exportPath, map[string]string{"version": version})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, unchangedResp)
+	testutil.AssertDataNull(t, unchangedResp)
+}
+
+func keysOfInnerMap(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // ---------- epp_data ----------
 
 // patchEppPoolForSchema 为 EPP schema 用例配置独立的实例池布局（EPP 池为单例）。
@@ -700,7 +1119,6 @@ func patchEppPoolForSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 		},
@@ -735,7 +1153,7 @@ func testEppDataSchema(t *testing.T) {
 	patchEppPoolForSchema(t)
 
 	clusterName := createEPPClusterForSchema(t, map[string]interface{}{
-		"scheduling_profile": "throughput-first",
+		"load_profile": "kv-first",
 		"flow_control": map[string]interface{}{
 			"max_requests": 100,
 			"queue_ttl":    30,
@@ -749,7 +1167,7 @@ func testEppDataSchema(t *testing.T) {
 	testutil.AssertSchema(t, resp, EppDataSchema)
 
 	// 定向断言（epp-data.md §3.2/§3.3）：
-	// assignment 含该 cluster 条目且 primary 非空；epp_config 编译产物关键字段存在。
+	// assignment 含该 cluster 条目且 group 非空；epp_config 编译产物关键字段存在。
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal(resp.Data, &payload))
 	config := payload["Config"].(map[string]interface{})
@@ -757,9 +1175,9 @@ func testEppDataSchema(t *testing.T) {
 	assignment := config["assignment"].(map[string]interface{})
 	entry, ok := assignment[clusterName].(map[string]interface{})
 	require.True(t, ok, "assignment should contain cluster %s", clusterName)
-	primary, ok := entry["primary"].(string)
-	require.True(t, ok, "assignment.primary should be a string")
-	require.NotEmpty(t, primary)
+	group, ok := entry["group"].(string)
+	require.True(t, ok, "assignment.group should be a string")
+	require.NotEmpty(t, group)
 
 	eppConfig := config["epp_config"].(map[string]interface{})
 	compiled, ok := eppConfig[clusterName].(map[string]interface{})
@@ -770,6 +1188,17 @@ func testEppDataSchema(t *testing.T) {
 	require.Contains(t, compiled, "featureGates")
 	require.Contains(t, compiled, "schedulingProfiles")
 	require.Contains(t, compiled, "dataLayer")
+
+	pluginNames := map[string]bool{}
+	for _, p := range plugins {
+		pluginNames[p.(map[string]interface{})["name"].(string)] = true
+	}
+	require.True(t, pluginNames["saturation-detector"], "compiled plugins should include saturation-detector")
+	flowControl, ok := compiled["flowControl"].(map[string]interface{})
+	require.True(t, ok, "compiled epp_config.flowControl should be present")
+	saturationDetector, ok := flowControl["saturationDetector"].(map[string]interface{})
+	require.True(t, ok, "flowControl.saturationDetector should be present")
+	require.Equal(t, "saturation-detector", saturationDetector["pluginRef"])
 }
 
 // ---------- server_data_conf EPP 导出 ----------
@@ -778,7 +1207,7 @@ func testServerDataConfEppSchema(t *testing.T) {
 	patchEppPoolForSchema(t)
 
 	eppClusterName := createEPPClusterForSchema(t, map[string]interface{}{
-		"scheduling_profile": "balanced",
+		"load_profile": "balanced",
 	})
 	wrrClusterName := testutil.UniqueClusterName()
 	{
@@ -806,7 +1235,8 @@ func testServerDataConfEppSchema(t *testing.T) {
 	testutil.AssertSuccess(t, resp)
 	testutil.AssertSchema(t, resp, ServerDataConfSchema)
 
-	// EPP cluster：BalanceMode=EPP 且 EPPAddr 有序 [主, 备]（server-data-conf.md §3.3）。
+	// EPP cluster：BalanceMode=EPP 且 EPPAddr 为分配的组实例地址（单元素，
+	// server-data-conf.md §3.3）。
 	assignResp, err := testutil.GetClient().Get("/open-api/v1/epp-assignments", map[string]string{
 		"cluster": eppClusterName,
 	})
@@ -816,12 +1246,9 @@ func testServerDataConfEppSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(assignResp.Data, &assignView))
 	entries := assignView["clusters"].([]interface{})
 	entry := entries[0].(map[string]interface{})
-	primary := entry["primary"].(map[string]interface{})
-	standby := entry["standby"].(map[string]interface{})
-	expectedAddrs := []interface{}{
-		fmt.Sprintf("%s:%v", primary["host"], int(primary["port"].(float64))),
-		fmt.Sprintf("%s:%v", standby["host"], int(standby["port"].(float64))),
-	}
+	group := entry["group"].(string)
+	require.NotEmpty(t, group)
+	expectedAddrs := []interface{}{"10.0.0.1:9002"}
 	assertServerDataConfEpp(t, resp.Data, eppClusterName, "EPP", expectedAddrs)
 
 	// WRR cluster：BalanceMode=WRR 且无 EPPAddr。
@@ -829,7 +1256,7 @@ func testServerDataConfEppSchema(t *testing.T) {
 }
 
 // assertServerDataConfEpp 校验导出结果中指定 cluster 的 GslbBasic.BalanceMode / EPPAddr
-// （server-data-conf.md §3.3：EPPAddr 有序 [主, 备]，WRR 时为 null）。
+// （server-data-conf.md §3.3：EPPAddr 为分配的组实例地址、恒单元素，WRR 时为 null）。
 func assertServerDataConfEpp(t *testing.T, data []byte, clusterName, wantMode string, wantEPPAddr []interface{}) {
 	t.Helper()
 	var payload map[string]interface{}
@@ -855,5 +1282,5 @@ func assertServerDataConfEpp(t *testing.T, data []byte, clusterName, wantMode st
 	if !assert.True(t, ok, "EPPAddr should be an array for cluster %s", clusterName) {
 		return
 	}
-	assert.Equal(t, wantEPPAddr, eppAddr, "EPPAddr should be ordered [primary, standby]")
+	assert.Equal(t, wantEPPAddr, eppAddr, "EPPAddr should be the assigned group's instance addresses")
 }

@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 )
 
 func validModelPrice() *ModelPrice {
@@ -274,4 +276,44 @@ func TestErrorAtIndex(t *testing.T) {
 	err := ErrorAtIndex(3, assert.AnError)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "models[3]:")
+}
+
+func TestValidateModelPrice_BatchDiscount(t *testing.T) {
+	cases := []struct {
+		name     string
+		discount *float64
+		wantErr  bool
+	}{
+		{"nil discount", nil, false},
+		{"zero", lib.PFloat64(0), true},
+		{"negative", lib.PFloat64(-0.5), true},
+		{"greater than 1", lib.PFloat64(1.5), true},
+		{"one", lib.PFloat64(1), false},
+		{"half", lib.PFloat64(0.5), false},
+		{"tiny", lib.PFloat64(0.0001), false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := validModelPrice()
+			p.BatchDiscount = c.discount
+			err := ValidateModelPrice(p)
+			if c.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "batch_discount")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateModelPrice_BatchMode(t *testing.T) {
+	p := validModelPrice()
+	p.Mode = "batch"
+	assert.NoError(t, ValidateModelPrice(p))
+
+	// file mode stays out of the price system.
+	p.Mode = "file"
+	assert.Error(t, ValidateModelPrice(p))
 }

@@ -30,14 +30,15 @@ const (
 	BalanceModeEPP = "EPP"
 )
 
-// EPPAssignmentResolver resolves the ordered EPP endpoint addresses of a
-// cluster's assignment ([0]=primary, [1]=standby). It is implemented by
-// epp_pool.EppPoolManager and injected at wiring time; the export path only
-// depends on this interface (dependency injection, no reverse reference).
+// EPPAssignmentResolver resolves the endpoint addresses of a cluster's
+// assigned EPP group (a single address in the current single-instance
+// stage). It is implemented by epp_pool.EppPoolManager and injected at
+// wiring time; the export path only depends on this interface (dependency
+// injection, no reverse reference).
 type EPPAssignmentResolver interface {
-	// GetAssignmentEndpoints returns [primary, standby] addresses joined by
-	// net.JoinHostPort (standby omitted for single instance groups).
-	// found is false when the cluster has no valid assignment.
+	// GetAssignmentEndpoints returns the assigned group's instance addresses
+	// joined by net.JoinHostPort. found is false when the cluster has no
+	// valid assignment.
 	GetAssignmentEndpoints(ctx context.Context, clusterName string) (endpoints []string, found bool, err error)
 }
 

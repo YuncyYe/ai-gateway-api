@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/bfenetworks/bfe/bfe_util/redis_client"
-	"github.com/go-playground/validator/v10"
 	"github.com/go-sql-driver/mysql"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 )
@@ -41,18 +40,19 @@ import (
 type ServerConfig struct {
 	ServerAddr          string `validate:"ip"`             // service bind address, default 0.0.0.0
 	ServerPort          int    `validate:"required,min=1"` // service port
+	MonitorAddr         string `validate:"omitempty,ip"`   // monitor bind address, empty = all interfaces
 	MonitorPort         int    // monitor port
 	GracefulTimeOutInMs int    `validate:"required,min=1"` // time out setting for graceful shutdown
 }
 
 type RunTimeConfig struct {
-	SessionExpireInDay        int  `validate:"required,min=1"`
-	SkipTokenValidate         bool // skip user identify, you can open it when debug
-	RecordSQL                 bool
-	StaticFilePath            string
-	Debug                     bool
-	AIRouteInnerProductName   string // AI inner product name,default AI_product
-	DefaultAIClusterName      string // default AI cluster name, e.g. "BFE-AI_product.szyf"
+	SessionExpireInDay      int  `validate:"required,min=1"`
+	SkipTokenValidate       bool // skip user identify, you can open it when debug
+	RecordSQL               bool
+	StaticFilePath          string
+	Debug                   bool
+	AIRouteInnerProductName string // AI inner product name,default AI_product
+	DefaultAIClusterName    string // default AI cluster name, e.g. "BFE-AI_product.szyf"
 
 	// EPP scheduling integration (see model/epp_pool).
 	DefaultEPPInstancePoolName  string // default EPP instance pool name, e.g. "EPP.pool"
@@ -60,18 +60,30 @@ type RunTimeConfig struct {
 }
 
 // ReportConfig is the [Report] section. It switches the report query
-// backend (mysql | doris) and tunes the MySQL aggregate/partition jobs;
-// when Backend is empty the report module is not assembled at all and the
-// /report/* routes are not registered (see design-docs
-// modifications/2026-09-15-report-query-api).
+// backend (mysql | doris | clickhouse | starrocks) and tunes the MySQL
+// aggregate/partition jobs; when Backend is empty the report module is not
+// assembled at all and the /report/* routes are not registered (see
+// design-docs modifications/2026-09-15-report-query-api,
+// modifications/2026-10-02-report-clickhouse-backend and
+// modifications/2026-10-02-report-starrocks-backend).
 type ReportConfig struct {
-	Backend              string // mysql | doris; empty disables the module
+	Backend              string // mysql | doris | clickhouse | starrocks; empty disables the module
 	Datasource           string // name of a [Databases.*] entry
 	Database             string // optional schema override for table names
 	EnableAggregateJob   bool   // backend=mysql: run the minute aggregate job
 	AggregateIntervalSec int    // aggregate period, default 60
 	RetentionDays        int    // retention window of details, default 7
 	EnablePartitionMgmt  bool   // backend=mysql: run the partition management job
+}
+
+// BatchJobConfig is the [BatchJob] section. It switches the batch reconcile
+// job (Redis BATCH_* sync -> status advance -> backstop settle, see
+// design-docs/sys-design/details/批量任务与对账.md §5). The job needs the
+// control-plane -> provider egress for duties 2/3; deployments without
+// egress leave it disabled (degraded path, 批量任务与对账.md §9).
+type BatchJobConfig struct {
+	Enable      bool // run the reconcile job; default off
+	IntervalSec int  // tick period, default 60
 }
 
 // applyDefaults fills the default calibration values.
@@ -84,13 +96,22 @@ func (c *ReportConfig) applyDefaults() {
 	}
 }
 
+func (c *BatchJobConfig) applyDefaults() {
+	if c.IntervalSec <= 0 {
+		c.IntervalSec = 60
+	}
+}
+
 type Config struct {
-	Server    ServerConfig
-	Loggers   map[string]*LoggerConfig `validate:"dive"`
-	Databases map[string]*DbConfig     `validate:"dive"`
-	Depends   DependsConfig
-	RunTime   RunTimeConfig
-	Report    ReportConfig
+	Server        ServerConfig
+	Loggers       map[string]*LoggerConfig `validate:"dive"`
+	Databases     map[string]*DbConfig     `validate:"dive"`
+	Depends       DependsConfig
+	RunTime       RunTimeConfig
+	Report        ReportConfig
+	BatchJob      BatchJobConfig
+	AccessControl AccessControlConf
+	Security      SecurityConfig
 
 	Vars      map[string]string
 	LogDir    string
@@ -127,10 +148,38 @@ func LoadConfig(file string) error {
 	if err := lib.LoadConfAuto(file, config); err != nil {
 		return err
 	}
+	confFilePath = file
 
 	config.Report.applyDefaults()
+	config.BatchJob.applyDefaults()
 
-	if err := validator.New().Struct(config); err != nil {
+	if err := newConfigValidator().Struct(config); err != nil {
+		return err
+	}
+
+	// Compile the management-plane IP whitelist; the compiled form is the
+	// runtime source of truth (swapped atomically by reload).
+	cc, err := CompileAccessControl(&config.AccessControl)
+	if err != nil {
+		return err
+	}
+	StoreCompiledAccessControl(cc)
+
+	// Load the secret keyring (fail-fast if configured but invalid). An
+	// empty MasterKeyFile stores a nil ring (encryption disabled).
+	if err := loadSecretRing(&config.Security); err != nil {
+		return err
+	}
+
+	// Load the conf-file keyring for export encryption (fail-fast when the
+	// switch is on; warning-only when off and the file is not usable yet).
+	if err := loadExportSecretRing(&config.Security); err != nil {
+		return err
+	}
+
+	// Validate and inject the users.password bcrypt cost factor (fail-fast
+	// on out-of-range values).
+	if err := loadPasswordHashCost(&config.Security); err != nil {
 		return err
 	}
 

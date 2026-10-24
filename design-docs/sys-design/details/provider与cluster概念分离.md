@@ -49,14 +49,19 @@
     {"name": "key-primary", "key": "sk-aaaaaaaaaaaa"},
     {"name": "key-secondary", "key": "sk-bbbbbbbbbbbb"}
   ],
+  "instance_source": "instance_pool",
   "instance_pool": [
     {"name": "backend-1", "addr": "api.deepseek.com", "weight": 100, "port": 443}
   ],
+  "k8s_pool_name": null,
+  "k8s_instance_pool": [],
   "model_protocols": ["openai"],
   "create_time": 1716883200,
   "update_time": 1716883200
 }
 ```
+
+> 上例为 `instance_source=instance_pool`（默认）形态：`k8s_pool_name` 为 `null`、`k8s_instance_pool` 为空数组。`instance_source=k8s_pool` 形态见 [providers.md](../../api-define/OpenAPI接口定义/providers.md)——此时 `instance_pool` 休眠保留（可为 `[]`），`k8s_pool_name` / `k8s_instance_pool` 由系统填充。
 
 ### 4.2 Cluster（新）
 
@@ -108,6 +113,20 @@
 | 保留 | `model_mappings`、`key_policy`、`match_prefix`、`strip_prefix` | 行为不变。 |
 | 新增 | `key_affinity` | 基于 Redis + `ClientKeyId` 的会话级 Key 亲和性配置，包含 `enabled`、`ttl`、`redis_prefix`、`penalty_enable`。 |
 
+### 4.4 实例供给方式（`instance_source`）
+
+K8s 服务发现场景下，provider 引入 `instance_source` 声明实例成员的来源，配合 `k8s_pool_name`（池引用）与 `k8s_instance_pool`（只读镜像）三个字段：
+
+| 概念 | 定义 |
+|------|------|
+| **实例供给方式（`instance_source`）** | provider 实例成员的来源：`instance_pool`（人维护，默认）/ `k8s_pool`（发现组件维护） |
+| **有效池（effective pool）** | provider 对下游暴露的实例集合：`instance_source == "k8s_pool" ? k8s_instance_pool : instance_pool`。cluster 创建快照、实例池同步、导出等一切下游的唯一消费口径 |
+| **所有权边界** | "创建归人、成员归发现"：provider 资源由人创建；K8s 池成员对控制台只读，摘流等运维动作走 K8s 侧手段（摘 endpoint/打标签） |
+
+- **模式语义**：`instance_pool` 模式下 `instance_pool` 维持现状规则（≥1、`(addr,port)` 去重、≥1 个 `weight>0`），`k8s_pool_name` 休眠保留、不生效；`k8s_pool` 模式下 `instance_pool` 休眠保留、不参与有效池与校验（人工兜底），`k8s_pool_name` 必填。两个休眠字段均在非激活模式下保留原值、切回激活模式时自动恢复生效。
+- **`/k8s_pools` 通道**：K8s 池（`k8s_pools`）是控制面内独立资源，成员列表的唯一写入方是发现组件（service-controller），经 InnerAPI `/k8s_pools` 四端点写入；provider 侧 `k8s_instance_pool` 为系统维护的只读镜像，人通过 OpenAPI `/providers` 维护池引用（`instance_source` / `k8s_pool_name`），不触碰池成员。`k8s_pool_name` 与 K8s Service 名无耦合，Service→池名映射由发现组件自行约定。
+- **空池语义**：合法空池只出现在 `k8s_pool` 模式。syncer 删除空池早退，有效池为空时同步清空引用 cluster 的派生池（含空列表）；数据面行为为导出空条目、BFE 加载接受、该 cluster 请求 500（`BK_NO_BACKEND`），由告警覆盖。provider 可引用尚不存在的 pool（池不存在 ≡ 零实例）。
+
 ## 5. 接口变化
 
 ### 5.1 新增 `/providers`
@@ -125,9 +144,16 @@
 
 部分更新 provider 时，如果请求体显式修改了 `instance_pool`、`keys` 或 `models`：
 
-- `instance_pool` 变更会同步刷新所有引用该 provider 的 cluster 子集群实例池（EPP 子集群除外）。
+- 有效池变化（含变为空）经同步链路（syncer，事务内）刷新所有引用该 provider 的 cluster 派生实例池（EPP 子集群除外）。
 - `keys` 删除/重命名会校验无 cluster 仍引用旧 key name；否则返回 409。
 - `models` 删除会校验无 cluster 仍引用已被移除的 model；否则返回 409。
+
+**实例供给方式（`instance_source` / `k8s_pool_name`）更新语义**：
+
+- 两字段均可通过 PATCH 修改，包括**模式切换**（`instance_pool` ↔ `k8s_pool`）；切换后有效池随之变化，经同步链路自动刷新引用 cluster 的派生实例池（空有效池同样同步清空）。
+- 切换时点校验：`instance_source=instance_pool` 要求 `instance_pool` 非空；`instance_source=k8s_pool` 要求 `k8s_pool_name` 非空。不满足返回 422。
+- `instance_source=k8s_pool` 时 PATCH `instance_pool` 仅作休眠保留（不参与有效池、不触发同步），切回 `instance_pool` 模式时自动恢复生效。
+- `k8s_instance_pool` 为只读镜像，请求体携带返回 422；其内容由系统根据 `/k8s_pools` 的变更自动刷新。
 
 删除 provider 前，须校验无 `/clusters` 引用；`/model-prices` 中的同名 provider 不再作为阻塞条件。
 
@@ -152,13 +178,18 @@ URL 与 HTTP Method 不变，请求/响应体变化：
 
 ### 6.1 模型层
 
-- 新增 `model/iprovider/`：Provider 实体、CRUD、模型发现、引用检查。
+- 新增 `model/iprovider/`：Provider 实体、CRUD、模型发现、引用检查。实例池校验按 `instance_source` 条件化：默认模式规则原封不动，`k8s_pool` 模式 `instance_pool` 不参与校验（休眠保留）。
+- 抽出 `iprovider.EffectiveInstancePool`（有效池：`instance_source == "k8s_pool" ? k8s_instance_pool : instance_pool`）与 `ClusterManager.SyncProviderEffectivePool`（从 `ProviderInstancePoolSyncer` 的 hook 体中提取），消费点：
+  - cluster 创建引用 provider 时的 pool/sub-cluster 快照；
+  - provider 更新时同步引用 cluster 的派生池（syncer 删除空池早退，空有效池同样同步清空）；
+  - 实例池相等比较（升级为先比较有效池）。
+- 新增 `model/ik8s_pool/`：K8s 实例池域，manager 依赖 `itxn.TxnStorager`、provider storager、`ClusterManager`（依赖注入，禁直连 `stateful.Default*`）；`/k8s_pools` PUT/DELETE 的单事务 fan-out 复用 `ClusterManager.SyncProviderEffectivePool` 触发各引用 provider 的 cluster 派生池同步。
 - `model/icluster_conf/ClusterManager` 注入 `iprovider.ProviderStorager`：
   - 创建/更新 cluster 时校验 provider 存在、models 子集、keys name 存在性。
-  - 根据 provider `instance_pool` 自动生成/更新 pool/sub_cluster。
+  - 根据 provider 有效池自动生成/更新 pool/sub_cluster。
   - 以 hook 形式向 `ProviderManager.UpdateProvider` 注册 `ProviderInstancePoolSyncer`、`ProviderKeyRefChecker`、`ProviderModelRefChecker`：provider 更新时同步实例池，并反向校验 cluster 对 key / model 的引用完整性。
 - `model/icluster_conf/exporter.go` 在生成 `AIConf` 时：
-  - 从 provider 读取 `instance_pool` 生成 BFE 实例池/子集群/集群。
+  - 从 provider 读取有效池生成 BFE 实例池/子集群/集群。
   - 按 `name` join provider `keys` 与 cluster `llm_config.keys` 生成带明文的 `AIConf.Keys`。
   - 将 provider `model_protocols` 透传到 `AIConf.ModelProtocols`，供 BFE 做请求协议风格匹配。
 - `model/imodel_price/Manager` 不再注入 `iprovider.ProviderStorager` 校验 model-prices 的 provider 引用；新增 `ListProviders(ctx)` 方法用于 `GET /model-prices/actions/get-providers`。
@@ -167,13 +198,15 @@ URL 与 HTTP Method 不变，请求/响应体变化：
 
 - 新增 `storage/rdb/provider/`：实现 `iprovider.ProviderStorager`。
 - 新增 `table_providers.go` DAO。
-- `storage/rdb/cluster_conf/pool.go` 数据来源不变（仍从 `pools` 表读取），但写入源头由 cluster 顶层变为 provider `instance_pool`。
+- 新增 `storage/rdb/k8s_pool/`：实现 `ik8s_pool` 域 K8s 池存储（`k8s_pools` 表）。
+- `storage/rdb/cluster_conf/pool.go` 数据来源不变（仍从 `pools` 表读取），但写入源头由 cluster 顶层变为 provider 有效池。
 - `clusters` 表结构不变；`llm_config` JSON 结构变化。
 - `storage/rdb/model_price/` 新增 `ListProviders(ctx) ([]string, error)` 方法，按 `provider` 字段聚合去重。
 
 ### 6.3 接口层
 
 - 新增 `endpoints/openapi_v1/provider/`。
+- 新增 `endpoints/innerapi_v1/k8s_pools/`：`/k8s_pools` 四端点，注册进 `endpoints/innerapi_v1/endpoints.go`。
 - 移除 `endpoints/openapi_v1/tool/`（`/tools/get-models-from-provider` 能力由 `/providers/tools/discover-models` 替代）。
 - 移除 `/model-provider-types`；模型访问协议枚举作为 `providers.model_protocols` 的合法性约束在 `providers.md` 中定义。
 - `endpoints/openapi_v1/model_price/` 新增 `GET /model-prices/actions/get-providers` handler。
@@ -191,6 +224,9 @@ CREATE TABLE `providers` (
   `models` text,
   `keys` text,
   `instance_pool` text,
+  `instance_source` varchar(32) NOT NULL DEFAULT 'instance_pool' COMMENT '实例供给方式：instance_pool/k8s_pool',
+  `k8s_pool_name` varchar(255) DEFAULT NULL COMMENT '引用的 K8s 实例池名称',
+  `k8s_instance_pool` text COMMENT 'K8s 实例池只读镜像（JSON）',
   `model_protocols` text,
   `created_at` datetime NOT NULL,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -199,20 +235,39 @@ CREATE TABLE `providers` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-### 7.2 `clusters` 表变化
+存量行由 `instance_source` 默认值兜底，即现状行为，零数据迁移。
+
+### 7.2 `k8s_pools` 表（新增）
+
+```sql
+CREATE TABLE `k8s_pools` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `instances` text COMMENT '实例列表（JSON，发现组件全量维护）',
+  `created_at` datetime NOT NULL,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `name_index` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+`name` 为唯一键；`instances` JSON 由发现组件经 `/k8s_pools` 全量替换，同一份实例列表可被多个 provider 引用（N:1）。
+
+### 7.3 `clusters` 表变化
 
 - `llm_config` JSON 移除 `model_endpoint`、`provider_type`。
 - `llm_config.keys` 改为 `{name, weight}` 引用结构。
 - `llm_config.provider` 必填，逻辑外键到 `providers.name`。
 
-### 7.3 `model_prices` 表变化
+### 7.4 `model_prices` 表变化
 
 - `provider` 字段为普通字符串，仅作为价格归集标识，不建立外键约束；保留普通索引以支持查询与聚合。
 
-### 7.4 关系
+### 7.5 关系
 
 - `providers.name` ← `clusters.llm_config.provider`（强引用）
 - `providers.name` ← `model_prices.provider`（按名称弱关联，非强制）
+- `k8s_pools.name` ← `providers.k8s_pool_name`（按名称弱关联，N:1，无删除保护）
 - 删除 provider 前须校验无 `clusters` 引用；`model_prices` 同名记录不再阻塞删除。
 
 ## 8. BFE 配置生成转换
@@ -221,7 +276,7 @@ BFE 接收到的配置结构和字段与重构前完全一致：
 
 | BFE 配置项 | 来源（新模型） |
 |------------|----------------|
-| 实例池 / 子集群 / 集群 | `cluster` + `provider.instance_pool` |
+| 实例池 / 子集群 / 集群 | `cluster` + provider 有效池（`instance_source == "k8s_pool" ? k8s_instance_pool : instance_pool`） |
 | `AIConf.Models` | `cluster.llm_config.models` |
 | `AIConf.ModelMappings` | `cluster.llm_config.model_mappings` |
 | `AIConf.Keys` | `provider.keys`（key 明文） + `cluster.llm_config.keys`（weight）按 name join |

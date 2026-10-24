@@ -54,6 +54,10 @@ func TestExpressionVerify(t *testing.T) {
 		{"EV-1-009 req_body_larger_than", "req_body_larger_than(8192)", nil, 200, true},
 		{"EV-1-010 req_body_less_than", "req_body_less_than(2048)", nil, 200, true},
 		{"EV-1-011 req_body_larger_than 参数非法", "req_body_larger_than(\"abc\")", nil, 500, false},
+		{"EV-1-012 req_ai_intent_in（mod_ai_intent 原语，bfe ≥ 7e482d90）", "req_ai_intent_in(\"task_type\", \"test_writing\", 0.9)", nil, 200, true},
+		{"EV-1-013 req_ai_intent_in 组合表达式", "req_ai_intent_in(\"task_type\", \"test_writing\", 0.9) && req_ai_intent_in(\"complexity\", \"simple|medium\")", nil, 200, true},
+		{"EV-1-014 req_ai_intent_in 语法错误", "req_ai_intent_in(\"task_type\"", nil, 500, false},
+		{"EV-1-015 req_ai_intent_in 未知问题名（引用完整性不校验，fail-safe）", "req_ai_intent_in(\"not_configured\", \"whatever\")", nil, 200, true},
 	}
 
 	for _, tt := range tests {

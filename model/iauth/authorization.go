@@ -16,6 +16,7 @@ package iauth
 
 import (
 	"context"
+	"strings"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
@@ -24,10 +25,11 @@ import (
 )
 
 const (
-	ScopeAlwaysAllowed = "Allowed"
-	ScopeSystem        = "System"
-	ScopeProduct       = "Product"
-	ScopeSupport       = "Support"
+	ScopeAlwaysAllowed  = "Allowed"
+	ScopeSystem         = "System"
+	ScopeProduct        = "Product"
+	ScopeSupport        = "Support"
+	ScopeSystemReadonly = "SystemReadonly"
 )
 
 type AuthorizeStorager interface {
@@ -65,10 +67,18 @@ func (m *AuthorizeManager) SetOperationLogManager(manager ioperlog.OperationLogR
 	m.operationLogManager = manager
 }
 
-func (m *AuthorizeManager) UpdateUserIsAdmin(ctx context.Context, user *User, isAdmin bool) (err error) {
-	scopes := []string{ScopeProduct}
-	if isAdmin {
-		scopes = []string{ScopeSystem}
+// UpdateUserRole rewrites the user's scopes according to the given role
+// (RoleSystemAdmin / RoleSystemAdminReadonly). The built-in account "admin"
+// is protected: its role is pinned to system_admin so the deployment always
+// keeps at least one full-management entry point.
+func (m *AuthorizeManager) UpdateUserRole(ctx context.Context, user *User, role string) (err error) {
+	scopes, err := RoleToScopes(role)
+	if err != nil {
+		return err
+	}
+
+	if strings.EqualFold(user.Name, "admin") && role != RoleSystemAdmin {
+		return xerror.WrapParamErrorWithMsg("user \"admin\" role is fixed to system_admin")
 	}
 
 	err = m.txn.AtomExecute(ctx, func(ctx context.Context) error {
@@ -76,12 +86,14 @@ func (m *AuthorizeManager) UpdateUserIsAdmin(ctx context.Context, user *User, is
 	})
 	if err != nil {
 		m.recordUserOperation(ctx, string(ioperlog.ActionUpdate), user.ID, user.Name, "", userToMap(user), map[string]interface{}{
+			"role":   role,
 			"scopes": scopes,
 		}, err)
 		return err
 	}
 
 	m.recordUserOperation(ctx, string(ioperlog.ActionUpdate), user.ID, user.Name, "", userToMap(user), map[string]interface{}{
+		"role":   role,
 		"scopes": scopes,
 	}, nil)
 	return nil

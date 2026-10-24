@@ -106,6 +106,23 @@ type overviewData struct {
 	RateLimitHits int64 `json:"rate_limit_hits"`
 	AuthRejects   int64 `json:"auth_rejects"`
 	LogsTotal     int64 `json:"logs_total"`
+
+	Cache struct {
+		HitCount    int64   `json:"hit_count"`
+		MissCount   int64   `json:"miss_count"`
+		SkipCount   int64   `json:"skip_count"`
+		HitRate     float64 `json:"hit_rate"`
+		ReadTokens  int64   `json:"read_tokens"`
+		WriteTokens int64   `json:"write_tokens"`
+	} `json:"cache"`
+	Mirror struct {
+		HitCount int64 `json:"hit_count"`
+	} `json:"mirror"`
+	Intent struct {
+		ClassifiedCount int64   `json:"classified_count"`
+		UnknownCount    int64   `json:"unknown_count"`
+		UnknownRate     float64 `json:"unknown_rate"`
+	} `json:"intent"`
 }
 
 type metricPoint struct {
@@ -115,6 +132,8 @@ type metricPoint struct {
 	Output   *float64 `json:"output"`
 	Total    *float64 `json:"total"`
 	Currency string   `json:"currency"`
+	Kind     string   `json:"kind"`
+	Name     string   `json:"name"`
 }
 
 type timeseriesData struct {
@@ -172,6 +191,17 @@ type logItem struct {
 	OriginURI            *string `json:"origin_uri"`
 	ReqHeaders           *string `json:"req_headers"`
 	ResHeaders           *string `json:"res_headers"`
+
+	AICacheStatus        *string  `json:"ai_cache_status"`
+	MirrorHit            *bool    `json:"mirror_hit"`
+	MirrorCluster        *string  `json:"mirror_cluster"`
+	AIIntentQuestion     *string  `json:"ai_intent_question"`
+	AIIntentAnswer       *string  `json:"ai_intent_answer"`
+	AIIntentConfidence   *float64 `json:"ai_intent_confidence"`
+	AIIntentSource       *string  `json:"ai_intent_source"`
+	AIIntentLatencyUs    *int64   `json:"ai_intent_latency_us"`
+	AIIntentCacheHit     *bool    `json:"ai_intent_cache_hit"`
+	AIIntentQuestionsVer *string  `json:"ai_intent_questions_version"`
 }
 
 type logsData struct {

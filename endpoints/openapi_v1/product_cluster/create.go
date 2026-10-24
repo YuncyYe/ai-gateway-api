@@ -61,6 +61,7 @@ type UpsertParam struct {
 	LLMConfig          *icluster_conf.LLMConfig `json:"llm_config"`
 	BalanceMode        *string                  `json:"balance_mode"`
 	EppConfig          *json.RawMessage         `json:"epp_config"`
+	EppRuntime         *json.RawMessage         `json:"epp_runtime"`
 }
 
 // ConnectionParam Request Param
@@ -111,6 +112,11 @@ func (p *UpsertParam) Validate() error {
 	}
 	if err := validate.ClusterName(*p.Name); err != nil {
 		return err
+	}
+	if p.Description != nil {
+		if err := validate.Description(*p.Description, validate.MaxClusterDescriptionLength, "description"); err != nil {
+			return err
+		}
 	}
 	if err := validateBasicRanges(p.Basic); err != nil {
 		return err
@@ -248,6 +254,7 @@ func clusterParamControlModel(param *UpsertParam) *icluster_conf.ClusterParam {
 		LLMConfig:   normalizeLLMConfig(param.LLMConfig),
 		BalanceMode: param.BalanceMode,
 		EppConfig:   normalizeEppConfigRaw(param.EppConfig),
+		EppRuntime:  normalizeEppRuntimeRaw(param.EppRuntime),
 	}
 
 	basic := normalizeBasic(param.Basic)
@@ -410,20 +417,37 @@ func normalizeEppConfigRaw(raw *json.RawMessage) *string {
 	return &s
 }
 
+// normalizeEppRuntimeRaw converts the raw epp_runtime JSON body into the raw
+// JSON string pointer expected by the model layer. Absent or explicit null
+// stays nil (field not carried, stored value retained on update). Field-level
+// validation is performed by the model layer (validateClusterEppRuntime),
+// mirroring epp_config.
+func normalizeEppRuntimeRaw(raw *json.RawMessage) *string {
+	if raw == nil {
+		return nil
+	}
+	s := strings.TrimSpace(string(*raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	return &s
+}
+
 func normalizeLLMConfig(llm *icluster_conf.LLMConfig) *icluster_conf.LLMConfig {
 	if llm == nil {
 		return nil
 	}
 
 	rst := &icluster_conf.LLMConfig{
-		Models:        llm.Models,
-		ModelMappings: llm.ModelMappings,
-		Keys:          llm.Keys,
-		KeyPolicy:     llm.KeyPolicy,
-		KeyAffinity:   normalizeKeyAffinity(llm.KeyAffinity),
-		Provider:      llm.Provider,
-		MatchPrefix:   llm.MatchPrefix,
-		StripPrefix:   llm.StripPrefix,
+		Models:                 llm.Models,
+		ModelMappings:          llm.ModelMappings,
+		Keys:                   llm.Keys,
+		KeyPolicy:              llm.KeyPolicy,
+		KeyAffinity:            normalizeKeyAffinity(llm.KeyAffinity),
+		NormalizeUpstreamError: llm.NormalizeUpstreamError,
+		Provider:               llm.Provider,
+		MatchPrefix:            llm.MatchPrefix,
+		StripPrefix:            llm.StripPrefix,
 	}
 	if rst.Keys == nil {
 		rst.Keys = []icluster_conf.ClusterKeyRef{}

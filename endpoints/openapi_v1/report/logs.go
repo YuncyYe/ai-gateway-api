@@ -47,6 +47,9 @@ func ReportLogsAction(req *http.Request) (interface{}, error) {
 	if raw := req.Form.Get("requested_models"); raw != "" {
 		logsQuery.RequestedModels = splitList(raw)
 	}
+	if err := bindLogsFilterParams(req, logsQuery); err != nil {
+		return nil, err
+	}
 	if raw := req.Form.Get("err_only"); raw != "" {
 		value, err := parseBoolParam(raw, "err_only")
 		if err != nil {

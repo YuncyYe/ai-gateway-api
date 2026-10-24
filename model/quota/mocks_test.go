@@ -16,6 +16,7 @@ package quota
 
 import (
 	"context"
+	"time"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/entity"
@@ -89,17 +90,25 @@ type fakeQuotaPlanStorager struct {
 	listFn   func(ctx context.Context, filter *QuotaPlanFilter) ([]*QuotaPlanParam, error)
 	updateFn func(ctx context.Context, filter *QuotaPlanFilter, param *QuotaPlanParam) (int64, error)
 	deleteFn func(ctx context.Context, filter *QuotaPlanFilter) error
+	claimFn  func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error)
 
 	created []*QuotaPlanParam
 	fetched []*QuotaPlanFilter
 	listed  []*QuotaPlanFilter
 	updated []updateQuotaPlanCall
 	deleted []*QuotaPlanFilter
+	claims  []claimQuotaPlanResetCall
 }
 
 type updateQuotaPlanCall struct {
 	filter *QuotaPlanFilter
 	param  *QuotaPlanParam
+}
+
+type claimQuotaPlanResetCall struct {
+	id          int64
+	periodStart time.Time
+	now         time.Time
 }
 
 func (s *fakeQuotaPlanStorager) CreateQuotaPlan(ctx context.Context, param *QuotaPlanParam) (int64, error) {
@@ -140,6 +149,14 @@ func (s *fakeQuotaPlanStorager) DeleteQuotaPlan(ctx context.Context, filter *Quo
 		return s.deleteFn(ctx, filter)
 	}
 	return nil
+}
+
+func (s *fakeQuotaPlanStorager) ClaimQuotaPlanReset(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+	s.claims = append(s.claims, claimQuotaPlanResetCall{id: id, periodStart: periodStart, now: now})
+	if s.claimFn != nil {
+		return s.claimFn(ctx, id, periodStart, now)
+	}
+	return 1, nil
 }
 
 var _ QuotaPlanStorager = (*fakeQuotaPlanStorager)(nil)

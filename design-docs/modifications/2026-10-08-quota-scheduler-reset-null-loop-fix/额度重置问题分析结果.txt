@@ -1,0 +1,202 @@
+## 一、排查结论：已经定位到异常重置动作
+
+Redis 监控日志明确显示：AI 网关的额度重置定时任务在每隔 60 秒执行一次，并且将多个 Key 的额度直接恢复为初始值。
+
+这与你配置的“每月重置”不一致，是目前最值得优先排查的问题。
+
+观察到的重置周期
+
+# 60 秒
+
+每轮被重置的额度 Key
+
+# 21 个
+
+完整重置轮次
+
+# 2 次
+
+基于上传的约 2 分钟 Redis MONITOR 日志；每轮包含 13 个 AI_product 额度和 8 个 Entity 额度。
+
+### 关键证据
+
+日志中发现了以下两次重置：
+
+| 时间（北京时间）            | 操作       | 结果            |
+| ------------------- | -------- | ------------- |
+| 2026-10-08 17:03:26 | 获取调度器锁   | 批量重置 21 个额度   |
+| 2026-10-08 17:04:26 | 再次获取调度器锁 | 同样批量重置 21 个额度 |
+
+两次操作均来自：
+
+`127.0.0.1:45226`
+
+最关键的 Redis 命令是：
+
+```
+EVALSHA 728af114321e8e423172b093613017cdecb1ddad
+1 QUOTA_AI_product-ZM6cYcDKAuFkPz3VpXbpK9f7 1000000000
+
+[0 lua] "set"
+"QUOTA_AI_product-ZM6cYcDKAuFkPz3VpXbpK9f7"
+"1000000000"
+```
+
+这里不是读取额度，也不是正常扣减，而是通过 Lua 脚本执行了 `SET`，将额度直接写回 `1000000000`。
+
+因此，额度频繁恢复初始值的现象有直接的 Redis 写入证据，而不是仅仅从控制台显示结果推测出来的。
+
+## 二、哪些动作执行了额度重置？
+
+从日志可以还原出完整的处理链路：
+
+定时调度器触发
+
+每隔约 60 秒执行
+
+获取分布式锁
+
+quota:reset:scheduler:lock
+
+SETEX 300（锁有效期 5 分钟）
+
+执行额度重置 Lua 脚本
+
+EVALSHA 728af114...
+
+SET QUOTA\_\* = 初始额度
+
+释放分布式锁
+
+DEL quota:reset:scheduler:lock
+
+这里要区分两个概念：
+
+- 调度器每分钟执行一次：这本身不一定有问题。系统可以每分钟检查是否有额度到期。
+- 调度器每分钟都真正重置额度：这是日志证实发生的问题。对于设置为每月重置的额度，正常情况下不应该每分钟重复恢复。
+
+因此，我更怀疑的是重置到期判断逻辑出现问题，而不只是调度器的执行频率。
+
+## 三、具体被重置的额度
+
+两轮重置涉及完全相同的一组 Key，每个 Key 都被写入了两次。
+
+### AI Product 额度
+
+ZGF5dNVoD2fGVHn1LXdCdGii
+
+10亿 × 2
+
+8YwDmnyUKV29teclWDE3vVkL
+
+10亿 × 2
+
+Ze7ExK3pPneFHPI9hiQkLvVj
+
+10亿 × 2
+
+ZM6cYcDKAuFkPz3VpXbpK9f7
+
+10亿 × 2
+
+skefmfDqFUZSuK9c1yg5Sq3G
+
+10亿 × 2
+
+jxkozd8bKQHqu7KyT0zLqA8g
+
+10亿 × 2
+
+5yofjF5oBBcyMjWStsW5OYqX
+
+10亿 × 2
+
+iVwcjNl5aweWHAoWgFlY1Hwo
+
+10亿 × 2
+
+pmh6fJxQwkSC1FdBxUi09kOW
+
+10亿 × 2
+
+Ty6d9Ab9l42VXymlI4R8aB5p
+
+10亿 × 2
+
+vGWtU3l39Zg9LarR3rml79E6
+
+10亿 × 2
+
+MvaqKlNSDFq4lDJCbczSkkIz
+
+10亿 × 2
+
+2T2kuVH9iA4pCJwJAqTRrvGC
+
+10亿 × 2
+
+值得注意的是，日志中批量读取了 15 个 Product 额度，但每次只重置其中 13 个。`xUVg4ETjNCFNISZCtsuyyDbE` 和 `fBueg4K3HV9nyZpZlCP4L3A7` 在本次日志中没有被重置。这是排查到期判断的重要对照。
+
+### Entity 额度
+
+| Entity   | 重置额度          | 次数 |
+| -------- | ------------- | -- |
+| entity-1 | 9,999,999,999 | 2  |
+| entity-2 | 9,999,999,999 | 2  |
+| entity-3 | 1,000,000,000 | 2  |
+| entity-4 | 1,000,000,000 | 2  |
+| entity-5 | 1,000,000,000 | 2  |
+| entity-6 | 9,999,999,999 | 2  |
+| entity-7 | 1,000,000,000 | 2  |
+| entity-8 | 1,000,000,000 | 2  |
+
+因此，这个问题不仅影响 Product 额度，也影响 Entity 额度。
+
+## 四、其他 Redis 操作是不是重置？
+
+| 命令                             | 作用               | 是否导致额度重置 |
+| ------------------------------ | ---------------- | -------- |
+| `GET` / `MGET`                 | 查询当前额度           | 否        |
+| `EVALSHA b09e2339...`          | 执行 `DECRBY` 扣减额度 | 否        |
+| `EVALSHA 728af114...`          | 执行 `SET` 恢复初始额度  | 是        |
+| `EVALSHA 1d74e817...`          | 获取重置任务锁          | 间接关联     |
+| `EVALSHA d7d3a0c...`           | 释放重置任务锁          | 否        |
+| `SETEX bfe:ai:key_affinity:*`  | 设置模型 Key 粘性缓存    | 否        |
+| `EXPIRE bfe:ai:key_affinity:*` | 刷新粘性缓存有效期        | 否        |
+
+这也说明，日志中出现的百炼 `api-key-5`、`api-key-9` 等 `key_affinity` 操作，与本次额度异常恢复没有直接关系。
+
+## 五、建议研发重点检查的代码
+
+建议在 AI 网关项目目录执行以下搜索：
+
+```
+rg -n 'quota:reset:scheduler:lock|QuotaReset|ResetQuota|resetQuota|next_reset_at|reset_period|reset_interval' .
+```
+
+如果未安装 `rg`，可以使用：
+
+```
+grep -RnE 'quota:reset:scheduler:lock|QuotaReset|ResetQuota|resetQuota|next_reset_at|reset_period|reset_interval' . \
+  --exclude-dir=.git
+```
+
+重点检查：
+
+1. 调度任务是否正确读取数据库中每月重置的配置。
+2. 是否把“每分钟检查一次”和“每分钟重置一次”混淆。
+3. 额度重置完成后，是否正确更新下次重置时间。
+4. 时间比较是否使用了错误的时间单位、时区或默认值。
+5. Redis Lua 重置脚本是否缺少到期条件，导致每次被调用都覆盖额度。
+
+还可以在 Redis 服务器上执行：
+
+```
+./redis-cli -h 127.0.0.1 CLIENT LIST | grep 'addr=127.0.0.1:45226'
+```
+
+如果连接仍存在，可进一步查看客户端名称等信息，辅助定位具体进程。注意：`MONITOR` 只能证明操作来自 `127.0.0.1:45226`，不能直接证明它属于哪个应用进程。
+
+最终判断：目前已经确认是 `quota:reset:scheduler:lock` 对应的额度重置任务，在一分钟间隔内两次执行了批量覆盖额度的操作。 尚需结合服务端代码和数据库里的重置周期字段，确认为什么这些额度反复被判定为需要重置。
+
+建议优先让研发排查 额度重置调度器的到期判断逻辑，而不是 Redis 本身。

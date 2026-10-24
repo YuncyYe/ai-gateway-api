@@ -16,6 +16,8 @@ package mysqlreport
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +80,16 @@ const overviewFields = "SELECT IFNULL(SUM(request_count),0) AS request_total," +
 	"IFNULL(SUM(CASE WHEN ai_stream=1 THEN request_count ELSE 0 END),0) AS stream_requests," +
 	"IFNULL(SUM(tpot_us_sum),0) AS tpot_us_sum," +
 	"IFNULL(SUM(rate_limit_hits),0) AS rate_limit_hits," +
-	"IFNULL(SUM(auth_reject_count),0) AS auth_rejects"
+	"IFNULL(SUM(auth_reject_count),0) AS auth_rejects," +
+	"IFNULL(SUM(cache_read_tokens),0) AS cache_read_tokens," +
+	"IFNULL(SUM(cache_write_tokens),0) AS cache_write_tokens"
+
+const overviewDetailCountFieldsSQL = "SELECT IFNULL(SUM(CASE WHEN ai_cache_status='hit' THEN 1 ELSE 0 END),0) AS cache_hit_count," +
+	"IFNULL(SUM(CASE WHEN ai_cache_status='miss' THEN 1 ELSE 0 END),0) AS cache_miss_count," +
+	"IFNULL(SUM(CASE WHEN ai_cache_status='skip' THEN 1 ELSE 0 END),0) AS cache_skip_count," +
+	"IFNULL(SUM(CASE WHEN IFNULL(mirror_hit,0)=1 THEN 1 ELSE 0 END),0) AS mirror_hit_count," +
+	"IFNULL(SUM(CASE WHEN IFNULL(ai_intent_answer,'')!='' AND ai_intent_answer!='unknown' THEN 1 ELSE 0 END),0) AS intent_classified_count," +
+	"IFNULL(SUM(CASE WHEN ai_intent_answer='unknown' THEN 1 ELSE 0 END),0) AS intent_unknown_count"
 
 func TestBuildOverviewMetricsSQL_FullFilter(t *testing.T) {
 	query, args, err := buildOverviewMetricsSQL("bfe_ai_metrics_1m", fullFilter())
@@ -115,6 +126,17 @@ func TestBuildLogsTotalSQL(t *testing.T) {
 
 	assertSnapshot(t, query, args, err,
 		"SELECT COUNT(*) FROM bfe_ai_request_log"+
+			" WHERE (ai_stream=? AND ai_apikey_id IN (?) AND ai_provider IN (?)"+
+			" AND ai_target_model IN (?,?) AND hostid IN (?) AND res_status_code IN (?,?)"+
+			" AND log_time>=? AND log_time<?)",
+		fullFilterArgs())
+}
+
+func TestBuildOverviewDetailCountsSQL(t *testing.T) {
+	query, args, err := buildOverviewDetailCountsSQL("bfe_ai_request_log", fullFilter())
+
+	assertSnapshot(t, query, args, err,
+		overviewDetailCountFieldsSQL+" FROM bfe_ai_request_log"+
 			" WHERE (ai_stream=? AND ai_apikey_id IN (?) AND ai_provider IN (?)"+
 			" AND ai_target_model IN (?,?) AND hostid IN (?) AND res_status_code IN (?,?)"+
 			" AND log_time>=? AND log_time<?)",
@@ -161,15 +183,76 @@ func TestBuildTimeSeriesSQL_AllMetrics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.metric, func(t *testing.T) {
-			query, args, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", tc.metric, f, tc.bucket)
+			query, args, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", tc.metric, "", f, tc.bucket)
 			assertSnapshot(t, query, args, err, tc.expectSQL, []interface{}{testStart, testEnd})
 		})
 	}
 }
 
 func TestBuildTimeSeriesSQL_InvalidMetric(t *testing.T) {
-	_, _, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", "bogus", &ireport.Filter{Start: testStart, End: testEnd}, 60)
+	_, _, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", "bogus", "", &ireport.Filter{Start: testStart, End: testEnd}, 60)
 	require.Error(t, err)
+
+	_, _, err = buildTimeSeriesSQL("bfe_ai_metrics_1m", ireport.MetricQPS, "bogus", &ireport.Filter{Start: testStart, End: testEnd}, 60)
+	require.Error(t, err)
+}
+
+// TestBuildTimeSeriesSQL_CacheTokens 验证 cache_tokens 的 UNION ALL 形态：
+// cache_read/cache_write 两臂各带字面 kind，按 time,kind 排序。
+func TestBuildTimeSeriesSQL_CacheTokens(t *testing.T) {
+	f := &ireport.Filter{Start: testStart, End: testEnd}
+
+	query, args, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", ireport.MetricCacheTokens, "", f, 60)
+	require.NoError(t, err)
+
+	bucket := "CAST(FLOOR(TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', ts_min)/60)*60 AS SIGNED) AS time"
+	expect := "SELECT " + bucket + ",'cache_read' AS kind,SUM(cache_read_tokens) AS value" +
+		" FROM bfe_ai_metrics_1m WHERE (ts_min>=? AND ts_min<?) GROUP BY time" +
+		" UNION ALL " +
+		"SELECT " + bucket + ",'cache_write' AS kind,SUM(cache_write_tokens) AS value" +
+		" FROM bfe_ai_metrics_1m WHERE (ts_min>=? AND ts_min<?) GROUP BY time" +
+		" ORDER BY time ASC,kind ASC"
+	assert.Equal(t, expect, query)
+	assert.Equal(t, []interface{}{testStart, testEnd, testStart, testEnd}, args)
+}
+
+// TestBuildTimeSeriesSQL_Dimension 验证可选 dimension 参数：name 字段 +
+// GROUP BY time,<维度列>。
+func TestBuildTimeSeriesSQL_Dimension(t *testing.T) {
+	f := &ireport.Filter{Start: testStart, End: testEnd}
+
+	cases := []struct {
+		dimension string
+		column    string
+	}{
+		{ireport.DimensionCacheStatus, "ai_cache_status"},
+		{ireport.DimensionMirrorHit, "mirror_hit"},
+		{ireport.DimensionIntentAnswer, "ai_intent_answer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dimension, func(t *testing.T) {
+			query, args, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", ireport.MetricQPS, tc.dimension, f, 60)
+			require.NoError(t, err)
+			assert.Contains(t, query, "CAST(FLOOR(TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', ts_min)/60)*60 AS SIGNED) AS time,")
+			assert.Contains(t, query, tc.column+" AS name,SUM(request_count) AS total")
+			assert.Contains(t, query, " GROUP BY time,"+tc.column+" ORDER BY time ASC")
+			assert.Equal(t, []interface{}{testStart, testEnd}, args)
+		})
+	}
+
+	// cache_tokens × dimension：UNION ALL 两臂各带 name 并按维度列、kind 排序。
+	query, _, err := buildTimeSeriesSQL("bfe_ai_metrics_1m", ireport.MetricCacheTokens, ireport.DimensionCacheStatus, f, 60)
+	require.NoError(t, err)
+	assert.Contains(t, query, "'cache_read' AS kind,ai_cache_status AS name,SUM(cache_read_tokens) AS value")
+	assert.Contains(t, query, "'cache_write' AS kind,ai_cache_status AS name,SUM(cache_write_tokens) AS value")
+	assert.Contains(t, query, " GROUP BY time,ai_cache_status UNION ALL ")
+	assert.Contains(t, query, " ORDER BY time ASC,ai_cache_status ASC,kind ASC")
+
+	// cost × dimension：GROUP BY time,ai_cost_currency,<维度列>。
+	query, _, err = buildTimeSeriesSQL("bfe_ai_metrics_1m", ireport.MetricCost, ireport.DimensionIntentAnswer, f, 60)
+	require.NoError(t, err)
+	assert.Contains(t, query, "ai_intent_answer AS name,ai_cost_currency AS currency,SUM(ai_cost_value_sum) AS value")
+	assert.Contains(t, query, " GROUP BY time,ai_cost_currency,ai_intent_answer ORDER BY time ASC")
 }
 
 func TestBuildRankingsSQL(t *testing.T) {
@@ -186,16 +269,26 @@ func TestBuildRankingsSQL(t *testing.T) {
 		{ireport.DimensionStatus, "SELECT CAST(res_status_code AS CHAR) AS name,", " GROUP BY res_status_code "},
 		{ireport.DimensionProtocol, "SELECT ai_protocol AS name,", " GROUP BY ai_protocol "},
 		{ireport.DimensionMode, "SELECT ai_mode AS name,", " GROUP BY ai_mode "},
+		{ireport.DimensionCacheStatus, "SELECT ai_cache_status AS name,", " GROUP BY ai_cache_status "},
+		{ireport.DimensionIntentAnswer, "SELECT ai_intent_answer AS name,", " GROUP BY ai_intent_answer "},
+		{ireport.DimensionMirrorHit, "SELECT CAST(mirror_hit AS CHAR) AS name,", " GROUP BY mirror_hit "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dimension, func(t *testing.T) {
 			query, args, err := buildRankingsSQL("bfe_ai_metrics_1m", tc.dimension, &ireport.Filter{Start: testStart, End: testEnd}, 10)
 			require.NoError(t, err)
 			assert.Contains(t, query, tc.expectSel)
-			assert.Contains(t, query, "IFNULL(")
+			if tc.dimension == ireport.DimensionMirrorHit {
+				// mirror_hit is numeric 0/1 without an empty marker: both
+				// buckets must rank, so no IFNULL exclusion predicate/arg.
+				assert.NotContains(t, query, "IFNULL(mirror_hit")
+				assert.Equal(t, []interface{}{testStart, testEnd, 0, 10}, args)
+			} else {
+				assert.Contains(t, query, "IFNULL(")
+				assert.Equal(t, []interface{}{"", testStart, testEnd, 0, 10}, args)
+			}
 			assert.Contains(t, query, tc.expectGrp)
 			assert.Contains(t, query, " ORDER BY request_count DESC LIMIT ?,?")
-			assert.Equal(t, []interface{}{"", testStart, testEnd, 0, 10}, args)
 		})
 	}
 }
@@ -214,6 +307,9 @@ func TestBuildDistributionSQL(t *testing.T) {
 		{ireport.DimensionProtocol, "SELECT CASE WHEN IFNULL(ai_protocol,'')='' THEN 'unknown' ELSE ai_protocol END AS name,"},
 		{ireport.DimensionMode, "SELECT CASE WHEN IFNULL(ai_mode,'')='' THEN 'unknown' ELSE ai_mode END AS name,"},
 		{ireport.DimensionStream, "SELECT CAST(ai_stream AS CHAR) AS name,"},
+		{ireport.DimensionCacheStatus, "SELECT CASE WHEN IFNULL(ai_cache_status,'')='' THEN 'unknown' ELSE ai_cache_status END AS name,"},
+		{ireport.DimensionIntentAnswer, "SELECT CASE WHEN IFNULL(ai_intent_answer,'')='' THEN 'unknown' ELSE ai_intent_answer END AS name,"},
+		{ireport.DimensionMirrorHit, "SELECT CAST(mirror_hit AS CHAR) AS name,"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dimension, func(t *testing.T) {
@@ -251,6 +347,44 @@ func TestBuildLogsCountSQL_WithLogFilters(t *testing.T) {
 		int8(1), "key-1", "openai", "gpt-4", "gpt-4o", "gpt-4", "gw-01", 200, 500,
 		"", testStart, testEnd, "%timeout%",
 	}, args)
+}
+
+// TestBuildLogsCountSQL_CacheMirrorIntentFilters 验证五个新过滤参数的
+// WHERE 渲染（精确匹配，全填充时按运算符分组字典序）。
+func TestBuildLogsCountSQL_CacheMirrorIntentFilters(t *testing.T) {
+	cacheStatus := "hit"
+	mirrorHit := true
+	intentQuestion := "task_type"
+	intentAnswer := "unknown"
+	intentSource := "classifier"
+	f := &ireport.LogFilter{
+		Filter:         ireport.Filter{Start: testStart, End: testEnd},
+		CacheStatus:    &cacheStatus,
+		MirrorHit:      &mirrorHit,
+		IntentQuestion: &intentQuestion,
+		IntentAnswer:   &intentAnswer,
+		IntentSource:   &intentSource,
+	}
+	query, args, err := buildLogsCountSQL("bfe_ai_request_log", f)
+
+	require.NoError(t, err)
+	assert.Equal(t, "SELECT COUNT(*) FROM bfe_ai_request_log"+
+		" WHERE (ai_cache_status=? AND ai_intent_answer=? AND ai_intent_question=? AND ai_intent_source=?"+
+		" AND mirror_hit=? AND log_time>=? AND log_time<?)", query)
+	assert.Equal(t, []interface{}{"hit", "unknown", "task_type", "classifier", int8(1), testStart, testEnd}, args)
+
+	// mirror_hit=false 渲染 0；未填充的参数不进 WHERE。
+	mirrorHit = false
+	f.CacheStatus = nil
+	f.IntentQuestion = nil
+	f.IntentAnswer = nil
+	f.IntentSource = nil
+	query, args, err = buildLogsCountSQL("bfe_ai_request_log", f)
+	require.NoError(t, err)
+	assert.Contains(t, query, "mirror_hit=?")
+	assert.NotContains(t, query, "ai_cache_status")
+	assert.NotContains(t, query, "ai_intent_answer")
+	assert.Equal(t, []interface{}{int8(0), testStart, testEnd}, args)
 }
 
 func TestBuildLogsSQL_Pagination(t *testing.T) {
@@ -291,35 +425,63 @@ func TestBuildLogsSQL_Projection(t *testing.T) {
 	assert.Contains(t, query, "ai_auth_reject_quota_plans")
 	assert.Contains(t, query, "req_headers")
 	assert.Contains(t, query, "res_headers")
+	// 缓存/镜像/意图 10 列投影，列序与 db_ddl_report_mysql.sql 一致。
+	assert.True(t, strings.HasSuffix(query[strings.Index(query, "res_headers"):],
+		"res_headers,ai_cache_status,mirror_hit,mirror_cluster,ai_intent_question,ai_intent_answer,"+
+			"ai_intent_confidence,ai_intent_source,ai_intent_latency_us,ai_intent_cache_hit,ai_intent_questions_version "+
+			"FROM bfe_ai_request_log WHERE (log_time>=? AND log_time<?) ORDER BY log_time DESC LIMIT ?,?"))
 }
 
 func TestTablePrefix(t *testing.T) {
-	s := New(nil, "bfe_report")
+	s := New(nil, "bfe_report", "mysql")
 	assert.Equal(t, "bfe_report.bfe_ai_request_log", s.table(tableDetail))
 	assert.Equal(t, "bfe_report.bfe_ai_metrics_1m", s.table(tableMetrics))
 
-	s = New(nil, "")
+	s = New(nil, "", "mysql")
 	assert.Equal(t, "bfe_ai_request_log", s.table(tableDetail))
+}
+
+// TestCapabilities 验证 MySQL 后端声明全部 12 个维度（含三个新维度）。
+func TestCapabilities(t *testing.T) {
+	caps := New(nil, "", "mysql").Capabilities()
+	require.NotNil(t, caps)
+	assert.Equal(t, "mysql", caps.Backend)
+	assert.Len(t, caps.SupportedDimensions, 12)
+	for _, dim := range []string{
+		ireport.DimensionCacheStatus, ireport.DimensionMirrorHit, ireport.DimensionIntentAnswer,
+	} {
+		assert.Contains(t, caps.SupportedDimensions, dim)
+	}
 }
 
 func TestOverviewResultFromRow(t *testing.T) {
 	row := &overviewMetricsRow{
-		requestTotal:   sql.NullInt64{Int64: 100, Valid: true},
-		errorTotal:     sql.NullInt64{Int64: 5, Valid: true},
-		inputTokens:    sql.NullInt64{Int64: 1000, Valid: true},
-		outputTokens:   sql.NullInt64{Int64: 200, Valid: true},
-		totalTokens:    sql.NullInt64{Int64: 1200, Valid: true},
-		allTimeSum:     sql.NullInt64{Int64: 120000, Valid: true},
-		latencyMax:     sql.NullFloat64{Float64: 3000, Valid: true},
-		ttftUsSum:      sql.NullInt64{Int64: 40_000_000, Valid: true},
-		streamRequests: sql.NullInt64{Int64: 50, Valid: true},
-		tpotUsSum:      sql.NullInt64{Int64: 2_000_000, Valid: true},
-		rateLimitHits:  sql.NullInt64{Int64: 7, Valid: true},
-		authRejects:    sql.NullInt64{Int64: 3, Valid: true},
+		requestTotal:     sql.NullInt64{Int64: 100, Valid: true},
+		errorTotal:       sql.NullInt64{Int64: 5, Valid: true},
+		inputTokens:      sql.NullInt64{Int64: 1000, Valid: true},
+		outputTokens:     sql.NullInt64{Int64: 200, Valid: true},
+		totalTokens:      sql.NullInt64{Int64: 1200, Valid: true},
+		allTimeSum:       sql.NullInt64{Int64: 120000, Valid: true},
+		latencyMax:       sql.NullFloat64{Float64: 3000, Valid: true},
+		ttftUsSum:        sql.NullInt64{Int64: 40_000_000, Valid: true},
+		streamRequests:   sql.NullInt64{Int64: 50, Valid: true},
+		tpotUsSum:        sql.NullInt64{Int64: 2_000_000, Valid: true},
+		rateLimitHits:    sql.NullInt64{Int64: 7, Valid: true},
+		authRejects:      sql.NullInt64{Int64: 3, Valid: true},
+		cacheReadTokens:  sql.NullInt64{Int64: 123456, Valid: true},
+		cacheWriteTokens: sql.NullInt64{Int64: 7890, Valid: true},
+	}
+	detailCounts := &overviewDetailCounts{
+		cacheHitCount:         sql.NullInt64{Int64: 120, Valid: true},
+		cacheMissCount:        sql.NullInt64{Int64: 30, Valid: true},
+		cacheSkipCount:        sql.NullInt64{Int64: 5, Valid: true},
+		mirrorHitCount:        sql.NullInt64{Int64: 12, Valid: true},
+		intentClassifiedCount: sql.NullInt64{Int64: 145, Valid: true},
+		intentUnknownCount:    sql.NullInt64{Int64: 15, Valid: true},
 	}
 	cost := []*ireport.CostItem{{Currency: "USD", Value: 0.00005}}
 
-	result := overviewResultFromRow(row, cost, 123)
+	result := overviewResultFromRow(row, cost, 123, detailCounts)
 
 	assert.Equal(t, int64(100), result.RequestTotal)
 	assert.InDelta(t, 0.05, result.ErrorRate, 1e-9)
@@ -333,11 +495,45 @@ func TestOverviewResultFromRow(t *testing.T) {
 	require.Len(t, result.Cost, 1)
 	assert.Nil(t, result.LatencyP50Ms)
 
+	// cache/mirror/intent 组：hit_rate=hit/(hit+miss)（skip 不计分母）；
+	// unknown_rate=unknown/(classified+unknown)。
+	assert.Equal(t, int64(120), result.Cache.HitCount)
+	assert.Equal(t, int64(30), result.Cache.MissCount)
+	assert.Equal(t, int64(5), result.Cache.SkipCount)
+	assert.InDelta(t, 0.8, result.Cache.HitRate, 1e-9)
+	assert.Equal(t, int64(123456), result.Cache.ReadTokens)
+	assert.Equal(t, int64(7890), result.Cache.WriteTokens)
+	assert.Equal(t, int64(12), result.Mirror.HitCount)
+	assert.Equal(t, int64(145), result.Intent.ClassifiedCount)
+	assert.Equal(t, int64(15), result.Intent.UnknownCount)
+	assert.InDelta(t, 0.09375, result.Intent.UnknownRate, 1e-9)
+
 	// zero requests: rates stay zero without division by zero.
-	empty := overviewResultFromRow(&overviewMetricsRow{}, nil, 0)
+	empty := overviewResultFromRow(&overviewMetricsRow{}, nil, 0, &overviewDetailCounts{})
 	assert.Equal(t, float64(0), empty.ErrorRate)
 	assert.Equal(t, float64(0), empty.LatencyAvgMs)
 	assert.Equal(t, float64(0), empty.TtftAvgMs)
+	assert.Equal(t, float64(0), empty.Cache.HitRate)
+	assert.Equal(t, float64(0), empty.Intent.UnknownRate)
+	assert.Equal(t, int64(0), empty.Cache.ReadTokens)
+}
+
+// TestOverviewResultFromRow_CacheHitRateSkipExcluded 锁定口径：skip 不计入
+// 命中率分母（hit/(hit+miss)）。
+func TestOverviewResultFromRow_CacheHitRateSkipExcluded(t *testing.T) {
+	row := &overviewMetricsRow{}
+	detailCounts := &overviewDetailCounts{
+		cacheHitCount: sql.NullInt64{Int64: 1, Valid: true},
+		// miss=0：hit_rate=1（skip 不参与）。
+		cacheSkipCount: sql.NullInt64{Int64: 9, Valid: true},
+	}
+	result := overviewResultFromRow(row, nil, 0, detailCounts)
+	assert.InDelta(t, 1.0, result.Cache.HitRate, 1e-9)
+
+	// hit=miss=0（只有 skip）：分母为 0，命中率返回 0 而非 NaN。
+	onlySkip := &overviewDetailCounts{cacheSkipCount: sql.NullInt64{Int64: 9, Valid: true}}
+	result = overviewResultFromRow(row, nil, 0, onlySkip)
+	assert.Equal(t, float64(0), result.Cache.HitRate)
 }
 
 func TestRowToMetricPoint(t *testing.T) {
@@ -365,6 +561,17 @@ func TestRowToMetricPoint(t *testing.T) {
 	cost := rowToMetricPoint(ireport.MetricCost, 1000, 60, metricRowValues{value: 600_000_000, currency: "USD"})
 	assert.InDelta(t, 0.1, *cost.Value, 1e-9) // 6e8 定点 / 60s / 1e8 = 0.1 元/秒
 	assert.Equal(t, "USD", cost.Currency)
+
+	// cache_tokens：原始 token 计数 ÷ 桶宽（不做 ÷1e8 换算），kind 区分序列。
+	cacheRead := rowToMetricPoint(ireport.MetricCacheTokens, 1000, 60, metricRowValues{value: 4000, kind: "cache_read"})
+	require.NotNil(t, cacheRead.Value)
+	assert.InDelta(t, 4000.0/60, *cacheRead.Value, 1e-9)
+	assert.Equal(t, "cache_read", cacheRead.Kind)
+
+	// 维度拆分序列：name 透传。
+	dim := rowToMetricPoint(ireport.MetricQPS, 1000, 60, metricRowValues{total: 300, name: "hit"})
+	assert.Equal(t, "hit", dim.Name)
+	assert.Equal(t, "", dim.Kind)
 }
 
 func TestDistributionRatios(t *testing.T) {
@@ -385,12 +592,25 @@ func TestNullPtrHelpers(t *testing.T) {
 	assert.Nil(t, nullInt64Ptr(sql.NullInt64{}))
 	assert.Nil(t, nullInt16Ptr(sql.NullInt64{}))
 	assert.Nil(t, nullStringPtr(sql.NullString{}))
+	assert.Nil(t, nullBoolPtr(sql.NullInt64{}))
+	assert.Nil(t, nullFloat64Ptr(sql.NullFloat64{}))
 
 	v := sql.NullInt64{Int64: 42, Valid: true}
 	require.NotNil(t, nullInt64Ptr(v))
 	assert.Equal(t, int64(42), *nullInt64Ptr(v))
 	require.NotNil(t, nullInt16Ptr(v))
 	assert.Equal(t, int16(42), *nullInt16Ptr(v))
+
+	one := sql.NullInt64{Int64: 1, Valid: true}
+	require.NotNil(t, nullBoolPtr(one))
+	assert.True(t, *nullBoolPtr(one))
+	zero := sql.NullInt64{Int64: 0, Valid: true}
+	require.NotNil(t, nullBoolPtr(zero))
+	assert.False(t, *nullBoolPtr(zero))
+
+	f := sql.NullFloat64{Float64: 0.95, Valid: true}
+	require.NotNil(t, nullFloat64Ptr(f))
+	assert.InDelta(t, 0.95, *nullFloat64Ptr(f), 1e-12)
 
 	c := sql.NullInt64{Int64: 66900, Valid: true}
 	require.NotNil(t, nullCostAmountPtr(c))
@@ -421,4 +641,107 @@ func TestUnixSecondRendering_TimezoneNeutral(t *testing.T) {
 	// 解读为 1789437600 = 2026-09-15 02:00:00 UTC，正是本修复消除的 8h 偏移）。
 	want := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC).Unix()
 	assert.Equal(t, int64(1789466400), want)
+}
+
+// fakeRowScanner 按预置值顺序填充 Scan 目标，模拟一行业务数据。
+type fakeRowScanner struct {
+	values []interface{}
+	err    error
+}
+
+func (s *fakeRowScanner) Scan(dest ...interface{}) error {
+	if s.err != nil {
+		return s.err
+	}
+	if len(dest) != len(s.values) {
+		return fmt.Errorf("dest len %d != values len %d", len(dest), len(s.values))
+	}
+	for i, d := range dest {
+		switch t := d.(type) {
+		case *sql.NullInt64:
+			if v, ok := s.values[i].(sql.NullInt64); ok {
+				*t = v
+			}
+		case *sql.NullString:
+			if v, ok := s.values[i].(sql.NullString); ok {
+				*t = v
+			}
+		case *sql.NullFloat64:
+			if v, ok := s.values[i].(sql.NullFloat64); ok {
+				*t = v
+			}
+		default:
+			return fmt.Errorf("unexpected dest type %T", d)
+		}
+	}
+	return nil
+}
+
+// TestScanLogRow_CacheMirrorIntentColumns 验证明细行扫描：10 个新列按
+// 投影列序映射到 LogRow，TINYINT 列转 bool，NULL 保持 nil。
+func TestScanLogRow_CacheMirrorIntentColumns(t *testing.T) {
+	// 列序与 logRowFields 一致：前 40 列任意填充，断言只看后 10 列。
+	values := make([]interface{}, 0, len(logRowFields))
+	values = append(values,
+		sql.NullInt64{Int64: 1, Valid: true},          // logid
+		sql.NullInt64{Int64: 1789466410, Valid: true}, // log_time
+	)
+	for len(values) < len(logRowFields)-10 {
+		values = append(values, sql.NullString{})
+	}
+	values = append(values,
+		sql.NullString{String: "hit", Valid: true},       // ai_cache_status
+		sql.NullInt64{Int64: 1, Valid: true},             // mirror_hit
+		sql.NullString{String: "mirror-bj", Valid: true}, // mirror_cluster
+		sql.NullString{String: "task_type", Valid: true}, // ai_intent_question
+		sql.NullString{String: "coding", Valid: true},    // ai_intent_answer
+		sql.NullFloat64{Float64: 0.95, Valid: true},      // ai_intent_confidence
+		sql.NullString{String: "classifier", Valid: true}, // ai_intent_source
+		sql.NullInt64{Int64: 1200, Valid: true},          // ai_intent_latency_us
+		sql.NullInt64{Int64: 0, Valid: true},             // ai_intent_cache_hit
+		sql.NullString{String: "v3", Valid: true},        // ai_intent_questions_version
+	)
+	require.Len(t, values, len(logRowFields))
+
+	row, err := scanLogRow(&fakeRowScanner{values: values})
+	require.NoError(t, err)
+
+	require.NotNil(t, row.AICacheStatus)
+	assert.Equal(t, "hit", *row.AICacheStatus)
+	require.NotNil(t, row.MirrorHit)
+	assert.True(t, *row.MirrorHit)
+	require.NotNil(t, row.MirrorCluster)
+	assert.Equal(t, "mirror-bj", *row.MirrorCluster)
+	require.NotNil(t, row.AIIntentQuestion)
+	assert.Equal(t, "task_type", *row.AIIntentQuestion)
+	require.NotNil(t, row.AIIntentAnswer)
+	assert.Equal(t, "coding", *row.AIIntentAnswer)
+	require.NotNil(t, row.AIIntentConfidence)
+	assert.InDelta(t, 0.95, *row.AIIntentConfidence, 1e-12)
+	require.NotNil(t, row.AIIntentSource)
+	assert.Equal(t, "classifier", *row.AIIntentSource)
+	require.NotNil(t, row.AIIntentLatencyUs)
+	assert.Equal(t, int64(1200), *row.AIIntentLatencyUs)
+	require.NotNil(t, row.AIIntentCacheHit)
+	assert.False(t, *row.AIIntentCacheHit)
+	require.NotNil(t, row.AIIntentQuestionsVer)
+	assert.Equal(t, "v3", *row.AIIntentQuestionsVer)
+
+	// 意图未求值行：可空列为 NULL -> nil。
+	values[len(values)-10] = sql.NullString{String: "", Valid: true} // ai_cache_status=''
+	values[len(values)-9] = sql.NullInt64{Int64: 0, Valid: true}     // mirror_hit=0
+	values[len(values)-5] = sql.NullFloat64{}                        // confidence NULL
+	values[len(values)-4] = sql.NullString{String: "", Valid: true}  // source=''
+	values[len(values)-3] = sql.NullInt64{}                          // latency NULL
+	values[len(values)-2] = sql.NullInt64{}                          // cache_hit NULL
+
+	row, err = scanLogRow(&fakeRowScanner{values: values})
+	require.NoError(t, err)
+	require.NotNil(t, row.AICacheStatus)
+	assert.Equal(t, "", *row.AICacheStatus)
+	require.NotNil(t, row.MirrorHit)
+	assert.False(t, *row.MirrorHit)
+	assert.Nil(t, row.AIIntentConfidence)
+	assert.Nil(t, row.AIIntentLatencyUs)
+	assert.Nil(t, row.AIIntentCacheHit)
 }

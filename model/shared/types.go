@@ -56,9 +56,24 @@ type RPMConfig struct {
 }
 
 type RateLimitRules struct {
-	TpmConfigs     []TPMConfig `json:"tpm"`
-	RpmConfigs     []RPMConfig `json:"rpm"`
-	MaxConcurrency *int        `json:"max_concurrency"`
+	TpmConfigs     []TPMConfig  `json:"tpm"`
+	RpmConfigs     []RPMConfig  `json:"rpm"`
+	MaxConcurrency *int         `json:"max_concurrency"`
+	BatchLimits    *BatchLimits `json:"batch_limits,omitempty"`
+}
+
+// BatchLimits defines the batch-request rate limit dimensions of a policy
+// (2026-10-07, batch & async task support phase 1). All dimensions are
+// counted per api key and are model-agnostic (batch request bodies carry no
+// model field). Nil means the policy does not participate in batch rate
+// limiting (omitted/null, zero migration for existing rows); 0 means the
+// dimension is not limited. A policy with no batch segment still falls under
+// the BFE mod_ai_batch global hard caps.
+type BatchLimits struct {
+	MaxCreateRPM     int   `json:"max_create_rpm"`
+	MaxActiveBatches int   `json:"max_active_batches"`
+	MaxFileBytes     int64 `json:"max_file_bytes"`
+	MaxFileLines     int   `json:"max_file_lines"`
 }
 
 type RateLimitPolicyParam struct {
@@ -237,4 +252,124 @@ type RateLimitPolicyStorager interface {
 	UpdateRateLimitPolicy(ctx context.Context, id int64, param *RateLimitPolicyParam) (int64, error)
 	DeleteRateLimitPolicy(ctx context.Context, id int64) error
 	FetchRateLimitPolicy(ctx context.Context, id int64) (*RateLimitPolicyParam, error)
+}
+
+// AICacheRuleParam defines an AI cache rule. The Open API vocabulary is
+// lowercase snake_case; optional fields left nil are filled with defaults
+// (cache_key_strategy=lastQuestion, cache_ttl=0, max_body_bytes/max_value_bytes=1048576,
+// enable_semantic_cache=false).
+// Per-rule timestamps are intentionally not part of the vocabulary: the
+// collection is a full-replace resource (every PUT recreates all rows and
+// renumbers their ids), so created_at/updated_at would only ever equal the last
+// PUT time. Not exposing them also keeps the bulk INSERT column set identical
+// across rows — gendry derives it from the first row and rejects later rows
+// missing a column with "insert data not match" (issue #258). Audit time is
+// available through GET /operation-logs.
+type AICacheRuleParam struct {
+	Name                *string `json:"name"`
+	Cond                *string `json:"cond"`
+	CacheKeyStrategy    *string `json:"cache_key_strategy,omitempty"`
+	CacheTTL            *int    `json:"cache_ttl,omitempty"`
+	MaxBodyBytes        *int64  `json:"max_body_bytes,omitempty"`
+	MaxValueBytes       *int64  `json:"max_value_bytes,omitempty"`
+	EnableSemanticCache *bool   `json:"enable_semantic_cache,omitempty"`
+}
+
+// AICacheRulesParam defines the AI cache rule collection (full-replace semantics:
+// the submitted list is the effective set; a null rules list is treated as empty).
+type AICacheRulesParam struct {
+	Rules []*AICacheRuleParam `json:"rules"`
+}
+
+// AICacheSemanticSettingsParam defines the singleton AI cache semantic
+// settings (phase 2). The Open API vocabulary is lowercase snake_case;
+// optional fields left nil are filled with the documented defaults
+// (top_k=1, threshold=0.15, threshold_relation=lt).
+// CreatedAt/UpdatedAt are read-only response fields (RFC3339), present only
+// when a settings row exists in storage.
+type AICacheSemanticSettingsParam struct {
+	TopK              *int       `json:"top_k,omitempty"`
+	Threshold         *float64   `json:"threshold,omitempty"`
+	ThresholdRelation *string    `json:"threshold_relation,omitempty"`
+	CreatedAt         *time.Time `json:"created_at,omitempty"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+}
+
+// AIContextRuleParam defines an AI context compression rule. The Open API
+// vocabulary is lowercase snake_case; optional fields left nil are filled
+// with defaults (max_context_tokens=0, reserve_tokens=0; 0 means "use the
+// model table window" / "auto reserve" on the BFE side). There is no name
+// field: cond is the rule identity within the collection.
+// Read-only timestamps are intentionally not exposed: the collection is a
+// full-replace resource (every PUT recreates all rows), so per-rule
+// created_at/updated_at carry no information (aligned with ai-cache-rules).
+type AIContextRuleParam struct {
+	Cond             *string `json:"cond"`
+	Mode             *string `json:"mode"`
+	MaxContextTokens *int    `json:"max_context_tokens,omitempty"`
+	ReserveTokens    *int    `json:"reserve_tokens,omitempty"`
+}
+
+// AIContextRulesParam defines the AI context rule collection (full-replace
+// semantics: the submitted list is the effective set; a null rules list is
+// treated as empty).
+type AIContextRulesParam struct {
+	Rules []*AIContextRuleParam `json:"rules"`
+}
+
+// AIContextRewriteParam defines the rewrite-layer sub-object of the global
+// AI context settings.
+type AIContextRewriteParam struct {
+	Strength              *string  `json:"strength,omitempty"`
+	ProtectedSurvivalRate *float64 `json:"protected_survival_rate,omitempty"`
+}
+
+// AIContextSettingsParam defines the singleton AI context global settings.
+// The Open API vocabulary is lowercase snake_case; optional fields left nil
+// (including a nil rewrite sub-object or its nil fields) are filled with the
+// documented defaults (0.7 / 2 / 2000 / trim-all-but-last / 4 / 1200 /
+// lite / 0.95), frozen in sync with the BFE mod_ai_context setDefaults.
+// CreatedAt/UpdatedAt are read-only response fields (RFC3339), present only
+// when a settings row exists in storage.
+type AIContextSettingsParam struct {
+	TriggerRatio       *float64               `json:"trigger_ratio,omitempty"`
+	KeepLatestImages   *int                   `json:"keep_latest_images,omitempty"`
+	ToolResultMaxChars *int                   `json:"tool_result_max_chars,omitempty"`
+	ThinkingPolicy     *string                `json:"thinking_policy,omitempty"`
+	CharsPerToken      *int                   `json:"chars_per_token,omitempty"`
+	ImageTokenEstimate *int                   `json:"image_token_estimate,omitempty"`
+	Rewrite            *AIContextRewriteParam `json:"rewrite,omitempty"`
+}
+
+// TrafficMirrorBodyRewriteParam defines a body field rewrite on the mirror copy.
+// Phase 1 hard-checks path to "model" (aligned with BFE mod_traffic_mirror Check).
+type TrafficMirrorBodyRewriteParam struct {
+	Path  *string `json:"path"`
+	Value *string `json:"value"`
+}
+
+// TrafficMirrorRuleParam defines a traffic mirror rule. The Open API vocabulary
+// is lowercase snake_case. Optional fields left nil keep their NULL semantics:
+// remove_headers nil means "not submitted" (the export fills the default
+// sensitive-header blacklist), while an explicit empty array strips nothing.
+// percentage is filled with the documented default (100) on write.
+// CreatedAt/UpdatedAt are read-only response fields (RFC3339).
+type TrafficMirrorRuleParam struct {
+	Name          *string                          `json:"name"`
+	Cond          *string                          `json:"cond"`
+	MirrorCluster *string                          `json:"mirror_cluster"`
+	Percentage    *int                             `json:"percentage,omitempty"`
+	RemoveHeaders *[]string                        `json:"remove_headers,omitempty"`
+	SetHeaders    map[string]string                `json:"set_headers,omitempty"`
+	BodyRewrites  []*TrafficMirrorBodyRewriteParam `json:"body_rewrites,omitempty"`
+	PathRewrite   *string                          `json:"path_rewrite,omitempty"`
+	CreatedAt     *time.Time                       `json:"created_at,omitempty"`
+	UpdatedAt     *time.Time                       `json:"updated_at,omitempty"`
+}
+
+// TrafficMirrorRulesParam defines the traffic mirror rule collection
+// (full-replace semantics: the submitted list is the effective set; a null
+// rules list is treated as empty and clears the collection).
+type TrafficMirrorRulesParam struct {
+	Rules []*TrafficMirrorRuleParam `json:"rules"`
 }

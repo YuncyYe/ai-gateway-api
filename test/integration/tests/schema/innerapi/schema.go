@@ -89,7 +89,7 @@ var AIKeyPolicySchema = &testutil.ObjectSchema{
 // AIConfSchema ClusterConf.Config.<cluster>.AIConf 的 schema
 var AIConfSchema = &testutil.ObjectSchema{
 	Required: []string{"KeyPolicy"},
-	Optional: []string{"Keys", "ModelMappings", "ModelTable", "MatchPrefix", "StripPrefix", "ModelProtocols"},
+	Optional: []string{"Keys", "ModelMappings", "ModelTable", "MatchPrefix", "StripPrefix", "ModelProtocols", "NormalizeUpstreamError"},
 	Fields: map[string]testutil.FieldSpec{
 		"Keys":           {Type: testutil.TypeArray},
 		"KeyPolicy":      {Type: testutil.TypeObject, Nested: AIKeyPolicySchema},
@@ -98,6 +98,7 @@ var AIConfSchema = &testutil.ObjectSchema{
 		"MatchPrefix":    {Type: testutil.TypeString},
 		"StripPrefix":    {Type: testutil.TypeBool},
 		"ModelProtocols": {Type: testutil.TypeArray, Item: &testutil.FieldSpec{Type: testutil.TypeString}},
+		"NormalizeUpstreamError": {Type: testutil.TypeObject},
 	},
 }
 
@@ -199,5 +200,197 @@ var EppDataSchema = &testutil.ObjectSchema{
 	Fields: map[string]testutil.FieldSpec{
 		"Version": {Type: testutil.TypeString},
 		"Config":  {Type: testutil.TypeObject, Nested: EppDataConfigBodySchema},
+	},
+}
+
+// AICacheRuleExportItemSchema /configs/ai-cache-rule 导出单条规则 schema。
+// Required 恰为合同 6 个导出 tag（大写驼峰，与 Open API 词汇不同；二期新增
+// enableSemanticCache）；二期/预留字段 cacheKeyFrom/cacheValueFrom/cacheStreamValueFrom/
+// cacheToolCallsFrom/responseTemplate/streamResponseTemplate 不得出现（ai-cache-rule.md §3.2）。
+var AICacheRuleExportItemSchema = &testutil.ObjectSchema{
+	Required: []string{
+		"cond", "cacheKeyStrategy", "cacheTTL", "maxBodyBytes", "maxValueBytes",
+		"enableSemanticCache",
+	},
+	Fields: map[string]testutil.FieldSpec{
+		"cond":                {Type: testutil.TypeString},
+		"cacheKeyStrategy":    {Type: testutil.TypeString, Enum: []interface{}{"lastQuestion", "allQuestions", "disabled"}},
+		"cacheTTL":            {Type: testutil.TypeInt},
+		"maxBodyBytes":        {Type: testutil.TypeInt},
+		"maxValueBytes":       {Type: testutil.TypeInt},
+		"enableSemanticCache": {Type: testutil.TypeBool},
+	},
+}
+
+// AICacheSemanticExportSchema /configs/ai-cache-rule 顶层 Semantic 块 schema。
+// camelCase tag（topK/threshold/thresholdRelation）与 BFE SemanticConfFile 逐字段冻结；
+// 恒导出（空设置表时以默认值 1/0.15/lt 填充）。
+var AICacheSemanticExportSchema = &testutil.ObjectSchema{
+	Required: []string{"topK", "threshold", "thresholdRelation"},
+	Fields: map[string]testutil.FieldSpec{
+		"topK":              {Type: testutil.TypeInt},
+		"threshold":         {Type: testutil.TypeNumber},
+		"thresholdRelation": {Type: testutil.TypeString, Enum: []interface{}{"lt", "lte", "gt", "gte"}},
+	},
+}
+
+// AICacheRuleExportBodySchema /configs/ai-cache-rule 返回 Config 段 schema。
+// product 键取自 AIRouteInnerProductName（测试环境为 AI_product）；空集合导出 [] 且键 present。
+var AICacheRuleExportBodySchema = &testutil.ObjectSchema{
+	Required: []string{"AI_product"},
+	Fields: map[string]testutil.FieldSpec{
+		"AI_product": {Type: testutil.TypeArray, Elem: AICacheRuleExportItemSchema},
+	},
+}
+
+// AICacheRuleExportSchema /configs/ai-cache-rule 返回 schema。
+// Semantic 块二期新增且恒导出（与 Version/Config 并列顶层键）。
+var AICacheRuleExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Version", "Semantic", "Config"},
+	Fields: map[string]testutil.FieldSpec{
+		"Version":  {Type: testutil.TypeString},
+		"Semantic": {Type: testutil.TypeObject, Nested: AICacheSemanticExportSchema},
+		"Config":   {Type: testutil.TypeObject, Nested: AICacheRuleExportBodySchema},
+	},
+}
+
+// AIContextRuleExportItemSchema /configs/ai-context-rule 导出单条规则 schema。
+// Required 恰为合同 4 个导出 tag（camelCase，与 Open API 词汇不同）；
+// mode 必填四枚举（BFE 对缺失/非法 mode 整文件拒载，控制面 422 前置拦截）；
+// 二期字段 override 不得出现（ai-context-rule.md §3.3 合同锁定）。
+var AIContextRuleExportItemSchema = &testutil.ObjectSchema{
+	Required: []string{"cond", "mode", "maxContextTokens", "reserveTokens"},
+	Fields: map[string]testutil.FieldSpec{
+		"cond":             {Type: testutil.TypeString},
+		"mode":             {Type: testutil.TypeString, Enum: []interface{}{"off", "conservative", "balanced", "aggressive"}},
+		"maxContextTokens": {Type: testutil.TypeInt},
+		"reserveTokens":    {Type: testutil.TypeInt},
+	},
+}
+
+// AIContextRewriteExportSchema /configs/ai-context-rule Defaults 块 rewrite 子对象 schema。
+// camelCase tag（strength/protectedSurvivalRate）与 BFE RewriteConfFile 逐字段冻结。
+var AIContextRewriteExportSchema = &testutil.ObjectSchema{
+	Required: []string{"strength", "protectedSurvivalRate"},
+	Fields: map[string]testutil.FieldSpec{
+		"strength":              {Type: testutil.TypeString, Enum: []interface{}{"lite", "full"}},
+		"protectedSurvivalRate": {Type: testutil.TypeNumber},
+	},
+}
+
+// AIContextDefaultsExportSchema /configs/ai-context-rule 顶层 Defaults 块 schema。
+// camelCase tag（7 顶层键）与 BFE DefaultsConfFile 逐字段冻结；恒导出（空设置表时以
+// 默认值 0.7/2/2000/trim-all-but-last/4/1200/lite/0.95 填充）；rewrite 为嵌套对象。
+var AIContextDefaultsExportSchema = &testutil.ObjectSchema{
+	Required: []string{
+		"triggerRatio", "keepLatestImages", "toolResultMaxChars",
+		"thinkingPolicy", "charsPerToken", "imageTokenEstimate", "rewrite",
+	},
+	Fields: map[string]testutil.FieldSpec{
+		"triggerRatio":       {Type: testutil.TypeNumber},
+		"keepLatestImages":   {Type: testutil.TypeInt},
+		"toolResultMaxChars": {Type: testutil.TypeInt},
+		"thinkingPolicy":     {Type: testutil.TypeString, Enum: []interface{}{"trim-all-but-last", "keep"}},
+		"charsPerToken":      {Type: testutil.TypeInt},
+		"imageTokenEstimate": {Type: testutil.TypeInt},
+		"rewrite":            {Type: testutil.TypeObject, Nested: AIContextRewriteExportSchema},
+	},
+}
+
+// AIContextRuleExportBodySchema /configs/ai-context-rule 返回 Config 段 schema。
+// product 键取自 AIRouteInnerProductName（测试环境为 AI_product）；空集合导出 [] 且键 present。
+var AIContextRuleExportBodySchema = &testutil.ObjectSchema{
+	Required: []string{"AI_product"},
+	Fields: map[string]testutil.FieldSpec{
+		"AI_product": {Type: testutil.TypeArray, Elem: AIContextRuleExportItemSchema},
+	},
+}
+
+// AIContextRuleExportSchema /configs/ai-context-rule 返回 schema。
+// Defaults 块恒导出且进入 MD5 签名（设置变更驱动版本流），与 Version/Config 并列顶层键。
+var AIContextRuleExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Version", "Defaults", "Config"},
+	Fields: map[string]testutil.FieldSpec{
+		"Version":  {Type: testutil.TypeString},
+		"Defaults": {Type: testutil.TypeObject, Nested: AIContextDefaultsExportSchema},
+		"Config":   {Type: testutil.TypeObject, Nested: AIContextRuleExportBodySchema},
+	},
+}
+
+// TrafficMirrorRuleExportItemSchema /configs/traffic-mirror-rule 导出单条规则 schema。
+// Required 恰为合同 7 个导出 tag（大写驼峰，与 Open API 词汇不同）；规则全字段恒输出
+// （含空值零值 {} / [] / ""，不用 omitempty）——removeHeaders 两层默认语义
+// （缺省填默认黑名单 / 显式 [] 不剔除）由取值断言覆盖（traffic-mirror-rule.md §3.2）。
+var TrafficMirrorRuleExportItemSchema = &testutil.ObjectSchema{
+	Required: []string{
+		"cond", "mirrorCluster", "percentage", "removeHeaders", "setHeaders", "bodyRewrites", "pathRewrite",
+	},
+	Fields: map[string]testutil.FieldSpec{
+		"cond":          {Type: testutil.TypeString},
+		"mirrorCluster": {Type: testutil.TypeString},
+		"percentage":    {Type: testutil.TypeInt},
+		"removeHeaders": {Type: testutil.TypeArray, Item: &testutil.FieldSpec{Type: testutil.TypeString}},
+		"setHeaders":    {Type: testutil.TypeObject},
+		"bodyRewrites": {Type: testutil.TypeArray, Elem: &testutil.ObjectSchema{
+			Required: []string{"path", "value"},
+			Fields: map[string]testutil.FieldSpec{
+				"path":  {Type: testutil.TypeString},
+				"value": {Type: testutil.TypeString},
+			},
+		}},
+		"pathRewrite": {Type: testutil.TypeString},
+	},
+}
+
+// TrafficMirrorRuleExportBodySchema /configs/traffic-mirror-rule 返回 Config 段 schema。
+// product 键取自 AIRouteInnerProductName（测试环境为 AI_product）；空集合导出 [] 且键 present。
+var TrafficMirrorRuleExportBodySchema = &testutil.ObjectSchema{
+	Required: []string{"AI_product"},
+	Fields: map[string]testutil.FieldSpec{
+		"AI_product": {Type: testutil.TypeArray, Elem: TrafficMirrorRuleExportItemSchema},
+	},
+}
+
+// TrafficMirrorRuleExportSchema /configs/traffic-mirror-rule 返回 schema
+var TrafficMirrorRuleExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Version", "Config"},
+	Fields: map[string]testutil.FieldSpec{
+		"Version": {Type: testutil.TypeString},
+		"Config":  {Type: testutil.TypeObject, Nested: TrafficMirrorRuleExportBodySchema},
+	},
+}
+
+// IntentConfigQuestionExportSchema /configs/mod-ai-intent 导出问题元素 schema。
+// Required 为全部问题共有的 3 个 PascalCase tag；Criteria/Levels 按 type 互斥出现、
+// MinConfidence 为逐问题可选覆盖（BFE 文件合同，intent_questions.data.md）；
+// 与 Open API 小写词汇不同，转换发生在导出 Generator。
+var IntentConfigQuestionExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Name", "Type", "Instructions"},
+	Optional: []string{"Criteria", "Levels", "MinConfidence"},
+	Fields: map[string]testutil.FieldSpec{
+		"Name":         {Type: testutil.TypeString},
+		"Type":         {Type: testutil.TypeString, Enum: []interface{}{"choice", "score"}},
+		"Instructions": {Type: testutil.TypeString},
+		"Criteria":     {Type: testutil.TypeObject},
+		"Levels": {Type: testutil.TypeArray, Elem: &testutil.ObjectSchema{
+			Required: []string{"Name", "Description"},
+			Fields: map[string]testutil.FieldSpec{
+				"Name":        {Type: testutil.TypeString},
+				"Description": {Type: testutil.TypeString},
+			},
+		}},
+		"MinConfidence": {Type: testutil.TypeNumber},
+	},
+}
+
+// IntentConfigExportSchema /configs/mod-ai-intent 返回 schema（mod-ai-intent.md §3）。
+// Data 即 intent_questions.data 文件内容原样：Version 内嵌文件（时间戳格式
+// yyyyMMddHHmmss），无 Config 包装层（ai-route 形态，非 ai-cache 两段结构）。
+var IntentConfigExportSchema = &testutil.ObjectSchema{
+	Required: []string{"Version", "MinConfidence", "Questions"},
+	Fields: map[string]testutil.FieldSpec{
+		"Version":       {Type: testutil.TypeString},
+		"MinConfidence": {Type: testutil.TypeNumber},
+		"Questions":     {Type: testutil.TypeArray, Elem: IntentConfigQuestionExportSchema},
 	},
 }

@@ -120,6 +120,7 @@ func rateLimitPolicyParamFromShared(param *shared.RateLimitPolicyParam) *RateLim
 				})
 			}
 		}
+		result.BatchLimits = batchLimitsFromShared(param.Rules.BatchLimits)
 	}
 	return result
 }
@@ -144,6 +145,9 @@ func rateLimitPolicyParamToMap(param *RateLimitPolicyParam) map[string]interface
 	}
 	if len(param.RpmConfigs) > 0 {
 		m["rpm_configs"] = param.RpmConfigs
+	}
+	if param.BatchLimits != nil {
+		m["batch_limits"] = param.BatchLimits
 	}
 
 	return m

@@ -29,12 +29,16 @@
 package container
 
 import (
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ai_cache"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ai_context"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/epp_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iai_route"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/icluster_conf"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/iintent_config"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ik8s_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imodel_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imods"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ioperlog"
@@ -44,6 +48,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iroute_conf"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/itxn"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iversion_control"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/keyrotate"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/quota"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/quotacache"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/rate_limit_policy"
@@ -51,6 +56,8 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/shared"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/entity"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibatch"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/traffic_mirror"
 )
 
 var (
@@ -62,6 +69,7 @@ var (
 	DomainStoragerSingleton         iroute_conf.DomainStorager
 	ClusterStoragerSingleton        icluster_conf.ClusterStorager
 	APIKeyStorager                  api_key.APIKeyStorager
+	KeyRotateStorager               keyrotate.Storager
 	APIKeyIDGenerator               api_key.APIKeyIDGenerator
 	PoolStoragerSingleton           icluster_conf.PoolStorager
 	SubClusterStoragerSingleton     icluster_conf.SubClusterStorager
@@ -88,13 +96,19 @@ var (
 	AIRouteRuleManager              *iai_route.AIRouteRuleManager
 
 	// Quota management
-	EntityTypeStorager      entity.EntityTypeStorager
-	EntityStorager          entity.EntityStorager
-	EntityIDGenerator       entity.EntityIDGenerator
-	QuotaPlanStorager       quota.QuotaPlanStorager
-	RateLimitPolicyStorager rate_limit_policy.RateLimitPolicyStorager
-	RouteRulesStorager      shared.RouteRulesStorager
-	QuotaCacheSingleton     quotacache.QuotaCache
+	EntityTypeStorager              entity.EntityTypeStorager
+	EntityStorager                  entity.EntityStorager
+	EntityIDGenerator               entity.EntityIDGenerator
+	QuotaPlanStorager               quota.QuotaPlanStorager
+	RateLimitPolicyStorager         rate_limit_policy.RateLimitPolicyStorager
+	AICacheStorager                 ai_cache.AICacheStorager
+	AICacheSemanticSettingsStorager ai_cache.AICacheSemanticSettingsStorager
+	AIContextStorager               ai_context.AIContextStorager
+	AIContextSettingsStorager       ai_context.AIContextSettingsStorager
+	TrafficMirrorStorager           traffic_mirror.TrafficMirrorStorager
+	IntentConfigStorager            iintent_config.IntentConfigStorager
+	RouteRulesStorager              shared.RouteRulesStorager
+	QuotaCacheSingleton             quotacache.QuotaCache
 
 	// Model pricing
 	ModelPriceStorager imodel_price.ModelPriceStorager
@@ -104,10 +118,19 @@ var (
 	ProviderStoragerSingleton iprovider.ProviderStorager
 	ProviderManager           *iprovider.ProviderManager
 
+	// K8s instance pools (instance_source=k8s_pool mirror maintenance,
+	// k8s-pools.md)
+	K8sPoolStorager ik8s_pool.K8sPoolStorager
+	K8sPoolManager  *ik8s_pool.K8sPoolManager
+
 	EntityTypeManager      *entity.EntityTypeManager
 	EntityManager          *entity.EntityManager
 	QuotaPlanManager       *quota.QuotaPlanManager
 	RateLimitPolicyManager *rate_limit_policy.RateLimitPolicyManager
+	AICacheManager         *ai_cache.AICacheManager
+	AIContextManager       *ai_context.AIContextManager
+	TrafficMirrorManager   *traffic_mirror.TrafficMirrorManager
+	IntentConfigManager    *iintent_config.IntentConfigManager
 	RouteRulesManager      *route_rules.RouteRulesManager
 	AIRouteExporter        *imods.AIRouteExporter
 	BalanceSyncManager     *quota.BalanceSyncManager
@@ -116,6 +139,13 @@ var (
 	// Operation logs
 	OperationLogStorager ioperlog.OperationLogStorager
 	OperationLogManager  ioperlog.OperationLogManagerInterface
+	KeyRotateManager     *keyrotate.Manager
+
+	// Batch & async tasks (批量任务与对账.md：管控 API + 对账 job)。
+	// BatchManager 为 endpoints 面向接口；BatchJob 仅 [BatchJob].Enable
+	// 时装配，否则 nil。
+	BatchManager ibatch.BatchManager
+	BatchJob     *ibatch.Job
 
 	// Report query module (see design-docs modifications/2026-09-15-report-query-api);
 	// nil when [Report].Backend is not configured.

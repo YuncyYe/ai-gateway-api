@@ -2,35 +2,37 @@
 
 ## 1. 模块概述
 
-Auth 模块负责管理用户（User）、Session Key、Token 及系统导航配置。v0.3.0 起用户 `is_admin` 仅支持 `true`，Token `scope` 仅支持 `System`/`Support`，并删除 Product Scope 及产品线的绑定/查询接口。
+Auth 模块负责管理用户（User）、Session Key、Token 及系统导航配置。v0.3.0 起用户 `role` 必填，枚举 system_admin / system_admin_readonly，Token `scope` 仅支持 `System`/`Support`，并删除 Product Scope 及产品线的绑定/查询接口。
 
 ## 2. 接口列表
 
 | 编号 | 接口名称 | 方法 | 路径 | 说明 |
 |------|----------|------|------|------|
-| AUTH-1 | 创建用户 | POST | `/open-api/v1/auth/users` | `password` 必填，`is_admin` 仅支持 true |
+| AUTH-1 | 创建用户 | POST | `/open-api/v1/auth/users` | `password`/`role` 必填，`role` 枚举 system_admin / system_admin_readonly |
 | AUTH-2 | 删除用户 | DELETE | `/open-api/v1/auth/users/{user_name}` | - |
 | AUTH-3 | 重置密码 | PATCH | `/open-api/v1/auth/users/{user_name}/passwd` | 管理员重置无需旧密码 |
-| AUTH-4 | 用户列表 | GET | `/open-api/v1/auth/users` | 返回 user_name、is_admin |
-| AUTH-5 | 设置管理员 | PATCH | `/open-api/v1/auth/users/{user_name}/is_admin` | `is_admin` 固定为 true |
+| AUTH-4 | 用户列表 | GET | `/open-api/v1/auth/users` | 返回 user_name、role（不含 session_key） |
+| AUTH-5 | 变更用户角色 | PATCH | `/open-api/v1/auth/users/{user_name}/role` | `role` 枚举 system_admin / system_admin_readonly；内置 admin 固定 system_admin（原 `PATCH .../is_admin` 已废弃） |
 | AUTH-6 | 查询单个用户 | GET | `/open-api/v1/auth/users/{user_name}` | - |
 | AUTH-7 | 创建 Session Key | POST | `/open-api/v1/auth/session-keys` | 用户名密码登录 |
 | AUTH-8 | 删除 Session Key | DELETE | `/open-api/v1/auth/session-keys/{session_key}` | - |
-| AUTH-9 | 创建 Token | POST | `/open-api/v1/auth/tokens` | `scope` 仅 System/Support |
+| AUTH-9 | 创建 Token | POST | `/open-api/v1/auth/tokens` | `scope` 枚举 System / SystemReadonly / Support |
 | AUTH-10 | 删除 Token | DELETE | `/open-api/v1/auth/tokens/{token_name}` | - |
 | AUTH-11 | Token 详情 | GET | `/open-api/v1/auth/tokens/{token_name}` | 返回 name/token/scope |
 | AUTH-12 | Token 列表 | GET | `/open-api/v1/auth/tokens` | 数组，元素同详情 |
 | AUTH-13 | 获取系统导航配置 | GET | `/open-api/v1/meta` | 无需鉴权 |
+| AUTH-14 | 密码哈希化（跨接口安全场景） | POST/PATCH/DB | `/open-api/v1/auth/users`、`/open-api/v1/auth/users/{user_name}/passwd`、`/open-api/v1/auth/session-keys` + `users` 表直读 | 口令 bcrypt 哈希落库、懒迁移、SKIP 后门移除、审计脱敏（2026-10-06 安全整改，见 `design-docs/modifications/2026-10-06-password-hash`） |
+| AUTH-16 | 只读管理员（跨接口安全场景） | GET/POST/PATCH/DELETE | 用户登录 + api-keys / providers / auth/tokens / auth/users 等读接口与写接口 | 只读角色读放行、密钥字段掩码、写接口 403、用户读接口无 session_key（2026-10-12 变更，见 `design-docs/modifications/2026-10-12-readonly-admin`） |
 
 ## 3. 测试用例统计
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 创建用户 | 11 |
+| 创建用户 | 13 |
 | 删除用户 | 2 |
 | 重置密码 | 4 |
 | 用户列表 | 1 |
-| 设置管理员 | 1 |
+| 变更用户角色（原设置管理员） | 8 |
 | 查询单个用户 | 2 |
 | 创建 Session Key | 3 |
 | 删除 Session Key | 2 |
@@ -39,11 +41,15 @@ Auth 模块负责管理用户（User）、Session Key、Token 及系统导航配
 | Token 详情 | 1 |
 | Token 列表 | 1 |
 | 获取系统导航配置 | 1 |
-| **合计** | **39** |
+| 密码哈希化 | 6 |
+| 只读管理员（跨接口场景） | 15 |
+| **合计** | **69** |
 
 ## 4. 认证方式
 
-测试环境配置 `SkipTokenValidate=true`，OpenAPI 请求无需携带认证头；Session Key 用例验证鉴权中间件行为。
+测试环境配置 `SkipTokenValidate=true`：**无 `Authorization` 头的请求被视作完整管理员**（fakeVisitor(System)）；带 `Authorization: Session <session_key>`（或 `Token <token>`）头的请求会真实认证（`UserProbeAction` 优先解析请求头），因此只读管理员场景经 `testutil.LoginSessionKey` 登录后，用 `testutil.SetHeader("Authorization", "Session "+key)` 精确扮演。
+
+注意：同一用户重复登录会覆盖服务端 session key（旧 key 立即失效），共享夹具的用例需使用最后一次登录返回的 key。
 
 ## 5. 目录结构
 
@@ -58,8 +64,8 @@ auth/
 │   └── reset_password_test.go
 ├── list_users/
 │   └── list_users_test.go
-├── set_admin/
-│   └── set_admin_test.go
+├── update_role/
+│   └── update_role_test.go
 ├── user_detail/
 │   └── user_detail_test.go
 ├── create_session_key/
@@ -74,6 +80,10 @@ auth/
 │   └── token_detail_test.go
 ├── token_list/
 │   └── token_list_test.go
+├── password_hash/
+│   └── password_hash_test.go
+├── readonly_admin/
+│   └── readonly_admin_test.go
 └── meta/
     └── meta_test.go
 ```
@@ -88,7 +98,7 @@ auth/
 | 接口名称 | 创建用户 |
 | 方法 | POST |
 | 路径 | `/open-api/v1/auth/users` |
-| 说明 | 创建用户，`is_admin` 固定为 true |
+| 说明 | 创建用户，`role` 必填（system_admin / system_admin_readonly） |
 
 ### 6.2 接口参数说明
 
@@ -99,8 +109,8 @@ auth/
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | user_name | string | Y | 用户名 | 长度 1-64；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；全局唯一（大小写不敏感）；不能为 `admin`/`root`/`system` 等保留用户名 |
-| password | string | Y | 用户密码 | 长度 8-128；不能包含空白字符；不能等于 `user_name` 或其逆序 |
-| is_admin | bool | N | 固定为 true，默认填充 true | 仅支持 `true` |
+| password | string | Y | 用户密码 | 长度 8-72 字节（bcrypt 上限）；不能包含空白字符；不能等于 `user_name` 或其逆序；库内 bcrypt 哈希存储 |
+| role | string | Y | 用户角色 | 必填；枚举值：`system_admin`、`system_admin_readonly` |
 
 #### 6.2.2 返回数据字段
 
@@ -110,8 +120,8 @@ Data 为 null。
 
 | 编号 | 场景 | 测试类型 | 简要说明 |
 |------|------|---------|---------|
-| AUTH-1-001 | 创建用户（完整参数） | 正常参数 | is_admin=true |
-| AUTH-1-002 | 创建用户（省略 is_admin） | 正常参数 | 默认填充 true |
+| AUTH-1-001 | 创建用户（完整参数） | 正常参数 | role=system_admin |
+| AUTH-1-002 | 创建用户（缺少 role） | 正常参数 | 默认填充 true |
 | AUTH-1-003 | 创建用户缺少 user_name | 必填校验 | 验证 ErrNum=422 |
 | AUTH-1-004 | 创建用户缺少 password | 必填校验 | 验证 ErrNum=422 |
 | AUTH-1-005 | 重复创建用户 | 业务规则 | 验证 ErrNum=555/556 |
@@ -120,7 +130,7 @@ Data 为 null。
 | AUTH-1-008 | 密码过短 | 合法性条件 | 验证 ErrNum=422 |
 | AUTH-1-009 | 密码包含空白字符 | 合法性条件 | 验证 ErrNum=422 |
 | AUTH-1-010 | 密码与用户名相同 | 合法性条件 | 验证 ErrNum=422 |
-| AUTH-1-011 | is_admin 为 false | 合法性条件 | 验证 ErrNum=422 |
+| AUTH-1-011 | role 非法 | 合法性条件 | 验证 ErrNum=422 |
 
 ### 6.4 测试场景详细设计
 
@@ -128,7 +138,7 @@ Data 为 null。
 
 ##### 设计思路
 
-验证创建用户接口基本功能，`is_admin` 为 true 时创建成功。
+验证创建用户接口基本功能，`role=system_admin` 时创建成功。
 
 ##### 前提数据准备
 
@@ -137,7 +147,7 @@ Data 为 null。
 ##### 执行步骤
 
 1. 发送 POST 请求到 `/open-api/v1/auth/users`。
-2. 验证返回成功，后续查询 `is_admin=true`。
+2. 验证返回成功，后续查询 `role=system_admin`。
 
 ##### 请求参数
 
@@ -145,7 +155,7 @@ Data 为 null。
 {
     "user_name": "test_user_001",
     "password": "password@123",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -162,11 +172,11 @@ Data 为 null。
 
 ---
 
-#### 6.4.2 AUTH-1-002：创建用户（省略 is_admin）
+#### 6.4.2 AUTH-1-002：创建用户（缺少 role）
 
 ##### 设计思路
 
-验证省略 `is_admin` 时默认填充为 true。
+验证缺少 `role` 时返回 422。
 
 ##### 前提数据准备
 
@@ -174,8 +184,8 @@ Data 为 null。
 
 ##### 执行步骤
 
-1. 发送 POST 请求，Body 中不包含 `is_admin`。
-2. 验证返回成功，后续查询 `is_admin=true`。
+1. 发送 POST 请求，Body 中不包含 `role`。
+2. 验证返回成功，后续查询 `role=system_admin`。
 
 ##### 请求参数
 
@@ -314,7 +324,7 @@ Data 为 null。
 {
     "user_name": "-baduser",
     "password": "password@123",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -347,7 +357,7 @@ Data 为 null。
 {
     "user_name": "admin",
     "password": "password@123",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -380,7 +390,7 @@ Data 为 null。
 {
     "user_name": "test_user_short",
     "password": "short1",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -413,7 +423,7 @@ Data 为 null。
 {
     "user_name": "test_user_space",
     "password": "pass word",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -446,7 +456,7 @@ Data 为 null。
 {
     "user_name": "myuser_2024",
     "password": "myuser_2024",
-    "is_admin": true
+    "role": "system_admin"
 }
 ```
 
@@ -458,11 +468,11 @@ Data 为 null。
 
 ---
 
-#### 6.4.11 AUTH-1-011：is_admin 为 false
+#### 6.4.11 AUTH-1-011：role 非法
 
 ##### 设计思路
 
-验证 `is_admin` 仅支持 `true`，传入 `false` 时返回参数校验错误。
+验证 `role` 必填，枚举 system_admin / system_admin_readonly，传入 `false` 时返回参数校验错误。
 
 ##### 前提数据准备
 
@@ -470,7 +480,7 @@ Data 为 null。
 
 ##### 执行步骤
 
-1. 发送 POST 请求，`is_admin=false`。
+1. 发送 POST 请求，`role` 为非法值。
 2. 验证返回错误码。
 
 ##### 请求参数
@@ -479,14 +489,14 @@ Data 为 null。
 {
     "user_name": "test_user_admin_false",
     "password": "password@123",
-    "is_admin": false
+    "role": "other"
 }
 ```
 
 ##### 预期返回结果
 
 **ErrNum**：422  
-**ErrMsg**：包含 is_admin 非法的错误信息  
+**ErrMsg**：包含 role 非法的错误信息  
 **Data**：null
 
 ---
@@ -613,7 +623,7 @@ URI：`non_existent_user`
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | old_password | string | N | 旧密码，修改当前登录用户时需要 | - |
-| password | string | Y | 新密码 | 长度 8-128；不能包含空白字符；不能等于 `user_name` 或其逆序 |
+| password | string | Y | 新密码 | 长度 8-72 字节（bcrypt 上限）；不能包含空白字符；不能等于 `user_name` 或其逆序；库内 bcrypt 哈希存储 |
 
 #### 8.2.2 返回数据字段
 
@@ -784,13 +794,13 @@ Data 为数组，每个元素包含：
 | 参数名 | 类型 | 说明 |
 |--------|------|------|
 | user_name | string | 用户名 |
-| is_admin | bool | 是否为系统管理员，固定返回 true |
+| role | string | 用户角色：system_admin / system_admin_readonly |
 
 ### 9.3 测试场景总览
 
 | 编号 | 场景 | 测试类型 | 简要说明 |
 |------|------|---------|---------|
-| AUTH-4-001 | 用户列表 | 正常参数 | 返回数组，元素仅含 user_name、is_admin |
+| AUTH-4-001 | 用户列表 | 正常参数 | 返回数组，元素含 user_name、role；不含 session_key |
 
 ### 9.4 测试场景详细设计
 
@@ -807,7 +817,7 @@ Data 为数组，每个元素包含：
 ##### 执行步骤
 
 1. 发送 GET 请求到 `/open-api/v1/auth/users`。
-2. 验证返回数组元素仅含 `user_name`、`is_admin`。
+2. 验证返回数组元素含 `user_name`、`role`，且不含 `session_key`。
 
 ##### 请求参数
 
@@ -824,22 +834,24 @@ Data 为数组，每个元素包含：
 |------|--------|---------|
 | Data | 数组 | IsArray |
 | Data[*].user_name | 非空字符串 | NotEmpty |
-| Data[*].is_admin | true | Equals |
+| Data[*].role | system_admin | Equals |
 | Data[*].products | 不存在 | NotExists |
 
 ---
 
-## 10. 设置管理员
+## 10. 变更用户角色
+
+> 原「设置管理员」（`PATCH .../is_admin`）已随 `is_admin` 字段废弃而移除（旧端点 404，见 AUTH-5-007 验证）。本章为替代接口。
 
 ### 10.1 接口信息
 
 | 项目 | 值 |
 |------|-----|
 | 模块 | Auth |
-| 接口名称 | 设置管理员 |
+| 接口名称 | 变更用户角色 |
 | 方法 | PATCH |
-| 路径 | `/open-api/v1/auth/users/{user_name}/is_admin` |
-| 说明 | 设置用户管理员权限，`is_admin` 固定为 true |
+| 路径 | `/open-api/v1/auth/users/{user_name}/role` |
+| 说明 | 仅系统管理员可调用；**内置账号 `admin` 的 role 固定为 `system_admin`，不可降级**（防管理面失联） |
 
 ### 10.2 接口参数说明
 
@@ -849,59 +861,55 @@ Data 为数组，每个元素包含：
 
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
-| user_name | string | Y | 待修改权限的用户名 |
+| user_name | string | Y | 待变更角色的用户名（引用名校验，允许 `admin`） |
 
 ##### Body 参数
 
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
-| is_admin | bool | Y | 固定为 true |
+| role | string | Y | 枚举：`system_admin` / `system_admin_readonly` |
 
 #### 10.2.2 返回数据字段
 
-Data 为 null。
+Data 为 null。角色变更写操作日志。
 
 ### 10.3 测试场景总览
 
 | 编号 | 场景 | 测试类型 | 简要说明 |
 |------|------|---------|---------|
-| AUTH-5-001 | 设置管理员为 true | 正常参数 | v0.3.0 仅支持 true |
+| AUTH-5-001 | 变更为只读管理员并复核 | 正常参数 | PATCH role=system_admin_readonly，GET 复核 role |
+| AUTH-5-002 | 变更回系统管理员并复核 | 正常参数 | PATCH role=system_admin，GET 复核 role |
+| AUTH-5-003 | 内置 admin 不可降级 | 业务规则 | PATCH admin→readonly 拒绝，GET 复核 role 仍 system_admin |
+| AUTH-5-004 | 大小写变体同样不可降级 | 业务规则 | PATCH `Admin`→readonly 拒绝（EqualFold 匹配） |
+| AUTH-5-005 | role 非法 | 合法性条件 | 422 |
+| AUTH-5-006 | 用户不存在 | 异常场景 | 非 200 |
+| AUTH-5-007 | 旧 is_admin 端点已废弃 | 废弃断言 | `PATCH .../is_admin` 不再成功（404） |
+| AUTH-5-008 | 角色变更写操作日志 | 审计断言 | `resource_type=user, action=update`，change_summary 含新角色 |
 
 ### 10.4 测试场景详细设计
 
-#### 10.4.1 AUTH-5-001：设置管理员为 true（正常参数）
+#### 10.4.1 AUTH-5-001~002：角色变更往返（正常参数）
 
 ##### 设计思路
 
-验证设置管理员接口成功，`is_admin` 固定为 true。
-
-##### 前提数据准备
-
-已创建用户。
+验证角色可变更、可回退，且 GET 用户详情返回的 `role` 与变更一致。
 
 ##### 执行步骤
 
-1. 发送 PATCH 请求到 `/open-api/v1/auth/users/{user_name}/is_admin`。
-2. 验证返回成功，后续查询 `is_admin=true`。
+1. PATCH `/auth/users/{user_name}/role`，Body `{"role": "system_admin_readonly"}`。
+2. GET `/auth/users/{user_name}` 断言 `role=system_admin_readonly`。
+3. PATCH 改回 `system_admin`，GET 复核。
 
-##### 请求参数
+#### 10.4.2 AUTH-5-003~004：内置 admin 保护（业务规则）
 
-```json
-{
-    "is_admin": true
-}
-```
+##### 设计思路
+
+内置账号 `admin` 是系统最后管理入口：任何将其降级为只读的请求必须被拒绝（大小写不敏感），且库内角色不变。
 
 ##### 预期返回结果
 
-**ErrNum**：200  
-**ErrMsg**：success
-
-**Data 字段校验**：
-
-| 字段 | 预期值 | 校验方式 |
-|------|--------|---------|
-| Data | null | IsNull |
+**ErrNum**：非 200（422 参数错误，`user "admin" role is fixed to system_admin`）  
+复核：GET `/auth/users/admin` 的 `role` 仍为 `system_admin`。
 
 ---
 
@@ -932,13 +940,13 @@ Data 为 null。
 | 参数名 | 类型 | 说明 |
 |--------|------|------|
 | user_name | string | 用户名 |
-| is_admin | bool | 是否为系统管理员，固定返回 true |
+| role | string | 用户角色：system_admin / system_admin_readonly |
 
 ### 11.3 测试场景总览
 
 | 编号 | 场景 | 测试类型 | 简要说明 |
 |------|------|---------|---------|
-| AUTH-6-001 | 查询单个用户 | 正常参数 | is_admin=true |
+| AUTH-6-001 | 查询单个用户 | 正常参数 | role=system_admin |
 | AUTH-6-002 | 查询不存在用户 | 异常参数 | 验证 ErrNum=404 |
 
 ### 11.4 测试场景详细设计
@@ -956,7 +964,7 @@ Data 为 null。
 ##### 执行步骤
 
 1. 发送 GET 请求到 `/open-api/v1/auth/users/test_user_001`。
-2. 验证返回 `is_admin=true`。
+2. 验证返回 `role=system_admin`。
 
 ##### 请求参数
 
@@ -972,7 +980,7 @@ URI：`test_user_001`
 | 字段 | 预期值 | 校验方式 |
 |------|--------|---------|
 | user_name | "test_user_001" | Equals |
-| is_admin | true | Equals |
+| role | system_admin | Equals |
 
 ---
 
@@ -1032,13 +1040,13 @@ URI：`non_existent_user`
 |--------|------|------|
 | session_key | string | 会话密钥 |
 | user_name | string | 用户名 |
-| is_admin | bool | 是否为系统管理员，固定返回 true |
+| role | string | 用户角色：system_admin / system_admin_readonly |
 
 ### 12.3 测试场景总览
 
 | 编号 | 场景 | 测试类型 | 简要说明 |
 |------|------|---------|---------|
-| AUTH-7-001 | 正确登录创建 Session Key | 正常参数 | 返回 session_key、is_admin=true |
+| AUTH-7-001 | 正确登录创建 Session Key | 正常参数 | 返回 session_key、role=system_admin |
 | AUTH-7-002 | 密码错误 | 异常参数 | 验证 ErrNum=401 |
 | AUTH-7-003 | 缺少 user_name | 必填校验 | 验证 ErrNum=422 |
 
@@ -1057,7 +1065,7 @@ URI：`non_existent_user`
 ##### 执行步骤
 
 1. 发送 POST 请求到 `/open-api/v1/auth/session-keys`。
-2. 验证返回 `session_key` 非空，`is_admin=true`。
+2. 验证返回 `session_key` 非空，`role=system_admin`。
 
 ##### 请求参数
 
@@ -1079,7 +1087,7 @@ URI：`non_existent_user`
 |------|--------|---------|
 | session_key | 非空字符串 | NotEmpty |
 | user_name | "test_user_login" | Equals |
-| is_admin | true | Equals |
+| role | system_admin | Equals |
 
 ---
 
@@ -1850,19 +1858,235 @@ Data 为数组，元素同 Token 详情。
 
 ---
 
-## 19. 依赖与数据准备
+## 19. 密码哈希化（AUTH-14）
+
+### 19.1 接口信息
+
+| 项目 | 值 |
+|------|-----|
+| 模块 | Auth |
+| 接口名称 | 密码哈希化（跨接口安全场景组） |
+| 方法 | POST / PATCH + DB 直读 |
+| 路径 | `/open-api/v1/auth/users`、`/open-api/v1/auth/users/{user_name}/passwd`、`/open-api/v1/auth/session-keys` |
+| 说明 | 2026-10-06 安全整改（`design-docs/modifications/2026-10-06-password-hash`）：口令 bcrypt 哈希存储、移除 `"SKIP"` 后门、存量明文懒迁移、审计脱敏。本组用例复用 AUTH-1/3/7 接口并以 testutil 直读/改写 SQLite `users` 表做存储断言。 |
+
+### 19.2 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| AUTH-14-001 | DDL 种子 admin 口令哈希 | 存储断言（DB 直读） | `users.password` 为 `$2` 前缀 bcrypt 哈希；admin/admin 登录 200 |
+| AUTH-14-002 | 创建用户落库哈希 | 存储断言（DB 直读） | DB password 非明文且 `$2` 前缀；错误密码登录 401 |
+| AUTH-14-003 | 存量明文懒迁移 | 迁移行为 | DB 置回明文 → 登录 200 → DB 变 `$2` 前缀 → 同口令再次登录 200（哈希路径） |
+| AUTH-14-004 | SKIP 字面量不再旁路 | 安全回归 | 密码 `"SKIP"` 登录 401 |
+| AUTH-14-005 | 73 字节密码拒绝且回读零变更 | 边界值 | 创建 422 且 DB 无该用户；改密 422 且 DB password 与操作前一致 |
+| AUTH-14-006 | 重置密码落库哈希且审计脱敏 | 存储断言 + 审计 | 改密后 DB 为 `$2` 前缀、新密码可登录旧密码 401；操作日志整段 JSON 不含新旧密码明文 |
+
+### 19.3 测试场景详细设计
+
+#### 19.3.1 AUTH-14-001：DDL 种子 admin 口令哈希（存储断言）
+
+##### 设计思路
+
+新装环境由 `db_ddl_sqlite.sql` 初始化，admin 初始口令 `admin` 必须以 bcrypt 哈希落库（库内无明文），且初始口令仍可登录（快速开始体验不变）。
+
+##### 前提数据准备
+
+无（依赖 DDL 种子数据）。
+
+##### 执行步骤
+
+1. testutil.GetUserPassword 直读 `users` 表 admin 记录：断言 `$2a$`/`$2b$`/`$2y$` 前缀。
+2. POST `/open-api/v1/auth/session-keys`，`user_name=admin`、`password=admin`：断言 200。
+
+##### 预期返回结果
+
+**DB 断言**：`users.password` 为 bcrypt 哈希串（60 字符，非明文 `admin`）。
+**ErrNum**：200
+
+---
+
+#### 19.3.2 AUTH-14-002：创建用户落库哈希（存储断言）
+
+##### 设计思路
+
+创建用户后，库中 password 必须为 bcrypt 哈希（不是请求明文），错误密码登录被拒。
+
+##### 前提数据准备
+
+无
+
+##### 执行步骤
+
+1. POST `/open-api/v1/auth/users` 创建用户（密码 `password@123`）：断言 200。
+2. GetUserPassword 直读：断言为 `$2` 前缀且不等于明文。
+3. POST `/open-api/v1/auth/session-keys` 用错误密码登录：断言 401。
+4. 清理：删除该用户。
+
+##### 请求参数
+
+```json
+{
+    "user_name": "<run-scoped>",
+    "password": "password@123",
+    "role": "system_admin"
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：200（创建）/ 401（错误密码登录）
+**DB 断言**：`users.password` 以 `$2` 前缀存储。
+
+---
+
+#### 19.3.3 AUTH-14-003：存量明文懒迁移（迁移行为）
+
+##### 设计思路
+
+模拟老版本升级后的存量明文库：将用户 password 直写为明文后，登录成功的同时必须在同一事务内重哈希落库；迁移后同一口令走哈希校验路径仍可登录。
+
+##### 前提数据准备
+
+已创建用户（密码 `password@123`）。
+
+##### 执行步骤
+
+1. testutil.SetUserPassword 将该用户 password 改写为明文 `password@123`（模拟存量库）。
+2. POST `/open-api/v1/auth/session-keys` 登录：断言 200。
+3. GetUserPassword 直读：断言已变为 `$2` 前缀（懒迁移生效）。
+4. 再次以 `password@123` 登录：断言 200（哈希校验路径，口令本身不变）。
+5. 清理：删除该用户。
+
+##### 预期返回结果
+
+**ErrNum**：200（两次登录）
+**DB 断言**：步骤 1 后为明文，步骤 3 后为 bcrypt 哈希。
+
+---
+
+#### 19.3.4 AUTH-14-004：SKIP 字面量不再旁路（安全回归）
+
+##### 设计思路
+
+历史上 `authentication.go:259` 存在 `"SKIP"` 硬编码后门（密码字面量等于 SKIP 即跳过校验）。整改后 `"SKIP"` 必须是普通错误口令。
+
+##### 前提数据准备
+
+已创建用户。
+
+##### 执行步骤
+
+1. POST `/open-api/v1/auth/session-keys`，`password="SKIP"`：断言 401。
+2. 清理：删除该用户。
+
+##### 请求参数
+
+```json
+{
+    "user_name": "<run-scoped>",
+    "password": "SKIP"
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：401
+**Data**：null
+
+---
+
+#### 19.3.5 AUTH-14-005：73 字节密码拒绝且回读零变更（边界值）
+
+##### 设计思路
+
+bcrypt 输入上限 72 字节，合同收紧为 8-72 字节。73 字节密码创建/改密必须 422，且拒绝路径不留任何写入（校验先于持久化）。
+
+##### 前提数据准备
+
+无（创建路径）；已创建用户（改密路径）。
+
+##### 执行步骤
+
+1. POST `/open-api/v1/auth/users`，`password=<73 个 'a'>`：断言 422；GetUserPassword 直读断言该用户不存在（回读零变更）。
+2. 创建合法用户，记录其 password 存储值 H1。
+3. PATCH `/open-api/v1/auth/users/{user_name}/passwd`，`password=<73 个 'a'>`：断言 422；GetUserPassword 直读断言仍为 H1（回读零变更）。
+4. 清理：删除该用户。
+
+##### 预期返回结果
+
+**ErrNum**：422（两次）
+**DB 断言**：创建拒绝后无记录；改密拒绝后存储值逐字节不变。
+
+---
+
+#### 19.3.6 AUTH-14-006：重置密码落库哈希且审计脱敏（存储断言 + 审计）
+
+##### 设计思路
+
+管理员重置密码后：库中为新口令的 bcrypt 哈希；新口令可登录、旧口令失效；操作日志整段 JSON 不得出现新旧口令明文（`MaskSensitiveFields` 脱敏为 `******`）。
+
+##### 前提数据准备
+
+已创建用户（旧密码 `oldpassword@123`）。
+
+##### 执行步骤
+
+1. PATCH `/open-api/v1/auth/users/{user_name}/passwd`，`password=newpassword@456`：断言 200。
+2. GetUserPassword 直读：断言为 `$2` 前缀。
+3. 旧密码登录：断言 401；新密码登录：断言 200。
+4. testutil.WaitForOperationLog 查询该用户的 update 操作日志，将整条日志 JSON 序列化：断言不含 `newpassword@456` 与 `oldpassword@123` 明文。
+5. 清理：删除该用户。
+
+##### 预期返回结果
+
+**ErrNum**：200（改密/新密码登录）/ 401（旧密码登录）
+**DB 断言**：`users.password` 为 `$2` 前缀。
+**审计断言**：日志 JSON 不含新旧口令明文。
+
+---
+
+## 20. 只读管理员（AUTH-16，跨接口场景）
+
+> 对应实现：`design-docs/modifications/2026-10-12-readonly-admin`。验证"系统管理员（只读）"（`system_admin_readonly` / `SystemReadonly` scope）的端到端行为：读放行、密钥掩码、写拒绝、session key 契约。
+
+### 20.1 测试场景总览
+
+| 编号 | 场景 | 说明 |
+|------|------|------|
+| AUTH-16-001 | 登录返回只读角色 | 登录响应 `role=system_admin_readonly` |
+| AUTH-16-002/003 | 用户列表、操作日志读放行 | 只读角色可读 |
+| AUTH-16-010~013 | api-keys/providers/tokens 列表与详情掩码 | 只读视角密钥字段掩码（固定 key 夹具断言精确掩码值） |
+| AUTH-16-014/015 | tokens 列表/详情掩码 | 随机 token 按掩码规则断言 |
+| AUTH-16-016 | admin 视角明文回归 | 无头请求（Skip=完整管理员）必须看到明文 |
+| AUTH-16-020~023 | 写接口拒绝矩阵 | 创建 api-key / 变更角色 / 删除 token / 删除 provider 均为受控 402 `Feature Access Deny`，且**拒绝后回读零变更**（技能清单检查项 3：负向用例必带回读断言） |
+| AUTH-16-030~032 | session key 与废弃字段契约 | 用户读接口（只读/admin 视角）无 `session_key`、无 `is_admin` |
+| AUTH-16-040 | inner-api 导出明文回归 | 只读用户读 api-key 触发脱敏后，`/inner-api/v1/configs/mod-api-key` 导出仍含明文（脱敏仅作用于 openapi 层） |
+| AUTH-16-033 | 掩码值形态确认 | 掩码值≠明文且含掩码标记，不可用于鉴权 |
+
+### 20.2 夹具与身份扮演
+
+- 前置（`setupOnce`，包级共享）：创建只读用户 → 登录拿 session key；创建自定义 key 的 api-key、provider（默认 `sk-aaaaaaaaaaaa`）、token 作为被读对象。
+- 身份扮演：`testutil.SetHeader("Authorization", "Session "+key)`；夹具清理挂在 `TestMain`（m.Run 之后），不可用 `t.Cleanup`（会在首个用例函数结束时误删共享用户）。
+- 注意：同一用户重复登录会覆盖服务端 session key——AUTH-16-001 登录后须将包级 `readonlyKey` 更新为本次返回的 key。
+
+---
+
+## 21. 依赖与数据准备
 
 1. 用户、Token、Session Key 均使用全局唯一名称，测试用例间需避免冲突。
 2. Session Key 用例依赖预先创建的用户记录。
-3. 测试环境 `SkipTokenValidate=true`，无需构造真实 Token 即可调用管理接口。
+3. 测试环境 `SkipTokenValidate=true`：无认证头请求视作完整管理员；只读管理员用例（AUTH-16）经真实登录 + `Authorization: Session` 头扮演。
+4. AUTH-14 组依赖 testutil 直读/改写 SQLite `users` 表（`GetUserPassword`/`SetUserPassword`），仅适用于集成测试的 SQLite 环境；SetUserPassword 用于模拟存量明文库，用例间互不影响（run-scoped 用户名）。
+5. testutil 新增：`CreateUserWithRole`（指定角色建号）、`LoginSessionKey`（登录取 key）、`SetHeader`/`ClearHeaders`（请求头扮演）。
 
-## 20. 注意事项
+## 22. 注意事项
 
 1. v0.3.0 已删除以下接口，测试方案不再覆盖：
    - `POST/DELETE /auth/users/{user_name}/products/{product_name}`
    - `GET /auth/users/actions/search-by-product/{product_name}`
    - `GET /auth/tokens/actions/search-by-product/{product_name}`
-2. 用户 `is_admin` 仅支持 `true`；创建用户时即使传入 `false` 也应按实现断言为 true 或 422。
-3. Token `scope` 仅支持 `System`/`Support`，不再接受 `Product` 或 `product_name`。
-4. 用户列表、Token 列表、Token 详情均不再返回 `products`/`product_name`。
-5. 测试环境 `SkipTokenValidate=true`，无需认证头。
+2. 用户 `role` 必填，枚举 `system_admin` / `system_admin_readonly`；`is_admin` 字段已废弃（请求携带按缺少 role 处理，响应不再返回该字段）。
+3. Token `scope` 支持 `System` / `SystemReadonly` / `Support`，不再接受 `Product` 或 `product_name`。
+4. 用户列表、Token 列表、Token 详情均不再返回 `products`/`product_name`；用户读接口不返回 `session_key`。
+5. 测试环境 `SkipTokenValidate=true`，无认证头的请求视作完整管理员；带 `Authorization` 头的请求按头真实认证。
+6. AUTH-14 组断言以合同（`design-docs/api-define/OpenAPI接口定义/00-common.md` Password 类型：8-72 字节、bcrypt 哈希存储）与整改方案（`design-docs/modifications/2026-10-06-password-hash`）为依据；口令长度合同已由 8-128 字符修订为 8-72 字节，AUTH-14-005 锁定该新语义。

@@ -29,3 +29,30 @@ func TestCostFixedPointToAmount(t *testing.T) {
 	// 换算结果为精确的 9e7，无精度损失。
 	assert.Equal(t, 9e7, CostFixedPointToAmount(9_000_000_000_000_000))
 }
+
+// TestCacheMirrorIntentDimensionMappings 锁定三个新维度的维度名与聚合表
+// 列名映射（两后端共用，口径一致）。
+func TestCacheMirrorIntentDimensionMappings(t *testing.T) {
+	assert.Equal(t, "ai_cache_status", DimensionCacheStatus)
+	assert.Equal(t, "ai_cache_status", DimensionColumns[DimensionCacheStatus])
+	assert.Equal(t, "mirror_hit", DimensionMirrorHit)
+	assert.Equal(t, "mirror_hit", DimensionColumns[DimensionMirrorHit])
+	assert.Equal(t, "ai_intent_answer", DimensionIntentAnswer)
+	assert.Equal(t, "ai_intent_answer", DimensionColumns[DimensionIntentAnswer])
+
+	assert.True(t, RankingDimensions[DimensionCacheStatus])
+	assert.True(t, RankingDimensions[DimensionMirrorHit])
+	assert.True(t, RankingDimensions[DimensionIntentAnswer])
+	assert.True(t, DistributionDimensions[DimensionCacheStatus])
+	assert.True(t, DistributionDimensions[DimensionMirrorHit])
+	assert.True(t, DistributionDimensions[DimensionIntentAnswer])
+	assert.True(t, TimeSeriesDimensions[DimensionCacheStatus])
+	assert.True(t, TimeSeriesDimensions[DimensionMirrorHit])
+	assert.True(t, TimeSeriesDimensions[DimensionIntentAnswer])
+}
+
+// TestCacheTokensMetric 锁定 cache_tokens 时序指标常量与白名单。
+func TestCacheTokensMetric(t *testing.T) {
+	assert.Equal(t, "cache_tokens", MetricCacheTokens)
+	assert.True(t, TimeSeriesMetrics[MetricCacheTokens])
+}

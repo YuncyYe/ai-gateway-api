@@ -58,36 +58,38 @@ func (m *BalanceSyncManager) ResetExpiredBalances(ctx context.Context) error {
 
 		now := m.clock.Now()
 
-		// 2. 遍历每个配额计划
 		for _, plan := range plans {
 			if plan.ID == nil || plan.ResetPeriod == nil {
 				continue
 			}
 
-			// 3. 判断是否需要重置（基于自然周/自然月）
-			shouldReset := m.shouldResetByPeriod(plan.LastResetAt, *plan.ResetPeriod, now)
-
-			if shouldReset {
-				// 4. 重置该配额计划下所有 API-Key / Entity 的 Redis 使用量
-				if err := m.resetAPIKeysRedisUsage(ctx, *plan.ID); err != nil {
-					fmt.Printf("Failed to reset Redis usage for plan %d: %v\n", *plan.ID, err)
-					continue
-				}
-
-				// 5. 条件更新 quota_plans.last_reset_at，作为同一周期内幂等重置的兜底
-				periodStart := m.getPeriodStart(*plan.ResetPeriod, now)
-				_, err = m.planStorager.UpdateQuotaPlan(ctx, &QuotaPlanFilter{
-					ID:                plan.ID,
-					LastResetAtBefore: &periodStart,
-				}, &QuotaPlanParam{
-					LastResetAt: lib.PTime(now),
-				})
-				if err != nil {
-					fmt.Printf("Failed to update last_reset_at for plan %d: %v\n", *plan.ID, err)
-				} else {
-					fmt.Printf("Reset balance for plan %d at %v\n", *plan.ID, now)
-				}
+			if !m.shouldResetByPeriod(plan.LastResetAt, *plan.ResetPeriod, now) {
+				continue
 			}
+
+			// 先认领后重置（issue #228）：条件更新 last_reset_at 作为认领标志，
+			// WHERE 显式覆盖 NULL（三值逻辑下 `last_reset_at < ?` 对 NULL 行恒
+			// 不成立，曾导致标记永不落库、每分钟重复重置）。认领成功
+			// （affected > 0）才执行重置，多实例 / 锁失效窗口下同周期全局至多
+			// 重置一次。
+			periodStart := m.getPeriodStart(*plan.ResetPeriod, now)
+			affected, err := m.planStorager.ClaimQuotaPlanReset(ctx, *plan.ID, periodStart, now)
+			if err != nil {
+				fmt.Printf("Failed to claim period reset for plan %d: %v\n", *plan.ID, err)
+				continue
+			}
+			if affected == 0 {
+				fmt.Printf("Plan %d period reset already claimed, skip\n", *plan.ID)
+				continue
+			}
+
+			if err := m.resetAPIKeysRedisUsage(ctx, *plan.ID); err != nil {
+				// last_reset_at 已推进，本轮不补重置（与原语义一致，SET 满额幂等）。
+				fmt.Printf("Failed to reset Redis usage for plan %d: %v\n", *plan.ID, err)
+				continue
+			}
+
+			fmt.Printf("Reset balance for plan %d at %v\n", *plan.ID, now)
 		}
 
 		return nil

@@ -18,8 +18,11 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/middleware"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/ai_cache"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/ai_context"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/auth"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/batches"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/bfe_cluster"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/certificate"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/domain"
@@ -28,6 +31,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/epp_assignments"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/epp_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/global_route_rules"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/intent_config"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/model_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/operation_log"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/product"
@@ -37,8 +41,10 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/report"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/route"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/route_tables"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/security"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/subcluster"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/traffic"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/openapi_v1/traffic_mirror"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xreq"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
 )
@@ -70,10 +76,16 @@ func endpoints() []*xreq.Endpoint {
 		entity_type.Endpoints,
 		entity.Endpoints,
 		global_route_rules.Endpoints,
+		ai_cache.Endpoints,
+		ai_context.Endpoints,
+		traffic_mirror.Endpoints,
+		intent_config.Endpoints,
 		route_tables.Endpoints,
+		security.Routes,
 		model_price.Endpoints,
 		operation_log.Endpoints,
 		provider.Endpoints,
+		batches.Endpoints,
 	)
 
 	// The report module only registers when it is assembled

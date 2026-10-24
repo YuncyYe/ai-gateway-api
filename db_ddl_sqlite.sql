@@ -90,6 +90,7 @@ CREATE TABLE clusters (
   llm_config TEXT,
   balance_mode TEXT NOT NULL DEFAULT 'WRR',
   epp_config TEXT,
+  epp_runtime TEXT,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (name)
@@ -116,7 +117,6 @@ DROP TABLE IF EXISTS epp_assignments;
 CREATE TABLE epp_assignments (
   cluster TEXT NOT NULL PRIMARY KEY,
   group_name TEXT NOT NULL,
-  primary_instance_id TEXT NOT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -308,6 +308,7 @@ CREATE TABLE api_keys (
   id TEXT NOT NULL DEFAULT '',
   enable INTEGER NOT NULL DEFAULT 0,
   api_key TEXT NOT NULL DEFAULT '',
+  api_key_hash TEXT NOT NULL DEFAULT '',
   description TEXT DEFAULT '',
   unlimited_quota INTEGER DEFAULT 0,
   product_name TEXT NOT NULL DEFAULT '',
@@ -321,7 +322,7 @@ CREATE TABLE api_keys (
   created_at DATETIME NOT NULL DEFAULT '0000-01-01 00:00:00',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (id),
-  UNIQUE (api_key)
+  UNIQUE (api_key_hash)
 );
 CREATE INDEX api_keys_product_name ON api_keys (product_name);
 CREATE INDEX api_keys_entity_id ON api_keys (entity_id);
@@ -461,6 +462,7 @@ CREATE TABLE model_prices (
   limits TEXT,
   prices TEXT NOT NULL,
   tier_prices TEXT,
+  batch_discount REAL,
   price_currency TEXT DEFAULT 'RMB',
   metadata TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -480,8 +482,13 @@ CREATE TABLE providers (
   description TEXT NOT NULL DEFAULT '',
   model_endpoint TEXT,
   models TEXT,
+  -- 列加密整列信封（enc$v1$ 前缀）：信封不是 JSON，MySQL 侧必须 MEDIUMTEXT（见 db_ddl.sql）；
+  -- SQLite 不校验 JSON，TEXT 即可
   api_keys TEXT,
   instance_pool TEXT NOT NULL,
+  instance_source TEXT NOT NULL DEFAULT 'instance_pool',
+  k8s_pool_name TEXT,
+  k8s_instance_pool TEXT,
   model_protocols TEXT NOT NULL,
   protocol_paths TEXT,
   time_zone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
@@ -494,6 +501,20 @@ CREATE INDEX providers_name ON providers (name);
 CREATE TRIGGER providers_updated_at AFTER UPDATE ON providers
   FOR EACH ROW BEGIN UPDATE providers SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
 
+-- create k8s_pools
+DROP TABLE IF EXISTS k8s_pools;
+CREATE TABLE k8s_pools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  instances TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (name)
+);
+CREATE INDEX k8s_pools_name ON k8s_pools (name);
+CREATE TRIGGER k8s_pools_updated_at AFTER UPDATE ON k8s_pools
+  FOR EACH ROW BEGIN UPDATE k8s_pools SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
 -- create rate_limit_policies
 DROP TABLE IF EXISTS rate_limit_policies;
 CREATE TABLE rate_limit_policies (
@@ -502,12 +523,108 @@ CREATE TABLE rate_limit_policies (
   max_concurrency INTEGER DEFAULT -1,
   tpm_configs TEXT,
   rpm_configs TEXT,
+  batch_limits TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX rate_limit_policies_enabled ON rate_limit_policies (enabled);
 CREATE TRIGGER rate_limit_policies_updated_at AFTER UPDATE ON rate_limit_policies
   FOR EACH ROW BEGIN UPDATE rate_limit_policies SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create ai_cache_rules (AI缓存规则表)
+DROP TABLE IF EXISTS ai_cache_rules;
+CREATE TABLE ai_cache_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  cond TEXT NOT NULL,
+  cache_key_strategy TEXT NOT NULL DEFAULT 'lastQuestion',
+  cache_ttl INTEGER NOT NULL DEFAULT 0,
+  max_body_bytes INTEGER NOT NULL DEFAULT 1048576,
+  max_value_bytes INTEGER NOT NULL DEFAULT 1048576,
+  enable_semantic_cache INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (name)
+);
+CREATE TRIGGER ai_cache_rules_updated_at AFTER UPDATE ON ai_cache_rules
+  FOR EACH ROW BEGIN UPDATE ai_cache_rules SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create ai_cache_semantic_settings (AI缓存语义全局设置表，单行)
+DROP TABLE IF EXISTS ai_cache_semantic_settings;
+CREATE TABLE ai_cache_semantic_settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  top_k INTEGER NOT NULL DEFAULT 1,
+  threshold REAL NOT NULL DEFAULT 0.15,
+  threshold_relation TEXT NOT NULL DEFAULT 'lt',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER ai_cache_semantic_settings_updated_at AFTER UPDATE ON ai_cache_semantic_settings
+  FOR EACH ROW BEGIN UPDATE ai_cache_semantic_settings SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create ai_context_rules (AI上下文压缩规则表)
+DROP TABLE IF EXISTS ai_context_rules;
+CREATE TABLE ai_context_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cond TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  max_context_tokens INTEGER NOT NULL DEFAULT 0,
+  reserve_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER ai_context_rules_updated_at AFTER UPDATE ON ai_context_rules
+  FOR EACH ROW BEGIN UPDATE ai_context_rules SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create ai_context_settings (AI上下文压缩全局设置表，单行)
+DROP TABLE IF EXISTS ai_context_settings;
+CREATE TABLE ai_context_settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trigger_ratio REAL NOT NULL DEFAULT 0.7,
+  keep_latest_images INTEGER NOT NULL DEFAULT 2,
+  tool_result_max_chars INTEGER NOT NULL DEFAULT 2000,
+  thinking_policy TEXT NOT NULL DEFAULT 'trim-all-but-last',
+  chars_per_token INTEGER NOT NULL DEFAULT 4,
+  image_token_estimate INTEGER NOT NULL DEFAULT 1200,
+  rewrite_strength TEXT NOT NULL DEFAULT 'lite',
+  rewrite_protected_survival_rate REAL NOT NULL DEFAULT 0.95,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER ai_context_settings_updated_at AFTER UPDATE ON ai_context_settings
+  FOR EACH ROW BEGIN UPDATE ai_context_settings SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create traffic_mirror_rules (流量镜像规则表)
+DROP TABLE IF EXISTS traffic_mirror_rules;
+CREATE TABLE traffic_mirror_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  cond TEXT,
+  mirror_cluster TEXT NOT NULL,
+  percentage INTEGER NOT NULL DEFAULT 100,
+  remove_headers TEXT,
+  set_headers TEXT,
+  body_rewrites TEXT,
+  path_rewrite TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (name)
+);
+CREATE TRIGGER traffic_mirror_rules_updated_at AFTER UPDATE ON traffic_mirror_rules
+  FOR EACH ROW BEGIN UPDATE traffic_mirror_rules SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create intent_config (AI意图配置表)
+DROP TABLE IF EXISTS intent_config;
+CREATE TABLE intent_config (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version TEXT NOT NULL,
+  min_confidence REAL NOT NULL DEFAULT 0.6,
+  questions TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER intent_config_updated_at AFTER UPDATE ON intent_config
+  FOR EACH ROW BEGIN UPDATE intent_config SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
 
 -- create route_rules (路由规则表)
 DROP TABLE IF EXISTS route_rules;
@@ -555,7 +672,7 @@ CREATE INDEX operation_logs_log_id ON operation_logs (log_id);
 CREATE INDEX operation_logs_resource_parent ON operation_logs (resource_parent_id);
 
 -- insert default user
-INSERT INTO users (id, name, password, scopes, created_at) VALUES (1, 'admin', 'admin', 'System', CURRENT_TIMESTAMP);
+INSERT INTO users (id, name, password, scopes, created_at) VALUES (1, 'admin', '$2a$10$w2oNyh4MO7SB.NHLPSq6kOj1GMiX1fApPYcWJmL8toZXGCQs3AJ0K', 'System', CURRENT_TIMESTAMP);
 
 INSERT INTO products (id, name, description, mail_list, contact_person, created_at) VALUES
   (1, 'BFE', 'Build-in Product, User by System Manager', 'bfe@cncf.com', 'bfe', CURRENT_TIMESTAMP);
@@ -592,3 +709,91 @@ INSERT INTO bfe_clusters (id, name, pool_name, capacity, enabled, gtc_enabled, g
 
 -- 初始化默认 global 路由表
 INSERT OR IGNORE INTO route_rules (type, owner, enabled, rules) VALUES ('global', 'global', 0, '[]');
+
+-- key rotation sweep tasks (see design-docs/modifications/2026-10-05-db-encryption-at-rest)
+CREATE TABLE IF NOT EXISTS keyrotate_sweep_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  dry_run INTEGER NOT NULL DEFAULT 0,
+  scope TEXT NOT NULL DEFAULT 'all',
+  active_key_id INTEGER NOT NULL DEFAULT 0,
+  scanned INTEGER NOT NULL DEFAULT 0,
+  rewritten INTEGER NOT NULL DEFAULT 0,
+  summary TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  heartbeat_at DATETIME NOT NULL,
+  started_at DATETIME NOT NULL,
+  finished_at DATETIME,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS keyrotate_sweep_lock (
+  id INTEGER PRIMARY KEY,
+  holder_task_id TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO keyrotate_sweep_lock (id) VALUES (1);
+
+-- create batch_files (批量文件元数据表，2026-10-07新增，批量与异步任务支持一期)
+-- 同步源为 Redis BATCH_FILE:<provider>:<file_id>（TTL 48h），由对账 job 幂等 upsert 落库；
+-- 表内不存文件内容，内容只在数据面转发链路流式通过。
+DROP TABLE IF EXISTS batch_files;
+CREATE TABLE batch_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  key_name TEXT,
+  api_key_id TEXT NOT NULL,
+  product_name TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  purpose TEXT,
+  filename TEXT,
+  line_count INTEGER,
+  bytes INTEGER,
+  first_seen_at DATETIME,
+  last_seen_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (file_id, provider)
+);
+CREATE INDEX batch_files_apikey ON batch_files (api_key_id);
+CREATE TRIGGER batch_files_updated_at AFTER UPDATE ON batch_files
+  FOR EACH ROW BEGIN UPDATE batch_files SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;
+
+-- create batch_tasks (批量任务表，2026-10-07新增，批量与异步任务支持一期)
+-- 承载 provider 原生 Batch API 任务（OpenAI /v1/batches）在控制面的权威实体：
+-- 状态机、用量、预留/结算/释放三态对账主字段。同步源为 Redis BATCH_TASK:<batch_id>（TTL 48h）。
+DROP TABLE IF EXISTS batch_tasks;
+CREATE TABLE batch_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id TEXT NOT NULL,
+  api_key_id TEXT NOT NULL,
+  product_name TEXT NOT NULL,
+  entity_id TEXT,
+  provider TEXT NOT NULL,
+  key_name TEXT,
+  endpoint TEXT,
+  input_file_id TEXT,
+  output_file_id TEXT,
+  status TEXT NOT NULL,
+  request_counts TEXT,
+  est_lines INTEGER,
+  usage_input_tokens INTEGER,
+  usage_output_tokens INTEGER,
+  usage_source TEXT,
+  reserve_units INTEGER,
+  settle_units INTEGER,
+  settle_status TEXT NOT NULL,
+  over_reserved INTEGER DEFAULT 0,
+  sync_source TEXT DEFAULT 'redis',
+  idem_key TEXT NOT NULL UNIQUE,
+  created_at DATETIME,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  terminal_at DATETIME
+);
+CREATE INDEX batch_tasks_status ON batch_tasks (status);
+CREATE INDEX batch_tasks_apikey ON batch_tasks (api_key_id);
+CREATE INDEX batch_tasks_terminal ON batch_tasks (terminal_at);
+CREATE TRIGGER batch_tasks_updated_at AFTER UPDATE ON batch_tasks
+  FOR EACH ROW BEGIN UPDATE batch_tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id; END;

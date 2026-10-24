@@ -104,6 +104,10 @@ func (f *fakeQuotaPlanStoragerForRule) DeleteQuotaPlan(ctx context.Context, filt
 	return nil
 }
 
+func (f *fakeQuotaPlanStoragerForRule) ClaimQuotaPlanReset(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+	return 1, nil
+}
+
 type fakeEntityStoragerForRule struct{}
 
 func (f *fakeEntityStoragerForRule) CreateEntity(ctx context.Context, param *entity.EntityParam) (int64, error) {

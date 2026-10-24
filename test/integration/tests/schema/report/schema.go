@@ -29,6 +29,40 @@ var CostItemSchema = &testutil.ObjectSchema{
 	},
 }
 
+// CacheOverviewSchema 是 overview cache 指标组（缓存命中/命中率/cache token）。
+var CacheOverviewSchema = &testutil.ObjectSchema{
+	Required: []string{
+		"hit_count", "miss_count", "skip_count", "hit_rate",
+		"read_tokens", "write_tokens",
+	},
+	Fields: map[string]testutil.FieldSpec{
+		"hit_count":    {Type: testutil.TypeInt},
+		"miss_count":   {Type: testutil.TypeInt},
+		"skip_count":   {Type: testutil.TypeInt},
+		"hit_rate":     {Type: testutil.TypeNumber},
+		"read_tokens":  {Type: testutil.TypeInt},
+		"write_tokens": {Type: testutil.TypeInt},
+	},
+}
+
+// MirrorOverviewSchema 是 overview mirror 指标组（镜像命中数）。
+var MirrorOverviewSchema = &testutil.ObjectSchema{
+	Required: []string{"hit_count"},
+	Fields: map[string]testutil.FieldSpec{
+		"hit_count": {Type: testutil.TypeInt},
+	},
+}
+
+// IntentOverviewSchema 是 overview intent 指标组（路由实际消费意图的分类数）。
+var IntentOverviewSchema = &testutil.ObjectSchema{
+	Required: []string{"classified_count", "unknown_count", "unknown_rate"},
+	Fields: map[string]testutil.FieldSpec{
+		"classified_count": {Type: testutil.TypeInt},
+		"unknown_count":    {Type: testutil.TypeInt},
+		"unknown_rate":     {Type: testutil.TypeNumber},
+	},
+}
+
 // OverviewResultSchema 是 GET /report/overview 的 Data schema。
 var OverviewResultSchema = &testutil.ObjectSchema{
 	Required: []string{
@@ -37,6 +71,7 @@ var OverviewResultSchema = &testutil.ObjectSchema{
 		"latency_avg_ms", "latency_max_ms",
 		"ttft_avg_ms", "tpot_avg_ms",
 		"cost", "rate_limit_hits", "auth_rejects", "logs_total",
+		"cache", "mirror", "intent",
 	},
 	Fields: map[string]testutil.FieldSpec{
 		"request_total":   {Type: testutil.TypeInt},
@@ -53,6 +88,9 @@ var OverviewResultSchema = &testutil.ObjectSchema{
 		"rate_limit_hits": {Type: testutil.TypeInt},
 		"auth_rejects":    {Type: testutil.TypeInt},
 		"logs_total":      {Type: testutil.TypeInt},
+		"cache":           {Type: testutil.TypeObject, Nested: CacheOverviewSchema},
+		"mirror":          {Type: testutil.TypeObject, Nested: MirrorOverviewSchema},
+		"intent":          {Type: testutil.TypeObject, Nested: IntentOverviewSchema},
 	},
 }
 
@@ -83,6 +121,10 @@ var LogRowSchema = &testutil.ObjectSchema{
 	Optional: []string{
 		"ai_apikey_id", "err_code", "err_msg",
 		"ai_cost_value", "ai_cost_currency",
+		"ai_cache_status", "mirror_hit", "mirror_cluster",
+		"ai_intent_question", "ai_intent_answer", "ai_intent_confidence",
+		"ai_intent_source", "ai_intent_latency_us", "ai_intent_cache_hit",
+		"ai_intent_questions_version",
 	},
 	Fields: map[string]testutil.FieldSpec{
 		"logid":            {Type: testutil.TypeInt},
@@ -92,6 +134,36 @@ var LogRowSchema = &testutil.ObjectSchema{
 		"err_msg":          {Type: testutil.TypeString},
 		"ai_cost_value":    {Type: testutil.TypeNumber},
 		"ai_cost_currency": {Type: testutil.TypeString},
+		"ai_cache_status":  {Type: testutil.TypeString},
+		"mirror_hit":       {Type: testutil.TypeBool},
+		"mirror_cluster":   {Type: testutil.TypeString},
+		"ai_intent_question":    {Type: testutil.TypeString},
+		"ai_intent_answer":      {Type: testutil.TypeString},
+		"ai_intent_confidence":  {Type: testutil.TypeNumber},
+		"ai_intent_source":      {Type: testutil.TypeString},
+		"ai_intent_latency_us":  {Type: testutil.TypeInt},
+		"ai_intent_cache_hit":   {Type: testutil.TypeBool},
+		"ai_intent_questions_version": {Type: testutil.TypeString},
+	},
+}
+
+// CacheTokensMetricPointSchema 是 timeseries metric=cache_tokens 的序列点
+//（token 速率，kind 字段区分 cache_read/cache_write）。
+var CacheTokensMetricPointSchema = &testutil.ObjectSchema{
+	Required: []string{"time", "value", "kind"},
+	Fields: map[string]testutil.FieldSpec{
+		"time":  {Type: testutil.TypeInt},
+		"value": {Type: testutil.TypeNumber},
+		"kind":  {Type: testutil.TypeString},
+	},
+}
+
+// TimeSeriesCacheTokensDataSchema 是 GET /report/timeseries?metric=cache_tokens 的 Data schema。
+var TimeSeriesCacheTokensDataSchema = &testutil.ObjectSchema{
+	Required: []string{"bucket_sec", "series"},
+	Fields: map[string]testutil.FieldSpec{
+		"bucket_sec": {Type: testutil.TypeInt},
+		"series":     {Type: testutil.TypeArray, Elem: CacheTokensMetricPointSchema},
 	},
 }
 

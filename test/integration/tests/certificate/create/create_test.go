@@ -53,6 +53,7 @@ func TestCertificate_Create(t *testing.T) {
 	cert1 := testutil.UniqueCertName()
 	certDefault := testutil.UniqueCertName()
 	certDot := testutil.UniqueCertName() + ".qa"
+	certDescBoundary := testutil.UniqueCertName()
 
 	t.Run("CERT-1-001 创建非默认证书", func(t *testing.T) {
 		resp, err := testutil.CreateCertificate(cert1, false)
@@ -148,10 +149,77 @@ func TestCertificate_Create(t *testing.T) {
 		assertCertMeta(t, resp, certDot)
 	})
 
+	// CERT-1-014 ~ CERT-1-017: description 合法性条件
+	// （certificates.md §1/§2.1：必填；长度 2-256 字节；不能包含控制字符）
+	createWithDescription := func(t *testing.T, certName, description string) *testutil.APIResponse {
+		t.Helper()
+		certPEM, keyPEM, err := testutil.GenerateTestCert(certName)
+		if err != nil {
+			t.Fatalf("generate test cert failed: %v", err)
+		}
+		resp, err := testutil.GetClient().Post("/open-api/v1/certificates", map[string]interface{}{
+			"cert_name":         certName,
+			"description":       description,
+			"is_default":        false,
+			"cert_file_content": certPEM,
+			"key_file_content":  keyPEM,
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		return resp
+	}
+
+	// assertCertNotCreated 断言被拒请求没有产生任何副作用（证书未落库）。
+	assertCertNotCreated := func(t *testing.T, certName string) {
+		t.Helper()
+		getResp, err := testutil.GetClient().Get("/open-api/v1/certificates/" + certName)
+		if err != nil {
+			t.Fatalf("get failed: %v", err)
+		}
+		testutil.AssertErrCode(t, getResp, 404)
+	}
+
+	t.Run("CERT-1-014 description 恰好 256 字节（合法边界）", func(t *testing.T) {
+		desc := strings.Repeat("b", 256)
+		resp := createWithDescription(t, certDescBoundary, desc)
+		testutil.AssertSuccess(t, resp)
+		testutil.AssertDataFieldEquals(t, resp, "description", desc)
+
+		getResp, err := testutil.GetClient().Get("/open-api/v1/certificates/" + certDescBoundary)
+		if err != nil {
+			t.Fatalf("get failed: %v", err)
+		}
+		testutil.AssertSuccess(t, getResp)
+		testutil.AssertDataFieldEquals(t, getResp, "description", desc)
+	})
+
+	t.Run("CERT-1-015 description 257 字节被拒绝且未创建", func(t *testing.T) {
+		certName := testutil.UniqueCertName()
+		resp := createWithDescription(t, certName, strings.Repeat("c", 257))
+		testutil.AssertErrCode(t, resp, 422)
+		assertCertNotCreated(t, certName)
+	})
+
+	t.Run("CERT-1-016 description 含控制字符被拒绝且未创建", func(t *testing.T) {
+		certName := testutil.UniqueCertName()
+		resp := createWithDescription(t, certName, "abc\x01def")
+		testutil.AssertErrCode(t, resp, 422)
+		assertCertNotCreated(t, certName)
+	})
+
+	t.Run("CERT-1-017 description 长度为 1 被拒绝（tag min=2）", func(t *testing.T) {
+		certName := testutil.UniqueCertName()
+		resp := createWithDescription(t, certName, "x")
+		testutil.AssertErrCode(t, resp, 422)
+		assertCertNotCreated(t, certName)
+	})
+
 	t.Cleanup(func() {
 		testutil.DeleteCertificate(cert1)
 		testutil.DeleteCertificate(certDefault)
 		testutil.DeleteCertificate(defaultCert)
 		testutil.DeleteCertificate(certDot)
+		testutil.DeleteCertificate(certDescBoundary)
 	})
 }

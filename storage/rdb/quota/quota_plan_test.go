@@ -16,6 +16,7 @@ package quota
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -97,4 +98,41 @@ func TestDecimalToFloat64Ptr(t *testing.T) {
 func TestPFloat64(t *testing.T) {
 	p := lib.PFloat64(3.14)
 	assert.Equal(t, float64(3.14), *p)
+}
+
+func TestInitLastResetAtAtCreate(t *testing.T) {
+	weekly := "weekly"
+	monthly := "monthly"
+	never := "never"
+
+	t.Run("weekly initializes last_reset_at", func(t *testing.T) {
+		data := &dao.TQuotaPlanParam{ResetPeriod: &weekly}
+		initLastResetAtAtCreate(data)
+		assert.NotNil(t, data.LastResetAt)
+	})
+
+	t.Run("monthly initializes last_reset_at", func(t *testing.T) {
+		data := &dao.TQuotaPlanParam{ResetPeriod: &monthly}
+		initLastResetAtAtCreate(data)
+		assert.NotNil(t, data.LastResetAt)
+	})
+
+	t.Run("never keeps nil last_reset_at", func(t *testing.T) {
+		data := &dao.TQuotaPlanParam{ResetPeriod: &never}
+		initLastResetAtAtCreate(data)
+		assert.Nil(t, data.LastResetAt)
+	})
+
+	t.Run("nil reset_period keeps nil last_reset_at", func(t *testing.T) {
+		data := &dao.TQuotaPlanParam{}
+		initLastResetAtAtCreate(data)
+		assert.Nil(t, data.LastResetAt)
+	})
+
+	t.Run("existing last_reset_at is preserved", func(t *testing.T) {
+		existing := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+		data := &dao.TQuotaPlanParam{ResetPeriod: &monthly, LastResetAt: &existing}
+		initLastResetAtAtCreate(data)
+		assert.Equal(t, existing, *data.LastResetAt)
+	})
 }

@@ -37,13 +37,23 @@ type RPMConfig struct {
 	MaxRequests   int    `json:"max_requests"`
 }
 
+// BatchLimits 定义批量限流维度（与 model/shared.BatchLimits 同构；
+// 省略/null = 该策略不参与批量限流，0 = 不配此维度）
+type BatchLimits struct {
+	MaxCreateRPM     int   `json:"max_create_rpm"`
+	MaxActiveBatches int   `json:"max_active_batches"`
+	MaxFileBytes     int64 `json:"max_file_bytes"`
+	MaxFileLines     int   `json:"max_file_lines"`
+}
+
 // RateLimitPolicyParam 定义限流策略参数
 type RateLimitPolicyParam struct {
-	ID             *int64      `json:"id"`
-	Enabled        *bool       `json:"enabled"`
-	MaxConcurrency *int        `json:"max_concurrency"`
-	TpmConfigs     []TPMConfig `json:"tpm_configs"`
-	RpmConfigs     []RPMConfig `json:"rpm_configs"`
+	ID             *int64       `json:"id"`
+	Enabled        *bool        `json:"enabled"`
+	MaxConcurrency *int         `json:"max_concurrency"`
+	TpmConfigs     []TPMConfig  `json:"tpm_configs"`
+	RpmConfigs     []RPMConfig  `json:"rpm_configs"`
+	BatchLimits    *BatchLimits `json:"batch_limits,omitempty"`
 }
 
 // RateLimitPolicyFilter 定义限流策略过滤条件
@@ -70,6 +80,7 @@ func (a *rateLimitPolicyStoragerAdapter) CreateRateLimitPolicy(ctx context.Conte
 	var tpmConfigs []TPMConfig
 	var rpmConfigs []RPMConfig
 	var maxConcurrency *int
+	var batchLimits *BatchLimits
 
 	if param.Rules != nil {
 		tpmConfigs = make([]TPMConfig, 0, len(param.Rules.TpmConfigs))
@@ -92,6 +103,7 @@ func (a *rateLimitPolicyStoragerAdapter) CreateRateLimitPolicy(ctx context.Conte
 			})
 		}
 		maxConcurrency = param.Rules.MaxConcurrency
+		batchLimits = batchLimitsFromShared(param.Rules.BatchLimits)
 	}
 
 	return a.storager.CreateRateLimitPolicy(ctx, &RateLimitPolicyParam{
@@ -99,6 +111,7 @@ func (a *rateLimitPolicyStoragerAdapter) CreateRateLimitPolicy(ctx context.Conte
 		MaxConcurrency: maxConcurrency,
 		TpmConfigs:     tpmConfigs,
 		RpmConfigs:     rpmConfigs,
+		BatchLimits:    batchLimits,
 	})
 }
 
@@ -106,6 +119,7 @@ func (a *rateLimitPolicyStoragerAdapter) UpdateRateLimitPolicy(ctx context.Conte
 	var tpmConfigs []TPMConfig
 	var rpmConfigs []RPMConfig
 	var maxConcurrency *int
+	var batchLimits *BatchLimits
 
 	if param.Rules != nil {
 		tpmConfigs = make([]TPMConfig, 0, len(param.Rules.TpmConfigs))
@@ -128,6 +142,7 @@ func (a *rateLimitPolicyStoragerAdapter) UpdateRateLimitPolicy(ctx context.Conte
 			})
 		}
 		maxConcurrency = param.Rules.MaxConcurrency
+		batchLimits = batchLimitsFromShared(param.Rules.BatchLimits)
 	}
 
 	return a.storager.UpdateRateLimitPolicy(ctx, &RateLimitPolicyFilter{ID: &id}, &RateLimitPolicyParam{
@@ -135,6 +150,7 @@ func (a *rateLimitPolicyStoragerAdapter) UpdateRateLimitPolicy(ctx context.Conte
 		MaxConcurrency: maxConcurrency,
 		TpmConfigs:     tpmConfigs,
 		RpmConfigs:     rpmConfigs,
+		BatchLimits:    batchLimits,
 	})
 }
 
@@ -175,8 +191,33 @@ func (a *rateLimitPolicyStoragerAdapter) FetchRateLimitPolicy(ctx context.Contex
 			TpmConfigs:     tpmConfigs,
 			RpmConfigs:     rpmConfigs,
 			MaxConcurrency: result.MaxConcurrency,
+			BatchLimits:    batchLimitsToShared(result.BatchLimits),
 		},
 	}, nil
+}
+
+func batchLimitsFromShared(src *shared.BatchLimits) *BatchLimits {
+	if src == nil {
+		return nil
+	}
+	return &BatchLimits{
+		MaxCreateRPM:     src.MaxCreateRPM,
+		MaxActiveBatches: src.MaxActiveBatches,
+		MaxFileBytes:     src.MaxFileBytes,
+		MaxFileLines:     src.MaxFileLines,
+	}
+}
+
+func batchLimitsToShared(src *BatchLimits) *shared.BatchLimits {
+	if src == nil {
+		return nil
+	}
+	return &shared.BatchLimits{
+		MaxCreateRPM:     src.MaxCreateRPM,
+		MaxActiveBatches: src.MaxActiveBatches,
+		MaxFileBytes:     src.MaxFileBytes,
+		MaxFileLines:     src.MaxFileLines,
+	}
 }
 
 func NewRateLimitPolicyStoragerAdapter(storager RateLimitPolicyStorager) shared.RateLimitPolicyStorager {
@@ -185,9 +226,41 @@ func NewRateLimitPolicyStoragerAdapter(storager RateLimitPolicyStorager) shared.
 
 // ExportRateLimitRules 定义导出的限流规则
 type ExportRateLimitRules struct {
-	TPM            []ExportTPMConfig `json:"tpm"`
-	RPM            []ExportRPMConfig `json:"rpm"`
-	MaxConcurrency int               `json:"max_concurrency"`
+	TPM            []ExportTPMConfig  `json:"tpm"`
+	RPM            []ExportRPMConfig  `json:"rpm"`
+	MaxConcurrency int                `json:"max_concurrency"`
+	Batch          *ExportBatchLimits `json:"batch,omitempty"`
+}
+
+// ExportBatchLimits 定义导出的批量限流配置（源：batch_limits；为空省略）。
+// 四个维度均按 apikey 计、与 model 无关（批量创建请求体无 model 字段）；
+// 多策略组合由数据面逐策略 AND 等效取 min。max_create_rpm 需要独立计数
+// Redis Key；max_active_batches 复用数据面共享的 BATCH_ACTIVE:<api_key_id>
+// ZSET 基数、不重复配 key；两个文件上限为请求内本地校验、无 key。
+type ExportBatchLimits struct {
+	MaxCreateRPM     int    `json:"max_create_rpm,omitempty"`
+	MaxActiveBatches int    `json:"max_active_batches,omitempty"`
+	MaxFileBytes     int64  `json:"max_file_bytes,omitempty"`
+	MaxFileLines     int    `json:"max_file_lines,omitempty"`
+	RedisKey         string `json:"redis_key,omitempty"`
+}
+
+// exportBatchLimits 将策略的批量限流配置转换为导出段。仅 max_create_rpm>0
+// 时生成计数 Redis Key（生成惯例同 RL_TPM/RL_RPM）；文件上限与在途上限无 Key。
+func exportBatchLimits(policyID int64, src *BatchLimits) *ExportBatchLimits {
+	if src == nil {
+		return nil
+	}
+	rst := &ExportBatchLimits{
+		MaxCreateRPM:     src.MaxCreateRPM,
+		MaxActiveBatches: src.MaxActiveBatches,
+		MaxFileBytes:     src.MaxFileBytes,
+		MaxFileLines:     src.MaxFileLines,
+	}
+	if src.MaxCreateRPM > 0 {
+		rst.RedisKey = shared.BuildBatchRateLimitRedisKey(policyID)
+	}
+	return rst
 }
 
 // ExportRateLimitPolicy 定义导出到 BFE 的限流策略结构

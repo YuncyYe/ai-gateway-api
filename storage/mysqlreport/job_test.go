@@ -43,7 +43,7 @@ func TestBuildAggregateInsertSQL_Structure(t *testing.T) {
 	// same order.
 	require.True(t, strings.HasPrefix(query, "INSERT INTO bfe_ai_metrics_1m ("))
 	cols := strings.Split(aggregateInsertColumns[2:len(aggregateInsertColumns)-1], ",")
-	require.Len(t, cols, 61) // 37 dimensions + 24 metrics
+	require.Len(t, cols, 64) // 40 dimensions + 24 metrics
 
 	selectPart := query[strings.Index(query, " SELECT"):]
 	aliasRe := regexp.MustCompile(` AS ([A-Za-z0-9_]+)[, ]`)
@@ -58,6 +58,24 @@ func TestBuildAggregateInsertSQL_Structure(t *testing.T) {
 	// JSON flattening of the rate-limit triple and quota-plan slots.
 	assert.Contains(t, query, "JSON_EXTRACT(ai_rate_limit_hits,'$[0].rate_limit_policy_id')")
 	assert.Contains(t, query, "JSON_EXTRACT(ai_auth_reject_quota_plans,'$[4]')")
+	// 缓存/镜像/意图维度归一与 GROUP BY（2026-09-27 加列）。
+	assert.Contains(t, query, "IFNULL(ai_cache_status,'') AS ai_cache_status")
+	assert.Contains(t, query, "IFNULL(mirror_hit,0) AS mirror_hit")
+	assert.Contains(t, query, "IFNULL(ai_intent_answer,'') AS ai_intent_answer")
+	assert.True(t, strings.HasSuffix(aggregateGroupBy, "ai_cache_status,mirror_hit,ai_intent_answer"))
+}
+
+// TestBuildAggregateInsertSQL_CacheMirrorIntentDimensions 锁定新维度的聚合
+// 口径：列清单、SELECT 归一表达式与 GROUP BY 三处同序对齐（与 DDL 列序一致）。
+func TestBuildAggregateInsertSQL_CacheMirrorIntentDimensions(t *testing.T) {
+	cols := strings.Split(aggregateInsertColumns[2:len(aggregateInsertColumns)-1], ",")
+	detailCount := len(cols) - 24 // 40
+	groupCols := strings.Split(strings.TrimPrefix(aggregateGroupBy, " GROUP BY "), ",")
+	require.Len(t, groupCols, detailCount)
+	assert.Equal(t, cols[:detailCount], groupCols, "GROUP BY 必须与维度列清单同序一致")
+
+	// 三个新维度位于维度段末尾（metrics 段之前）。
+	assert.Equal(t, []string{"ai_cache_status", "mirror_hit", "ai_intent_answer"}, cols[detailCount-3:detailCount])
 }
 
 func TestBuildAggregateDeleteSQL(t *testing.T) {

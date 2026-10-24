@@ -31,10 +31,19 @@
 | OpenAPI - Certificate | `/open-api/v1/certificates` | 证书管理 |
 | OpenAPI - Providers | `/open-api/v1/providers` | 模型提供商管理 |
 | OpenAPI - Model Prices | `/open-api/v1/model-prices` | 模型定价管理 |
+| OpenAPI - Batches | `/open-api/v1/batches` | 批量任务列表/详情/取消（批量与异步任务支持一期） |
+| OpenAPI - Batch Files | `/open-api/v1/batch-files` | 批量文件元数据查询（批量与异步任务支持一期） |
 | OpenAPI - Expression Verify | `/open-api/v1/expression/verify` | 路由表达式校验 |
 | InnerAPI | `/inner-api/v1/configs` | 配置导出接口 |
 
 > **v0.4 更新**：新增 Provider/Model 前缀路由裁剪集成测试，覆盖 OpenAPI `/clusters` 对 `llm_config.match_prefix` / `strip_prefix` 的传入校验，以及 InnerAPI `/configs/tls_conf/server_data_conf` 对 `AIConf.MatchPrefix` / `StripPrefix` 的导出验证。详见 [8.1 相关文档](#81-相关文档)。
+
+> **批量与异步任务支持（一期）覆盖归属**（2026-10-07）：`batch_limits`
+> 内嵌对象（api-key 的 `rate_limit_policy.rules.batch_limits`）用例归
+> **api_key** 模块（`tests/api_key/batch_limits/`，编号 AK-BL）；`batch_discount`
+> 与 `mode=batch` 定价用例归 **model_price** 模块（`tests/model_price/batch_price/`，
+> 编号 MPB）；批量任务管控 OpenAPI（`/batches`、`/batch-files`）为独立
+> **batch** 模块（`tests/batch/`，编号 BT）。
 
 ### 1.3 设计原则
 
@@ -535,6 +544,9 @@ func GenerateCert() (string, string)   // 生成自签名证书（用于测试�
 - `CERT` - 证书模块
 - `MPT` - 模型提供商类型模块
 - `MP` - 模型定价模块
+- `MPB` - 模型定价 batch_discount 专项（MP 子编号，归 model_price 模块）
+- `AK-BL` - API-Key batch_limits 专项（AK 子编号，归 api_key 模块）
+- `BT` / `BATCH` - 批量任务管控模块（tests/batch/）
 - `TOOL` - 工具模块
 - `EV` - 表达式校验模块
 - InnerAPI 各子模块
@@ -683,10 +695,13 @@ integration/tests/{module}/
 | CERT 证书 | 6 | 11 |
 | MPT 模型提供商类型 | 1 | 3 |
 | MP 模型定价 | 9 | 30 |
+| MPB batch_discount 专项（归 MP） | - | 4 |
+| AK-BL batch_limits 专项（归 AK） | - | 5 |
+| BATCH 批量任务管控 | 4 | 22 |
 | TOOL 工具 | 1 | 6 |
 | EV 表达式校验 | 1 | 8 |
 | InnerAPI | 9 | 14 |
-| **总计** | **69** | **229** |
+| **总计** | **73** | **260** |
 
 ---
 
@@ -748,6 +763,7 @@ integration/tests/{module}/
 | 测试使用说明 | `test/integration/README.md` | 集成测试详细使用说明 |
 | Cluster 模块用例设计 | `test/integration/tests/clusters/design.md` | 含 `llm_config.match_prefix` / `strip_prefix` 创建/更新校验用例 |
 | InnerAPI TlsConf 用例设计 | `test/integration/tests/innerapi/tls_conf/design.md` | 含 `AIConf.MatchPrefix` / `StripPrefix` 导出验证用例 |
+| Batch 模块用例设计 | `test/integration/tests/batch/design.md` | 批量任务管控（一期）；含产品线注入缺陷记录（§2.3）与现状钉死用例 |
 | OpenAPI 接口文档 | `design-docs/api-define/OpenAPI接口定义/README.md` | 各模块接口定义索引 |
 | InnerAPI 接口文档 | `design-docs/api-define/InnerAPI接口定义/README.md` | InnerAPI 接口详细设计索引 |
 | 系统设计文档 | `design-docs/sys-design/` | 系统总体与详细设计 |

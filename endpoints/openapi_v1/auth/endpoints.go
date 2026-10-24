@@ -29,7 +29,7 @@ var Endpoints = []*xreq.Endpoint{
 	UserDeleteEndpoint,
 	UserListEndpoint,
 	UserOneEndpoint,
-	UserUpdateIsAdminEndpoint,
+	UserUpdateRoleEndpoint,
 	UserUpdatePasswordEndpoint,
 
 	NavigationEndpoint,

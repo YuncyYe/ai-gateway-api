@@ -30,6 +30,7 @@ type TRateLimitPolicy struct {
 	MaxConcurrency int       `db:"max_concurrency"`
 	TpmConfigs     string    `db:"tpm_configs"`
 	RpmConfigs     string    `db:"rpm_configs"`
+	BatchLimits    string    `db:"batch_limits"`
 	CreatedAt      time.Time `db:"created_at"`
 	UpdatedAt      time.Time `db:"updated_at"`
 }
@@ -67,6 +68,7 @@ type TRateLimitPolicyParam struct {
 	MaxConcurrency *int       `db:"max_concurrency"`
 	TpmConfigs     *string    `db:"tpm_configs"`
 	RpmConfigs     *string    `db:"rpm_configs"`
+	BatchLimits    *string    `db:"batch_limits"`
 	CreatedAt      *time.Time `db:"created_at"`
 	UpdatedAt      *time.Time `db:"updated_at"`
 

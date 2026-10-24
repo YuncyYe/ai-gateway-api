@@ -203,6 +203,10 @@ func (s *fakeQuotaPlanStorager) DeleteQuotaPlan(ctx context.Context, filter *quo
 	return nil
 }
 
+func (s *fakeQuotaPlanStorager) ClaimQuotaPlanReset(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+	return 1, nil
+}
+
 var _ quota.QuotaPlanStorager = (*fakeQuotaPlanStorager)(nil)
 
 // fakeEntityStorager implements entity.EntityStorager.

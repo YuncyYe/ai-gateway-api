@@ -32,6 +32,18 @@ const (
 	MaxProviderNameLength        = 64
 	MaxProviderKeyLength         = 512
 	MaxProviderDescriptionLength = 256
+	MaxK8sPoolNameLength         = 64
+)
+
+// Instance sources of a provider (providers.md §instance_source).
+const (
+	// InstanceSourceInstancePool: instances are maintained by operators via
+	// instance_pool (default).
+	InstanceSourceInstancePool = "instance_pool"
+	// InstanceSourceK8sPool: instances are maintained by the K8s discovery
+	// component via the /k8s_pools InnerAPI; provider side is a read-only
+	// mirror.
+	InstanceSourceK8sPool = "k8s_pool"
 )
 
 var (
@@ -81,34 +93,43 @@ type PricingTier struct {
 
 // Provider represents a model provider.
 type Provider struct {
-	ID             int64              `json:"id"`
-	Name           string             `json:"name"`
-	Description    string             `json:"description"`
-	ModelEndpoint  *ProviderEndpoint  `json:"model_endpoint"`
-	Models         []string           `json:"models"`
-	Keys           []ProviderKey      `json:"keys"`
-	InstancePool   []ProviderInstance `json:"instance_pool"`
-	ModelProtocols []string           `json:"model_protocols"`
-	ProtocolPaths  map[string]string  `json:"protocol_paths"`
-	TimeZone       string             `json:"time_zone"`
-	Tiers          []PricingTier      `json:"tiers"`
-	CreateTime     int64              `json:"create_time"`
-	UpdateTime     int64              `json:"update_time"`
+	ID              int64              `json:"id"`
+	Name            string             `json:"name"`
+	Description     string             `json:"description"`
+	ModelEndpoint   *ProviderEndpoint  `json:"model_endpoint"`
+	Models          []string           `json:"models"`
+	Keys            []ProviderKey      `json:"keys"`
+	InstancePool    []ProviderInstance `json:"instance_pool"`
+	InstanceSource  string             `json:"instance_source"`
+	K8sPoolName     *string            `json:"k8s_pool_name"`
+	K8sInstancePool []ProviderInstance `json:"k8s_instance_pool"`
+
+	ModelProtocols []string          `json:"model_protocols"`
+	ProtocolPaths  map[string]string `json:"protocol_paths"`
+	TimeZone       string            `json:"time_zone"`
+	Tiers          []PricingTier     `json:"tiers"`
+	CreateTime     int64             `json:"create_time"`
+	UpdateTime     int64             `json:"update_time"`
 }
 
 // ProviderParam is used to create or update a provider.
 type ProviderParam struct {
-	ID             *int64             `json:"id,omitempty"`
-	Name           *string            `json:"name"`
-	Description    *string            `json:"description,omitempty"`
-	ModelEndpoint  *ProviderEndpoint  `json:"model_endpoint,omitempty"`
-	Models         []string           `json:"models,omitempty"`
-	Keys           []ProviderKey      `json:"keys,omitempty"`
-	InstancePool   []ProviderInstance `json:"instance_pool"`
-	ModelProtocols []string           `json:"model_protocols"`
-	ProtocolPaths  map[string]string  `json:"protocol_paths"`
-	TimeZone       *string            `json:"time_zone,omitempty"`
-	Tiers          []PricingTier      `json:"tiers,omitempty"`
+	ID            *int64             `json:"id,omitempty"`
+	Name          *string            `json:"name"`
+	Description   *string            `json:"description,omitempty"`
+	ModelEndpoint *ProviderEndpoint  `json:"model_endpoint,omitempty"`
+	Models        []string           `json:"models,omitempty"`
+	Keys          []ProviderKey      `json:"keys,omitempty"`
+	InstancePool  []ProviderInstance `json:"instance_pool"`
+
+	InstanceSource  *string             `json:"instance_source,omitempty"`
+	K8sPoolName     *string             `json:"k8s_pool_name,omitempty"`
+	K8sInstancePool *[]ProviderInstance `json:"k8s_instance_pool,omitempty"`
+
+	ModelProtocols []string          `json:"model_protocols"`
+	ProtocolPaths  map[string]string `json:"protocol_paths"`
+	TimeZone       *string           `json:"time_zone,omitempty"`
+	Tiers          []PricingTier     `json:"tiers,omitempty"`
 }
 
 // PricingTiersParam is used to update a provider's pricing tiers.
@@ -119,12 +140,14 @@ type PricingTiersParam struct {
 
 // ProviderFilter is used to query providers.
 type ProviderFilter struct {
-	ID            *int64
-	Name          *string
-	Names         []string
-	ModelProtocol *string
-	Page          *int
-	PageSize      *int
+	ID             *int64
+	Name           *string
+	Names          []string
+	ModelProtocol  *string
+	InstanceSource *string
+	K8sPoolName    *string
+	Page           *int
+	PageSize       *int
 }
 
 // ProviderStorager defines persistence operations for providers.
@@ -236,6 +259,21 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 			return err
 		}
 
+		// Mirror lifecycle: k8s_instance_pool is only meaningful in k8s_pool
+		// mode. When the merged instance_source resolves to instance_pool,
+		// clear any previously synced mirror so the response matches the
+		// contract ("k8s_instance_pool is [] in instance_pool mode"). The
+		// field is read-only for clients, so forcing it here cannot clobber
+		// a client intent.
+		mergedSource := existing.InstanceSource
+		if param.InstanceSource != nil {
+			mergedSource = *param.InstanceSource
+		}
+		if mergedSource == InstanceSourceInstancePool && len(existing.K8sInstancePool) > 0 {
+			empty := []ProviderInstance{}
+			param.K8sInstancePool = &empty
+		}
+
 		// Capture which cluster-relevant fields are explicitly provided before
 		// the storager applies defaults (FillDefaults mutates nil slices into
 		// empty slices, which would be mistaken for an intentional clear).
@@ -251,9 +289,6 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 		// actually changed. Each hook is responsible for checking whether its own
 		// concern needs action.
 		clusterConfigChanged := false
-		if origInstancePool != nil && !providerInstancePoolEqual(existing.InstancePool, origInstancePool) {
-			clusterConfigChanged = true
-		}
 		if origKeys != nil && !providerKeysEqual(existing.Keys, origKeys) {
 			clusterConfigChanged = true
 		}
@@ -261,7 +296,7 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 			clusterConfigChanged = true
 		}
 
-		if len(syncHooks) > 0 && clusterConfigChanged {
+		if len(syncHooks) > 0 {
 			// Restore nil for unchanged fields so applyProviderUpdate preserves
 			// the existing provider values when building the hook snapshot.
 			if origInstancePool == nil {
@@ -274,9 +309,18 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 				param.Models = nil
 			}
 			newProvider := applyProviderUpdate(existing, param)
-			for _, hook := range syncHooks {
-				if err := hook(ctx, existing, newProvider); err != nil {
-					return err
+			// The effective pool covers both explicit instance_pool edits and
+			// instance_source/k8s_pool_name mode switches; a dormant instance_pool
+			// edit under k8s_pool mode leaves the effective pool untouched and
+			// therefore does not trigger a sync.
+			if !providerInstancePoolEqual(EffectiveInstancePool(existing), EffectiveInstancePool(newProvider)) {
+				clusterConfigChanged = true
+			}
+			if clusterConfigChanged {
+				for _, hook := range syncHooks {
+					if err := hook(ctx, existing, newProvider); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -465,7 +509,7 @@ func ValidateProviderParam(param *ProviderParam) error {
 		}
 	}
 
-	if err := validateProviderInstancePool(param.InstancePool); err != nil {
+	if err := validateProviderInstanceSource(param); err != nil {
 		return err
 	}
 
@@ -775,6 +819,69 @@ func validateProviderDescription(s string) error {
 	return nil
 }
 
+// validateProviderInstanceSource validates the instance-source conditional
+// rules (providers.md §3): k8s_instance_pool is a read-only mirror (422 when
+// present in a request); instance_pool keeps its legacy rules (>=1 element,
+// dedupe, >=1 positive weight) in instance_pool mode and stays dormant (no
+// member validation) in k8s_pool mode; k8s_pool_name is required with the
+// common name format in k8s_pool mode and format-checked but dormant when
+// provided in instance_pool mode.
+func validateProviderInstanceSource(param *ProviderParam) error {
+	if param.K8sInstancePool != nil {
+		return xerror.WrapParamErrorWithMsg("k8s_instance_pool is read-only and cannot be set in a request")
+	}
+
+	source := InstanceSourceInstancePool
+	if param.InstanceSource != nil {
+		source = *param.InstanceSource
+	}
+	switch source {
+	case InstanceSourceInstancePool:
+		if err := validateProviderInstancePool(param.InstancePool); err != nil {
+			return err
+		}
+	case InstanceSourceK8sPool:
+		// instance_pool is dormant in this mode: kept as-is for manual
+		// fallback when switching back, not part of the effective pool and
+		// not member-validated.
+		if param.K8sPoolName == nil || *param.K8sPoolName == "" {
+			return xerror.WrapParamErrorWithMsg("k8s_pool_name is required when instance_source is %s", InstanceSourceK8sPool)
+		}
+	default:
+		return xerror.WrapParamErrorWithMsg("invalid instance_source: %s (expect %s or %s)",
+			source, InstanceSourceInstancePool, InstanceSourceK8sPool)
+	}
+
+	if param.K8sPoolName != nil {
+		if err := K8sPoolName(*param.K8sPoolName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// K8sPoolName validates a K8s pool name (k8s-pools.md §2): 1-64 chars, only
+// letters, digits, '_', '-', '.', no leading/trailing '.', '-', '_', no
+// whitespace. The name is a plain control-plane identifier and is not coupled
+// to K8s Service names.
+func K8sPoolName(s string) error {
+	if len(s) < 1 || len(s) > MaxK8sPoolNameLength {
+		return xerror.WrapParamErrorWithMsg("k8s_pool_name length must be between 1 and %d", MaxK8sPoolNameLength)
+	}
+	if strings.TrimSpace(s) != s {
+		return xerror.WrapParamErrorWithMsg("k8s_pool_name must not contain whitespace")
+	}
+	if !providerNameToken.MatchString(s) {
+		return xerror.WrapParamErrorWithMsg("k8s_pool_name contains invalid characters")
+	}
+	first := s[0]
+	last := s[len(s)-1]
+	if first == '.' || first == '-' || first == '_' || last == '.' || last == '-' || last == '_' {
+		return xerror.WrapParamErrorWithMsg("k8s_pool_name cannot start or end with '.', '-', or '_'")
+	}
+	return nil
+}
+
 func validateProviderInstancePool(instances []ProviderInstance) error {
 	if len(instances) == 0 {
 		return xerror.WrapParamErrorWithMsg("instance_pool is required")
@@ -815,6 +922,10 @@ func DefaultModelEndpoint() *ProviderEndpoint {
 func FillDefaults(param *ProviderParam) {
 	if param == nil {
 		return
+	}
+	if param.InstanceSource == nil {
+		defaultSource := InstanceSourceInstancePool
+		param.InstanceSource = &defaultSource
 	}
 	if param.ModelEndpoint == nil {
 		param.ModelEndpoint = DefaultModelEndpoint()
@@ -877,6 +988,21 @@ func BuildAuthHeader(protocol, key string) (string, string) {
 	default:
 		return "Authorization", "Bearer " + key
 	}
+}
+
+// EffectiveInstancePool returns the provider's effective instance pool, the
+// single consumption contract for downstream consumers (cluster creation
+// snapshot, instance-pool sync, equality comparison):
+//
+//	instance_source == "k8s_pool" ? k8s_instance_pool : instance_pool
+func EffectiveInstancePool(p *Provider) []ProviderInstance {
+	if p == nil {
+		return nil
+	}
+	if p.InstanceSource == InstanceSourceK8sPool {
+		return p.K8sInstancePool
+	}
+	return p.InstancePool
 }
 
 // providerInstancePoolEqual reports whether two instance pools are identical.
@@ -952,6 +1078,15 @@ func applyProviderUpdate(existing *Provider, param *ProviderParam) *Provider {
 	}
 	if param.InstancePool != nil {
 		newProvider.InstancePool = param.InstancePool
+	}
+	if param.InstanceSource != nil {
+		newProvider.InstanceSource = *param.InstanceSource
+	}
+	if param.K8sPoolName != nil {
+		newProvider.K8sPoolName = param.K8sPoolName
+	}
+	if param.K8sInstancePool != nil {
+		newProvider.K8sInstancePool = *param.K8sInstancePool
 	}
 	if param.ModelProtocols != nil {
 		newProvider.ModelProtocols = param.ModelProtocols

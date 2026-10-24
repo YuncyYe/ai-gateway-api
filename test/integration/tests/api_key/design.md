@@ -31,7 +31,8 @@ API-Key 模块负责 API-Key 的管理，包括创建、查询、更新、删除
 | 查询配额计划 | 4 |
 | 重置配额余额 | 3 |
 | 更新配额计划（余额差异化调整） | 6 |
-| **合计** | **39** |
+| batch_limits 专项（AK-BL） | 5 |
+| **合计** | **44** |
 
 ## 4. 认证方式
 
@@ -58,8 +59,10 @@ api_key/
 │   └── quota_query_test.go
 ├── quota_reset/
 │   └── quota_reset_test.go
-└── quota_update/
-    └── quota_update_test.go
+├── quota_update/
+│   └── quota_update_test.go
+└── batch_limits/
+    └── batch_limits_test.go     # rate_limit_policy.rules.batch_limits 四维度 + Inner 导出（AK-BL）
 ```
 
 ## 6. 创建 API-Key
@@ -2389,3 +2392,50 @@ RMB 配额的 quota 清零场景：预置 Redis 剩余 400.0000（used=600.1234�
 3. 更新接口传入 `key` 不生效，应在用例中显式断言 `key` 未变化。
 4. 测试环境 `SkipTokenValidate=true`，无需构造真实 Token。
 5. 同一模块内测试共享数据库，注意每个用例清理自身产生的 API-Key，避免名称/key 冲突。
+
+## 17. 批量限流 batch_limits 专项（AK-BL，2026-10-07 批量与异步任务支持一期）
+
+### 17.1 测试目标
+
+验证 `rate_limit_policy.rules.batch_limits` 内嵌对象（四维度批量限流：
+`max_create_rpm` / `max_active_batches` / `max_file_bytes` /
+`max_file_lines`）在创建、校验与 InnerAPI 导出链路上的行为：
+
+- 创建 api-key 内嵌四维度成功且回读一致；
+- 负维度值被拒绝（422，项目参数错误码约定）；
+- InnerAPI `GET /inner-api/v1/configs/rate-limit-policy` 导出
+  `rules.batch` 段，含 `redis_key`（实现全限定形态
+  `default_bfe_rlp-{policyID}_RL_BATCH_rlp-{policyID}_rpm`，
+  见 `model/shared.BuildBatchRateLimitRedisKey`）；
+- 不带 batch_limits 的策略无 `rules.batch` 段；
+- `max_create_rpm=0` 时不生成 `redis_key`（计数 Key 仅在
+  max_create_rpm>0 时需要；文件上限与在途上限无 Key）。
+
+### 17.2 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| AK-BL-1-001 | 创建内嵌 batch_limits 四维度 | 正常参数 | 创建成功，回读四维度一致 |
+| AK-BL-1-002 | 负维度值 | 异常参数 | 四个维度各一例负值，返回 422 |
+| AK-BL-1-003 | 导出 rules.batch + redis_key | 返回数据 | 导出段四维度一致；redis_key 含 RL_BATCH |
+| AK-BL-1-004 | 无 batch_limits 策略无 batch 段 | 返回数据 | 对照策略 rules.batch 缺失 |
+| AK-BL-1-005 | max_create_rpm=0 无 redis_key | 边界值 | batch 段存在但 redis_key 省略 |
+
+### 17.3 目录结构
+
+```
+api_key/
+├── ...
+└── batch_limits/
+    └── batch_limits_test.go
+```
+
+### 17.4 断言要点
+
+- 回读链路：GET `/open-api/v1/api-keys/{id}` →
+  `rate_limit_policy.rules.batch_limits` 四维度逐字段 Equals；
+- 导出链路定位策略：`ApikeyRateLimitPolicyBindings[apiKeyValue] →
+  RateLimitPolicies[policyKey]`（复用 innerapi rate_limit_policy 导出
+  用例的取数方式）；`rules.batch` 以 `json.RawMessage` 判定存在性；
+- 参数错误码按项目约定为 **422**（00-common.md：422=参数不合法）。
+

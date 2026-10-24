@@ -139,6 +139,15 @@ func rateLimitPolicyDataToParam(param *rate_limit_policy.RateLimitPolicyParam) *
 		data.RpmConfigs = lib.PString("[]")
 	}
 
+	// 转换 BatchLimits 为 JSON 字符串。nil 时写空串哨兵：更新为整体替换语义
+	// （省略 batch_limits 等价于清空），读侧将空串视为未配置。
+	if param.BatchLimits != nil {
+		batchLimitsJSON, _ := json.Marshal(param.BatchLimits)
+		data.BatchLimits = lib.PString(string(batchLimitsJSON))
+	} else {
+		data.BatchLimits = lib.PString("")
+	}
+
 	return data
 }
 
@@ -157,6 +166,14 @@ func rateLimitPolicyParamToData(one *dao.TRateLimitPolicy) *rate_limit_policy.Ra
 	// 解析 RpmConfigs
 	if one.RpmConfigs != "" {
 		json.Unmarshal([]byte(one.RpmConfigs), &param.RpmConfigs)
+	}
+
+	// 解析 BatchLimits（空串/null 视为未配置）
+	if one.BatchLimits != "" && one.BatchLimits != "null" {
+		var batchLimits rate_limit_policy.BatchLimits
+		if err := json.Unmarshal([]byte(one.BatchLimits), &batchLimits); err == nil {
+			param.BatchLimits = &batchLimits
+		}
 	}
 
 	return param

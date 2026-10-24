@@ -16,6 +16,7 @@ package quota
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -159,10 +160,9 @@ func TestBalanceSyncManager_ResetExpiredBalances(t *testing.T) {
 		m := NewBalanceSyncManager(&fakeTxn{}, apiKeyStorager, planStorager, entityStorager, quotacache.NewRedisQuotaCache(mockRedis), nil)
 		require.NoError(t, m.ResetExpiredBalances(ctx))
 
-		// 验证 quota_plans.last_reset_at 被更新
-		require.Len(t, planStorager.updated, 1)
-		assert.Equal(t, planID, *planStorager.updated[0].filter.ID)
-		assert.NotNil(t, planStorager.updated[0].param.LastResetAt)
+		// 验证先认领（claim）后重置：认领一次成功
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, planID, planStorager.claims[0].id)
 
 		// Redis 应该被重置为配额总量
 		apiKeyRemaining, _ := mockRedis.GetInt64(stateful.AIUsedQuotaKey(apiKey))
@@ -175,7 +175,9 @@ func TestBalanceSyncManager_ResetExpiredBalances(t *testing.T) {
 		mockRedis.Reset()
 		planID := int64(1)
 		quota := float64(1000)
-		lastReset := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		// last_reset_at 位于当前自然月内，不应触发重置。
+		now := time.Now()
+		lastReset := time.Date(now.Year(), now.Month(), 1, 1, 0, 0, 0, now.Location())
 
 		planStorager := &fakeQuotaPlanStorager{
 			listFn: func(ctx context.Context, filter *QuotaPlanFilter) ([]*QuotaPlanParam, error) {
@@ -191,7 +193,7 @@ func TestBalanceSyncManager_ResetExpiredBalances(t *testing.T) {
 		m := NewBalanceSyncManager(&fakeTxn{}, &fakeAPIKeyStorager{}, planStorager, &fakeEntityStorager{}, quotacache.NewRedisQuotaCache(mockRedis), nil)
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
-		assert.Empty(t, planStorager.updated)
+		assert.Empty(t, planStorager.claims)
 	})
 
 	t.Run("nil last_reset_at triggers reset", func(t *testing.T) {
@@ -234,8 +236,9 @@ func TestBalanceSyncManager_ResetExpiredBalances(t *testing.T) {
 		m := NewBalanceSyncManager(&fakeTxn{}, apiKeyStorager, planStorager, entityStorager, quotacache.NewRedisQuotaCache(mockRedis), nil)
 		require.NoError(t, m.ResetExpiredBalances(ctx))
 
-		require.Len(t, planStorager.updated, 1)
-		assert.NotNil(t, planStorager.updated[0].param.LastResetAt)
+		// NULL last_reset_at 的计划被认领一次后即视为已重置
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, planID, planStorager.claims[0].id)
 	})
 }
 
@@ -260,7 +263,7 @@ func newResetTestManager(
 	return NewBalanceSyncManager(&fakeTxn{}, apiKeyStorager, planStorager, entityStorager, quotacache.NewRedisQuotaCache(stateful.NewMockRedisClient()), clock)
 }
 
-func TestResetExpiredBalances_ConditionalUpdateUsesPeriodStart(t *testing.T) {
+func TestResetExpiredBalances_ClaimUsesPeriodStart(t *testing.T) {
 	ctx := context.Background()
 	planID := int64(1)
 	quota := float64(1000)
@@ -282,10 +285,10 @@ func TestResetExpiredBalances_ConditionalUpdateUsesPeriodStart(t *testing.T) {
 		fetchFn: func(ctx context.Context, filter *QuotaPlanFilter) (*QuotaPlanParam, error) {
 			return &QuotaPlanParam{ID: &planID, Quota: &quota}, nil
 		},
-		updateFn: func(ctx context.Context, filter *QuotaPlanFilter, param *QuotaPlanParam) (int64, error) {
-			require.NotNil(t, filter.LastResetAtBefore)
+		claimFn: func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
 			expected := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
-			assert.Equal(t, expected, *filter.LastResetAtBefore)
+			assert.Equal(t, expected, periodStart)
+			assert.Equal(t, planID, id)
 			return 1, nil
 		},
 	}
@@ -303,6 +306,97 @@ func TestResetExpiredBalances_ConditionalUpdateUsesPeriodStart(t *testing.T) {
 	m := NewBalanceSyncManager(&fakeTxn{}, apiKeyStorager, planStorager, &fakeEntityStorager{},
 		quotacache.NewRedisQuotaCache(stateful.NewMockRedisClient()), &fakeClock{t: now})
 	require.NoError(t, m.ResetExpiredBalances(ctx))
+
+	require.Len(t, planStorager.claims, 1)
+	assert.Equal(t, now, planStorager.claims[0].now)
+}
+
+// TestResetExpiredBalances_ClaimGuardsReset 验证"先认领后重置"：
+// 认领失败（0 行 / 出错）时不得触碰 Redis。
+func TestResetExpiredBalances_ClaimGuardsReset(t *testing.T) {
+	ctx := context.Background()
+	planID := int64(1)
+	quota := float64(1000)
+	lastReset := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	newPlanStorager := func(claimFn func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error)) (*fakeQuotaPlanStorager, *int) {
+		fetchCalls := 0
+		return &fakeQuotaPlanStorager{
+			listFn: func(ctx context.Context, filter *QuotaPlanFilter) ([]*QuotaPlanParam, error) {
+				return []*QuotaPlanParam{{
+					ID:          &planID,
+					Quota:       &quota,
+					Unlimited:   lib.PBool(false),
+					ResetPeriod: lib.PString("monthly"),
+					LastResetAt: &lastReset,
+				}}, nil
+			},
+			fetchFn: func(ctx context.Context, filter *QuotaPlanFilter) (*QuotaPlanParam, error) {
+				fetchCalls++
+				return &QuotaPlanParam{ID: &planID, Quota: &quota}, nil
+			},
+			claimFn: claimFn,
+		}, &fetchCalls
+	}
+
+	t.Run("affected zero skips reset (claimed by another instance)", func(t *testing.T) {
+		planStorager, fetchCalls := newPlanStorager(func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+			return 0, nil // 本周期已被认领
+		})
+		m := NewBalanceSyncManager(&fakeTxn{}, &fakeAPIKeyStorager{}, planStorager, &fakeEntityStorager{},
+			quotacache.NewRedisQuotaCache(stateful.NewMockRedisClient()), nil)
+		require.NoError(t, m.ResetExpiredBalances(ctx))
+
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, 0, *fetchCalls, "reset must not run when claim returns affected=0")
+	})
+
+	t.Run("claim error skips reset and retries next round", func(t *testing.T) {
+		planStorager, fetchCalls := newPlanStorager(func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+			return 0, fmt.Errorf("db down")
+		})
+		m := NewBalanceSyncManager(&fakeTxn{}, &fakeAPIKeyStorager{}, planStorager, &fakeEntityStorager{},
+			quotacache.NewRedisQuotaCache(stateful.NewMockRedisClient()), nil)
+		require.NoError(t, m.ResetExpiredBalances(ctx))
+
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, 0, *fetchCalls, "reset must not run when claim errors")
+	})
+
+	t.Run("claim success resets exactly once across instances", func(t *testing.T) {
+		claimCount := 0
+		planStorager, fetchCalls := newPlanStorager(func(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+			claimCount++
+			if claimCount == 1 {
+				return 1, nil
+			}
+			return 0, nil // 第二个实例认领失败
+		})
+		apiKeyStorager := &fakeAPIKeyStorager{
+			fetchListFn: func(ctx context.Context, filter *api_key.APIKeyFilter) ([]*api_key.APIKeyParam, error) {
+				createdAt := time.Now()
+				return []*api_key.APIKeyParam{{
+					ID:          lib.PString("ak-id-1"),
+					Key:         lib.PString("ak-guard"),
+					KeyCreateAt: &createdAt,
+				}}, nil
+			},
+		}
+		mockRedis := stateful.NewMockRedisClient()
+		m := NewBalanceSyncManager(&fakeTxn{}, apiKeyStorager, planStorager, &fakeEntityStorager{},
+			quotacache.NewRedisQuotaCache(mockRedis), nil)
+
+		// 实例 1 认领成功并重置
+		require.NoError(t, m.ResetExpiredBalances(ctx))
+		// 实例 2 同周期认领失败，不得重复重置
+		require.NoError(t, m.ResetExpiredBalances(ctx))
+
+		require.Len(t, planStorager.claims, 2)
+		assert.Equal(t, 1, *fetchCalls, "redis reset must run exactly once per period")
+		remaining, err := mockRedis.GetInt64(stateful.AIUsedQuotaKey("ak-guard"))
+		require.NoError(t, err)
+		assert.Equal(t, int64(1000), remaining)
+	})
 }
 
 func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
@@ -358,8 +452,8 @@ func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
 
-		require.Len(t, planStorager.updated, 1)
-		assert.Equal(t, clock.Now(), *planStorager.updated[0].param.LastResetAt)
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, clock.Now(), planStorager.claims[0].now)
 	})
 
 	t.Run("weekly does not reset within same week", func(t *testing.T) {
@@ -369,7 +463,7 @@ func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
 		m := newResetTestManager(planStorager, makeAPIKeyStorager(), makeEntityStorager(), clock)
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
-		assert.Empty(t, planStorager.updated)
+		assert.Empty(t, planStorager.claims)
 	})
 
 	t.Run("monthly resets on next month first day", func(t *testing.T) {
@@ -380,8 +474,8 @@ func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
 
-		require.Len(t, planStorager.updated, 1)
-		assert.Equal(t, clock.Now(), *planStorager.updated[0].param.LastResetAt)
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, clock.Now(), planStorager.claims[0].now)
 	})
 
 	t.Run("monthly does not reset within same month", func(t *testing.T) {
@@ -391,7 +485,7 @@ func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
 		m := newResetTestManager(planStorager, makeAPIKeyStorager(), makeEntityStorager(), clock)
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
-		assert.Empty(t, planStorager.updated)
+		assert.Empty(t, planStorager.claims)
 	})
 
 	t.Run("monthly resets across year boundary", func(t *testing.T) {
@@ -402,7 +496,7 @@ func TestResetExpiredBalances_WithFakeClock(t *testing.T) {
 
 		require.NoError(t, m.ResetExpiredBalances(ctx))
 
-		require.Len(t, planStorager.updated, 1)
-		assert.Equal(t, clock.Now(), *planStorager.updated[0].param.LastResetAt)
+		require.Len(t, planStorager.claims, 1)
+		assert.Equal(t, clock.Now(), planStorager.claims[0].now)
 	})
 }

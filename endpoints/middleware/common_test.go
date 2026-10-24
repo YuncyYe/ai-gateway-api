@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bfenetworks/go-lib/log"
 	"github.com/bfenetworks/go-lib/log/log4go"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/itxn"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
@@ -42,9 +43,11 @@ func setupTestLoggers(t *testing.T) {
 
 	origAccess := stateful.AccessLogger
 	origException := stateful.ExceptionLogger
+	origGlobal := log.Logger
 
 	stateful.AccessLogger = log4go.NewDefaultLogger(log4go.DEBUG)
 	stateful.ExceptionLogger = log4go.NewDefaultLogger(log4go.DEBUG)
+	log.Logger = stateful.AccessLogger
 
 	t.Cleanup(func() {
 		if stateful.AccessLogger != nil {
@@ -55,5 +58,6 @@ func setupTestLoggers(t *testing.T) {
 		}
 		stateful.AccessLogger = origAccess
 		stateful.ExceptionLogger = origException
+		log.Logger = origGlobal
 	})
 }

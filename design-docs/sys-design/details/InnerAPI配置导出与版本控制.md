@@ -110,6 +110,8 @@ var ZeroVersion = Version(time.Time{})
 | `GET /configs/mod-api-key` | `APIKeyRuleManager` | `mod_api_key_rule` | API-Key 校验规则与配额计划 |
 | `GET /configs/mod-body-process` | `ModBodyProcessManager` | `mod_body_process` | 请求体处理模块配置 |
 | `GET /configs/rate-limit-policy` | `RateLimitPolicyManager` | `mod_ai_rate_limit` | 限流策略配置 |
+| `GET /configs/ai-cache-rule` | `AICacheManager` | `mod_ai_cache` | AI 缓存规则配置（BFE `mod_ai_cache` 数据源，产物 `ai_cache.data`） |
+| `GET /configs/mod-ai-intent` | `IntentConfigManager` | `intent_config` | AI 意图配置（BFE `mod_ai_intent` 数据源，产物 `intent_questions.data`；Data 即文件内容原样，未发布/未变化返回 `Data: null`） |
 | `GET /configs/ai-route` | `AIRouteExporter` | `ai_route` | AI 路由规则与绑定关系 |
 
 ---
@@ -139,7 +141,7 @@ type RouteRuleExportData struct {
 
 其中 `RouteTable` 包含产品级高级路由规则（来自 `route_advance_rules`），`ClusterConf` 包含集群转发参数。
 
-> 说明：当管理面 Cluster 配置了 `llm_config` 时，导出后的 `ClusterConf.Config.<cluster_name>.AIConf` 会包含模型映射、认证密钥、模型定价表、前缀路由裁剪开关、协议风格列表以及 Key 亲和性策略，供 BFE 侧 AI 转发模块使用。`AIConf` 由 `llm_config.models`/`model_mappings`/`keys`/`key_policy`/`key_affinity`/`provider`/`match_prefix`/`strip_prefix` 以及 provider 的 `model_protocols` 转换而来，字段位置为 `ClusterConf.Config.<cluster_name>.AIConf`。
+> 说明：当管理面 Cluster 配置了 `llm_config` 时，导出后的 `ClusterConf.Config.<cluster_name>.AIConf` 会包含模型映射、认证密钥、模型定价表、前缀路由裁剪开关、协议风格列表、Key 亲和性策略以及上游错误体归一配置，供 BFE 侧 AI 转发模块使用。`AIConf` 由 `llm_config.models`/`model_mappings`/`keys`/`key_policy`/`key_affinity`/`normalize_upstream_error`/`provider`/`match_prefix`/`strip_prefix` 以及 provider 的 `model_protocols` 转换而来，字段位置为 `ClusterConf.Config.<cluster_name>.AIConf`。
 >
 > `AIConf.Provider` 对应 OpenAPI `llm_config.provider`，用于关联 `model_prices` 表；`AIConf.ModelTable` 由 InnerAPI 根据 `Provider` 查询 `model_prices` 自动填充，不在 OpenAPI `/clusters` 端点中展示。`AIConf.MatchPrefix`/`StripPrefix` 对应 OpenAPI `llm_config.match_prefix`/`strip_prefix`，由 BFE 在转发前决定是否裁剪请求 `model` 字段前缀。`AIConf.ModelProtocols` 对应 Provider 的 `model_protocols`，供 BFE 判断请求协议风格是否被当前集群支持，例如识别 `anthropic` 请求并注入 `x-api-key` 与 `anthropic-version` 头。`model_prices` 变更后不会同步触发 InnerAPI 推送，BFE/Conf Agent 按自身周期拉取配置并热加载。
 
@@ -301,6 +303,46 @@ type AiRouteDataExport struct {
 
 > AI 路由条件表达式的构造详见《AI 路由规则与条件表达式.md》（待补充）。
 
+### 4.10 ai-cache-rule（`/configs/ai-cache-rule`）
+
+由 `model/ai_cache/ai_cache_manager.go` 实现，是 BFE `mod_ai_cache` 模块的规则数据源：
+
+```go
+type AICacheRuleExport struct {
+    Version string `json:"Version"`
+    Config map[string][]*AICacheRuleConf `json:"Config"`
+}
+```
+
+生成流程：
+
+1. 查询全部 `ai_cache_rules`，按 `id` 升序（无 enabled 过滤——提交列表即生效集合）；
+2. 组装 `Config[AIRouteInnerProductName] = 规则数组`（product 名取自运行时配置 `RunTime.AIRouteInnerProductName`，默认 `AI_product`，不硬编码）；
+3. 空表时导出空数组（product 键仍 present，值为 `[]`）；
+4. 一期每条规则仅导出 `cond` / `cacheKeyStrategy` / `cacheTTL` / `maxBodyBytes` / `maxValueBytes` 五字段，其余字段由 BFE 规则加载器 `setDefaults` 填默认。
+
+> 详见《AI缓存规则与导出.md》。Redis 连接等静态配置不进本接口，由 BFE 静态 `mod_ai_cache.conf` 经 conf-agent `CopyFiles` 下发。
+
+### 4.11 mod-ai-intent（`/configs/mod-ai-intent`）
+
+由 `model/iintent_config/iintent_config_manager.go` 实现，是 BFE `mod_ai_intent` 模块的数据源：
+
+```go
+type IntentConfigDataExport struct {
+    Version       string          `json:"Version"`
+    MinConfidence float64         `json:"MinConfidence"`
+    Questions     json.RawMessage `json:"Questions"`
+}
+```
+
+生成流程：
+
+1. `Fetch` 取 `intent_config` 当前行（全局单例）；无记录返回 nil（不导出，BFE 维持现状）；
+2. 组装 `IntentConfigDataExport{Version, MinConfidence, Questions(RawMessage)}`——**Data 即 `intent_questions.data` 文件内容原样**（Version 内嵌文件，同 ai-route 端点形态；非 ai-cache 的 `Version` + `Config` 包装形态）；
+3. 导出内容 version 与上次导出相同返回 nil（不触发 conf-agent 落盘与 BFE `/reload/mod_ai_intent`）；BFE 侧对"版本不变的热更"同样跳过——双端同语义。
+
+> 详见《意图配置与导出.md》。`mod_ai_intent.conf`（决策服务地址/超时/缓存/熔断）等静态配置不进本接口，由 conf-agent `CopyFiles` 下发。
+
 ---
 
 ## 5. 增量同步机制
@@ -361,6 +403,8 @@ Authorization: Token <token>
 | `mod_api_key_rule` | API-Key 模块 | 否 |
 | `mod_body_process` | Body 处理模块 | 否 |
 | `mod_ai_rate_limit` | 限流策略模块 | 否 |
+| `mod_ai_cache` | AI 缓存规则模块 | 否 |
+| `intent_config` | AI 意图配置模块 | 否 |
 | `ai_route` | AI 路由模块 | 否 |
 
 > `gslb.<bfe_cluster>` 因为依赖参数，不同 BFE 集群的版本号线相互独立。
@@ -408,6 +452,8 @@ Authorization: Token <token>
 | `endpoints/innerapi_v1/mod_api_key/export.go` | mod-api-key 导出端点 |
 | `endpoints/innerapi_v1/mod_body_process/export.go` | mod-body-process 导出端点 |
 | `endpoints/innerapi_v1/rate_limit_policy/export.go` | 限流策略导出端点 |
+| `endpoints/innerapi_v1/ai_cache/export.go` | AI 缓存规则导出端点 |
+| `endpoints/innerapi_v1/intent_config_export/export.go` | AI 意图配置导出端点 |
 | `endpoints/innerapi_v1/ai_route/export.go` | AI 路由导出端点 |
 | `model/iroute_conf/exporter.go` | Server Data 配置生成 |
 | `model/icluster_conf/exporter.go` | GSLB / Cluster Table 配置生成；`AIConf.Provider` / `AIConf.ModelTable` 填充 |
@@ -418,3 +464,5 @@ Authorization: Token <token>
 | `model/imods/mod_body_process.go` | mod-body-process 配置生成 |
 | `model/imods/ai_route_exporter.go` | AI 路由配置生成 |
 | `model/rate_limit_policy/rate_limit_policy_manager.go` | 限流策略配置生成 |
+| `model/ai_cache/ai_cache_manager.go` | AI 缓存规则配置生成（topic `mod_ai_cache`） |
+| `model/iintent_config/iintent_config_manager.go` | AI 意图配置生成（topic `intent_config`） |

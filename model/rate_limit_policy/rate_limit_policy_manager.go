@@ -248,6 +248,10 @@ func (m *RateLimitPolicyManager) RateLimitPolicyGenerator(ctx context.Context) (
 					})
 				}
 
+				if policy.BatchLimits != nil {
+					exportPolicy.Rules.Batch = exportBatchLimits(policyID, policy.BatchLimits)
+				}
+
 				rateLimitPolicies[policyKey] = exportPolicy
 			}
 

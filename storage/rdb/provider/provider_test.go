@@ -28,6 +28,13 @@ import (
 )
 
 func setupTestStorager(t *testing.T) *RDBProviderStorager {
+	s, _ := setupTestStoragerWithDB(t)
+	return s
+}
+
+// setupTestStoragerWithDB also hands back the raw DB so tests can corrupt or
+// inspect column values directly (e.g. the api_keys text column).
+func setupTestStoragerWithDB(t *testing.T) (*RDBProviderStorager, *sql.DB) {
 	// The DAO layer consults stateful.DefaultConfig when recording SQL.
 	if stateful.DefaultConfig == nil {
 		stateful.DefaultConfig = &stateful.Config{}
@@ -47,6 +54,9 @@ CREATE TABLE providers (
   models TEXT,
   api_keys TEXT,
   instance_pool TEXT NOT NULL,
+  instance_source TEXT NOT NULL DEFAULT 'instance_pool',
+  k8s_pool_name TEXT,
+  k8s_instance_pool TEXT,
   model_protocols TEXT NOT NULL,
   protocol_paths TEXT,
   time_zone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
@@ -61,7 +71,7 @@ CREATE TABLE providers (
 		return lib.NewDBContext(ctx, db), nil
 	})
 
-	return NewRDBProviderStorager(factory)
+	return NewRDBProviderStorager(factory), db
 }
 
 func TestToDAOParamForUpdate_OmittedFieldsStayNil(t *testing.T) {
@@ -83,6 +93,9 @@ func TestToDAOParamForUpdate_OmittedFieldsStayNil(t *testing.T) {
 	assert.Nil(t, data.Models)
 	assert.Nil(t, data.Keys)
 	assert.Nil(t, data.InstancePool)
+	assert.Nil(t, data.InstanceSource)
+	assert.Nil(t, data.K8sPoolName)
+	assert.Nil(t, data.K8sInstancePool)
 	assert.Nil(t, data.ModelProtocols)
 	assert.Nil(t, data.TimeZone)
 	assert.Nil(t, data.Tiers)
@@ -137,6 +150,11 @@ func TestToDAOParam_CreatePathDefaultsUnchanged(t *testing.T) {
 	require.NotNil(t, data.TimeZone)
 	assert.Equal(t, "Asia/Shanghai", *data.TimeZone)
 	require.NotNil(t, data.Tiers)
+	require.NotNil(t, data.InstanceSource)
+	assert.Equal(t, iprovider.InstanceSourceInstancePool, *data.InstanceSource)
+	require.NotNil(t, data.K8sInstancePool)
+	assert.Equal(t, "[]", *data.K8sInstancePool)
+	assert.Nil(t, data.K8sPoolName)
 }
 
 func TestMarshalJSONPtr(t *testing.T) {
@@ -268,4 +286,96 @@ func TestRDBProviderStorager_CreateProviderDefaults(t *testing.T) {
 	assert.Empty(t, one.Models)
 	assert.Empty(t, one.Keys)
 	assert.Empty(t, one.Tiers)
+	assert.Equal(t, iprovider.InstanceSourceInstancePool, one.InstanceSource)
+	assert.Nil(t, one.K8sPoolName)
+	assert.Empty(t, one.K8sInstancePool)
+}
+
+func TestRDBProviderStorager_InstanceSourceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := setupTestStorager(t)
+
+	// Create a k8s_pool-mode provider; k8s_instance_pool starts as an empty
+	// mirror until the first /k8s_pools PUT.
+	_, err := s.CreateProvider(ctx, &iprovider.ProviderParam{
+		Name:           lib.PString("k8s-provider"),
+		Models:         []string{"deepseek-chat"},
+		InstanceSource: lib.PString(iprovider.InstanceSourceK8sPool),
+		K8sPoolName:    lib.PString("svc-a"),
+		ModelProtocols: []string{"openai"},
+	})
+	require.NoError(t, err)
+
+	one, err := s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("k8s-provider")})
+	require.NoError(t, err)
+	require.NotNil(t, one)
+	assert.Equal(t, iprovider.InstanceSourceK8sPool, one.InstanceSource)
+	require.NotNil(t, one.K8sPoolName)
+	assert.Equal(t, "svc-a", *one.K8sPoolName)
+	assert.Empty(t, one.K8sInstancePool)
+
+	// Mirror refresh (as performed by the k8s_pools fan-out) writes the new
+	// list; a pointer to an empty slice clears it back to [].
+	mirror := []iprovider.ProviderInstance{{Addr: "10.0.0.1", Port: 8000, Weight: 100}}
+	require.NoError(t, s.UpdateProvider(ctx, "k8s-provider", &iprovider.ProviderParam{
+		Name:            lib.PString("k8s-provider"),
+		K8sInstancePool: &mirror,
+	}))
+	one, err = s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("k8s-provider")})
+	require.NoError(t, err)
+	require.Len(t, one.K8sInstancePool, 1)
+	assert.Equal(t, "10.0.0.1", one.K8sInstancePool[0].Addr)
+
+	empty := []iprovider.ProviderInstance{}
+	require.NoError(t, s.UpdateProvider(ctx, "k8s-provider", &iprovider.ProviderParam{
+		Name:            lib.PString("k8s-provider"),
+		K8sInstancePool: &empty,
+	}))
+	one, err = s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("k8s-provider")})
+	require.NoError(t, err)
+	assert.Empty(t, one.K8sInstancePool)
+
+	// Omitted mirror field keeps the stored value.
+	require.NoError(t, s.UpdateProvider(ctx, "k8s-provider", &iprovider.ProviderParam{
+		Name:        lib.PString("k8s-provider"),
+		Description: lib.PString("desc"),
+	}))
+	one, err = s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("k8s-provider")})
+	require.NoError(t, err)
+	assert.Equal(t, "desc", one.Description)
+	assert.Empty(t, one.K8sInstancePool)
+}
+
+// api_keys is a text column (it holds an enc$v1$ envelope at rest), so the DB
+// no longer rejects malformed JSON for us: corruption must surface as an error
+// instead of silently reading back as "no keys" (issue #264).
+func TestRDBProviderStorager_FetchProviderRejectsCorruptKeys(t *testing.T) {
+	ctx := context.Background()
+	s, db := setupTestStoragerWithDB(t)
+
+	_, err := s.CreateProvider(ctx, &iprovider.ProviderParam{
+		Name:           lib.PString("p1"),
+		Keys:           []iprovider.ProviderKey{{Name: "k1", Key: "sk-abc"}},
+		InstancePool:   []iprovider.ProviderInstance{{Addr: "10.0.0.1", Port: 9002, Weight: 100}},
+		ModelProtocols: []string{"openai"},
+	})
+	require.NoError(t, err)
+
+	_, err = db.Exec(`UPDATE providers SET api_keys = 'not-json' WHERE name = 'p1'`)
+	require.NoError(t, err)
+
+	one, err := s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("p1")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse api_keys")
+	assert.Nil(t, one)
+
+	// Empty and null are legitimate "no keys" values and keep working.
+	for _, raw := range []string{"", "null", "[]"} {
+		_, err = db.Exec(`UPDATE providers SET api_keys = ? WHERE name = 'p1'`, raw)
+		require.NoError(t, err)
+		one, err = s.FetchProvider(ctx, &iprovider.ProviderFilter{Name: lib.PString("p1")})
+		require.NoError(t, err)
+		require.NotNil(t, one)
+		assert.Empty(t, one.Keys)
+	}
 }

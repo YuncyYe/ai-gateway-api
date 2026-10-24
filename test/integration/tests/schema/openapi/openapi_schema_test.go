@@ -19,8 +19,11 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
+	helper "github.com/rainway-ai-gateway/ai-gateway-api/integration/tests/batch/helper"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,8 +51,16 @@ func TestOpenAPI_Schema(t *testing.T) {
 	t.Run("model_prices", testModelPriceSchema)
 	t.Run("route_tables", testRouteTableSchema)
 	t.Run("global_route_rules", testGlobalRouteRulesSchema)
+	t.Run("ai_cache", testAICacheSchema)
+	t.Run("ai_cache_semantic_settings", testAICacheSemanticSettingsSchema)
+	t.Run("ai_context", testAIContextSchema)
+	t.Run("ai_context_settings", testAIContextSettingsSchema)
+	t.Run("traffic_mirror", testTrafficMirrorSchema)
+	t.Run("intent_config", testIntentConfigSchema)
 	t.Run("epp_pool", testEppPoolSchema)
 	t.Run("epp_assignments", testEppAssignmentsSchema)
+	t.Run("security_reencrypt_sweeps", testSecuritySchema)
+	t.Run("batch_task_detail", testBatchSchema)
 }
 
 // ---------- entity-types ----------
@@ -197,8 +208,8 @@ func testAPIKeySchema(t *testing.T) {
 			"enabled": true,
 			"rules": []interface{}{
 				map[string]interface{}{
-					"name":  "default",
-					"cond":  "default_t()",
+					"name": "default",
+					"cond": "default_t()",
 					"targets": []interface{}{
 						map[string]interface{}{"cluster_name": clusterName, "model": "", "weight": 100},
 					},
@@ -399,17 +410,30 @@ func testClusterSchema(t *testing.T) {
 		"description":  "schema test epp",
 		"balance_mode": "EPP",
 		"epp_config": map[string]interface{}{
-			"scheduling_profile":       "latency-first",
-			"cache_affinity":           "high",
-			"prefix_cache_affinity":    true,
-			"session_affinity_enabled": true,
-			"session_affinity_header":  "x-session-id",
-			"kv_cache_utilization_max": 0.85,
+			"load_profile":                   "queue-first",
+			"affinity":                       "high",
+			"prefix_cache_affinity":          true,
+			"session_affinity_enabled":       true,
+			"session_affinity_header":        "x-session-id",
+			"kv_cache_utilization_max":       0.85,
+			"waiting_queue_max":              5,
+			"running_requests_max":           16,
+			"fallback_on_empty":              true,
+			"metrics_staleness_threshold_ms": 300,
 			"flow_control": map[string]interface{}{
 				"max_requests":          200,
 				"queue_ttl":             45,
 				"no_endpoint_queue_ttl": 120,
-				"enable_eviction":       true,
+				"enable_eviction":       false,
+			},
+		},
+		"epp_runtime": map[string]interface{}{
+			"check": map[string]interface{}{
+				"check_interval": "5s",
+				"fail_threshold": 4,
+			},
+			"timeout": map[string]interface{}{
+				"connect": "1s",
 			},
 		},
 		"llm_config": map[string]interface{}{
@@ -429,26 +453,74 @@ func testClusterSchema(t *testing.T) {
 
 	// epp_config 原样回读（存储保留用户原始 JSON，未携带字段不落盘）。
 	assertEppConfigEcho(t, eppOneResp.Data, map[string]interface{}{
-		"scheduling_profile":       "latency-first",
-		"cache_affinity":           "high",
-		"prefix_cache_affinity":    true,
-		"session_affinity_enabled": true,
-		"session_affinity_header":  "x-session-id",
-		"kv_cache_utilization_max": 0.85,
+		"load_profile":                   "queue-first",
+		"affinity":                       "high",
+		"prefix_cache_affinity":          true,
+		"session_affinity_enabled":       true,
+		"session_affinity_header":        "x-session-id",
+		"kv_cache_utilization_max":       0.85,
+		"waiting_queue_max":              float64(5),
+		"running_requests_max":           float64(16),
+		"fallback_on_empty":              true,
+		"metrics_staleness_threshold_ms": float64(300),
 		"flow_control": map[string]interface{}{
 			"max_requests":          float64(200),
 			"queue_ttl":             float64(45),
 			"no_endpoint_queue_ttl": float64(120),
-			"enable_eviction":       true,
+			"enable_eviction":       false,
 		},
 	})
+
+	// epp_runtime 原样回读（未携带的子字段在写入时按默认补齐后落盘）。
+	assertEppRuntimeEcho(t, eppOneResp.Data, map[string]interface{}{
+		"check": map[string]interface{}{
+			"disabled":          false,
+			"check_interval":    "5s",
+			"fail_threshold":    float64(4),
+			"cooldown":          "45s",
+			"success_threshold": float64(2),
+		},
+		"timeout": map[string]interface{}{
+			"connect": "1s",
+			"call":    "3s",
+		},
+	})
+
+	// epp_runtime 不接受 tls/breaker：未知字段 → 422，且不落盘。
+	badRuntimeResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+		"name":         testutil.UniqueClusterName(),
+		"balance_mode": "EPP",
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
+		"epp_runtime":  map[string]interface{}{"tls": map[string]interface{}{"plaintext": true}},
+		"llm_config": map[string]interface{}{
+			"models":   []string{"deepseek-chat"},
+			"provider": eppProviderName,
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, badRuntimeResp, 422)
+
+	// 非法 epp_runtime（阈值越界）→ 422。
+	badThresholdResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+		"name":         testutil.UniqueClusterName(),
+		"balance_mode": "EPP",
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
+		"epp_runtime":  map[string]interface{}{"check": map[string]interface{}{"fail_threshold": 0}},
+		"llm_config": map[string]interface{}{
+			"models":   []string{"deepseek-chat"},
+			"provider": eppProviderName,
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, badThresholdResp, 422)
 
 	// WRR 集群携带 epp_config（休眠保留）：创建成功且 GET 原样返回。
 	dormantClusterName := testutil.UniqueClusterName()
 	dormantResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         dormantClusterName,
 		"balance_mode": "WRR",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "throughput-first"},
+		"epp_config":   map[string]interface{}{"load_profile": "kv-first"},
+		"epp_runtime":  map[string]interface{}{"timeout": map[string]interface{}{"call": "9s"}},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": eppProviderName,
@@ -463,7 +535,33 @@ func testClusterSchema(t *testing.T) {
 	testutil.AssertSuccess(t, dormantOneResp)
 	testutil.AssertSchema(t, dormantOneResp, ClusterSchema)
 	assertEppConfigEcho(t, dormantOneResp.Data, map[string]interface{}{
-		"scheduling_profile": "throughput-first",
+		"load_profile": "kv-first",
+	})
+	assertEppRuntimeEcho(t, dormantOneResp.Data, map[string]interface{}{
+		"timeout": map[string]interface{}{
+			"connect": "500ms",
+			"call":    "9s",
+		},
+	})
+
+	// PATCH 整体替换 epp_runtime → GET 校验替换生效。
+	patchRuntimeResp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+dormantClusterName, map[string]interface{}{
+		"epp_runtime": map[string]interface{}{"check": map[string]interface{}{"cooldown": "10s"}},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, patchRuntimeResp)
+
+	patchOneResp, err := testutil.GetClient().Get("/open-api/v1/clusters/" + dormantClusterName)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, patchOneResp)
+	assertEppRuntimeEcho(t, patchOneResp.Data, map[string]interface{}{
+		"check": map[string]interface{}{
+			"disabled":          false,
+			"check_interval":    "2s",
+			"fail_threshold":    float64(3),
+			"cooldown":          "10s",
+			"success_threshold": float64(2),
+		},
 	})
 
 	t.Cleanup(func() {
@@ -489,6 +587,21 @@ func assertEppConfigEcho(t *testing.T, data []byte, want map[string]interface{})
 	for key, wantVal := range want {
 		require.Equal(t, wantVal, eppConfig[key], "epp_config.%s echo mismatch", key)
 	}
+}
+
+// assertEppRuntimeEcho 校验 GET cluster 回读中 epp_runtime 与写入（含默认补齐）
+// 后的值一致。
+func assertEppRuntimeEcho(t *testing.T, data []byte, want map[string]interface{}) {
+	t.Helper()
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal cluster data: %v", err)
+	}
+	eppRuntime, ok := payload["epp_runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("epp_runtime is not an object: %v", payload["epp_runtime"])
+	}
+	require.Equal(t, want, eppRuntime)
 }
 
 // ---------- certificates ----------
@@ -540,7 +653,7 @@ func testAuthSchema(t *testing.T) {
 	createUserResp, err := testutil.GetClient().Post("/open-api/v1/auth/users", map[string]interface{}{
 		"user_name": userName,
 		"password":  password,
-		"is_admin":  true,
+		"role":      "system_admin",
 	})
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, createUserResp)
@@ -744,7 +857,338 @@ func testGlobalRouteRulesSchema(t *testing.T) {
 	testutil.AssertSchema(t, putResp, GlobalRouteRulesSchema)
 }
 
+// ---------- ai-cache-rules ----------
 
+// testAICacheSchema 覆盖 AI 缓存规则集合（GET/PUT 同构）。
+// 集合级资源无 /{id} 端点："GET 单查" 即全量查询的重复拉取（唯一读形状）。
+// 另做定向断言：rules 元素键集合精确为合同 7 字段（逐行 created_at/updated_at
+// 自 issue #258 起不返回），不得含内部 id、无 enabled（ai-cache-rules.md §1）。
+func testAICacheSchema(t *testing.T) {
+	validCond := `req_path_in("/v1/chat/completions", false)`
+	validCond2 := `req_path_in("/v1/chat/completions", false) && req_body_json_in("model", "schema-ac-2", false)`
+	name1 := testutil.UniqueName("schema-ac-1")
+	name2 := testutil.UniqueName("schema-ac-2")
+
+	// 建集合（PUT）。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{"name": name1, "cond": validCond, "cache_ttl": 3600},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, AICacheRulesSchema)
+
+	// GET 列表（全量查询）。
+	listResp, err := testutil.GetClient().Get("/open-api/v1/ai-cache-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, listResp)
+	testutil.AssertSchema(t, listResp, AICacheRulesSchema)
+
+	// GET 重复拉取（唯一读形状，等价单查）。
+	oneResp, err := testutil.GetClient().Get("/open-api/v1/ai-cache-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, oneResp)
+	testutil.AssertSchema(t, oneResp, AICacheRulesSchema)
+
+	// PUT 修改（全量替换为 2 条）。
+	put2Resp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{"name": name1, "cond": validCond, "cache_ttl": 7200},
+			map[string]interface{}{"name": name2, "cond": validCond2, "cache_key_strategy": "disabled"},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, put2Resp)
+	testutil.AssertSchema(t, put2Resp, AICacheRulesSchema)
+
+	// 修改后再 GET。
+	get2Resp, err := testutil.GetClient().Get("/open-api/v1/ai-cache-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, get2Resp)
+	testutil.AssertSchema(t, get2Resp, AICacheRulesSchema)
+
+	// 定向合同锁：rules 元素键集合精确 7 字段，无 id/enabled/时间戳（#258）。
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(get2Resp.Data, &data))
+	rules, ok := data["rules"].([]interface{})
+	require.True(t, ok, "rules should be array")
+	require.Len(t, rules, 2)
+	wantStrategies := []string{"lastQuestion", "disabled"}
+	for i, item := range rules {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok, "rules[%d] should be object", i)
+		keys := make([]string, 0, len(rule))
+		for k := range rule {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t, []string{
+			"name", "cond", "cache_key_strategy", "cache_ttl",
+			"max_body_bytes", "max_value_bytes", "enable_semantic_cache",
+		}, keys, "rules[%d] keys must exactly match contract (no id/enabled/timestamps)", i)
+		assert.Equal(t, wantStrategies[i], rule["cache_key_strategy"])
+		assert.Equal(t, false, rule["enable_semantic_cache"], "omitted flag must default to false")
+	}
+
+	t.Cleanup(func() {
+		// 恢复空集合，避免影响其他模块。
+		_, _ = testutil.GetClient().Put("/open-api/v1/ai-cache-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+}
+
+// ---------- ai-cache-semantic-settings ----------
+
+// testAICacheSemanticSettingsSchema 覆盖语义全局设置单例（GET/PUT 同构）。
+// 两种响应形态共用 AICacheSemanticSettingsSchema：空表 GET 返回默认值对象
+// （无时间戳键，Optional 不校验缺席），写入后响应携带 created_at/updated_at
+// （Optional 存在即校验类型）。
+func testAICacheSemanticSettingsSchema(t *testing.T) {
+	// 写入自定义设置后 GET：3 必填 + 2 时间戳可选键形态。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-semantic-settings", map[string]interface{}{
+		"top_k": 4, "threshold": 0.5, "threshold_relation": "lte",
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, AICacheSemanticSettingsSchema)
+
+	getResp, err := testutil.GetClient().Get("/open-api/v1/ai-cache-semantic-settings")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, getResp)
+	testutil.AssertSchema(t, getResp, AICacheSemanticSettingsSchema)
+	testutil.AssertDataFieldEquals(t, getResp, "top_k", int64(4))
+	testutil.AssertDataFieldEquals(t, getResp, "threshold_relation", "lte")
+	testutil.AssertDataFieldNotEmpty(t, getResp, "created_at")
+	testutil.AssertDataFieldNotEmpty(t, getResp, "updated_at")
+
+	// 重置为全默认值，恢复空表等价形态（无时间戳），供默认值 schema 断言。
+	resetResp, err := testutil.GetClient().Put("/open-api/v1/ai-cache-semantic-settings", map[string]interface{}{
+		"top_k": 1, "threshold": 0.15, "threshold_relation": "lt",
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resetResp)
+}
+
+// ---------- ai-context-rules ----------
+
+// testAIContextSchema 覆盖 AI 上下文压缩规则集合（GET/PUT 同构）。
+// 集合级资源无 /{id} 端点："GET 单查" 即全量查询的重复拉取（唯一读形状）。
+// 另做定向断言：rules 元素键集合精确为合同 4 字段（cond/mode/max_context_tokens/
+// reserve_tokens），不得含内部 id/name/enabled，且不携带 created_at/updated_at
+// （整组替换语义，与 ai-cache-rules 不同；ai-context-rules.md §1）。
+func testAIContextSchema(t *testing.T) {
+	validCond := `req_path_in("/v1/chat/completions", false)`
+
+	// 建集合（PUT）：1 条 balanced 带显式预算 + 1 条 default_t() 兜底 off。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/ai-context-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"cond": validCond, "mode": "balanced",
+				"max_context_tokens": 64000, "reserve_tokens": 8192,
+			},
+			map[string]interface{}{"cond": "default_t()", "mode": "off"},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, AIContextRulesSchema)
+
+	// GET 列表（全量查询）。
+	listResp, err := testutil.GetClient().Get("/open-api/v1/ai-context-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, listResp)
+	testutil.AssertSchema(t, listResp, AIContextRulesSchema)
+
+	// GET 重复拉取（唯一读形状，等价单查）。
+	oneResp, err := testutil.GetClient().Get("/open-api/v1/ai-context-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, oneResp)
+	testutil.AssertSchema(t, oneResp, AIContextRulesSchema)
+
+	// 定向合同锁：rules 元素键集合精确 4 字段，无 id/name/enabled/timestamps；
+	// 可空字段回填 0，mode 枚举原样回读。
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(listResp.Data, &data))
+	rules, ok := data["rules"].([]interface{})
+	require.True(t, ok, "rules should be array")
+	require.Len(t, rules, 2)
+	wantModes := []string{"balanced", "off"}
+	for i, item := range rules {
+		rule, ok := item.(map[string]interface{})
+		require.True(t, ok, "rules[%d] should be object", i)
+		assert.ElementsMatch(t,
+			[]string{"cond", "mode", "max_context_tokens", "reserve_tokens"}, keysOfMap(rule),
+			"rules[%d] keys must exactly match contract (no id/name/enabled/timestamps)", i)
+		assert.Equal(t, wantModes[i], rule["mode"])
+	}
+	assert.Equal(t, float64(64000), rules[0].(map[string]interface{})["max_context_tokens"])
+	assert.Equal(t, float64(8192), rules[0].(map[string]interface{})["reserve_tokens"])
+	assert.Equal(t, float64(0), rules[1].(map[string]interface{})["max_context_tokens"])
+	assert.Equal(t, float64(0), rules[1].(map[string]interface{})["reserve_tokens"])
+
+	// 原始 body 不得出现内部/只读键（核心合同锁定，#201 幻影键不敏感）。
+	body := string(listResp.RawBody)
+	assert.NotContains(t, body, `"id"`)
+	assert.NotContains(t, body, `"name"`)
+	assert.NotContains(t, body, `"enabled"`)
+	assert.NotContains(t, body, "created_at")
+	assert.NotContains(t, body, "updated_at")
+
+	t.Cleanup(func() {
+		// 恢复空集合，避免影响其他模块。
+		_, _ = testutil.GetClient().Put("/open-api/v1/ai-context-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+}
+
+// ---------- ai-context-settings ----------
+
+// testAIContextSettingsSchema 覆盖 AI 上下文压缩全局设置单例（GET/PUT 同构）。
+// 空表 GET 默认值对象与 PUT 自定义后响应共用 AIContextSettingsSchema（同 7 顶层键，
+// rewrite 嵌套对象 2 键；无时间戳形态分叉）。定向断言：默认值 8 项、
+// rewrite 逐字段合并语义、响应无 created_at/updated_at。
+func testAIContextSettingsSchema(t *testing.T) {
+	settingsPath := "/open-api/v1/ai-context-settings"
+
+	// 空表 GET：默认值对象（本包独立数据库，源码顺序最先执行，表必为空）。
+	emptyResp, err := testutil.GetClient().Get(settingsPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyResp)
+	testutil.AssertSchema(t, emptyResp, AIContextSettingsSchema)
+	assertSettingsDefaults(t, emptyResp.Data)
+
+	// PUT 自定义（trigger_ratio + rewrite.strength 部分字段）：嵌套逐字段合并。
+	putResp, err := testutil.GetClient().Put(settingsPath, map[string]interface{}{
+		"trigger_ratio": 0.8,
+		"rewrite":       map[string]interface{}{"strength": "full"},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, AIContextSettingsSchema)
+
+	var putData map[string]interface{}
+	require.NoError(t, json.Unmarshal(putResp.Data, &putData))
+	assert.ElementsMatch(t,
+		[]string{
+			"trigger_ratio", "keep_latest_images", "tool_result_max_chars",
+			"thinking_policy", "chars_per_token", "image_token_estimate", "rewrite",
+		}, keysOfMap(putData), "settings keys must exactly match contract (no timestamps)")
+	assert.InDelta(t, 0.8, putData["trigger_ratio"], 1e-9)
+	putRewrite, ok := putData["rewrite"].(map[string]interface{})
+	require.True(t, ok, "rewrite should be object")
+	assert.Equal(t, "full", putRewrite["strength"])
+	assert.InDelta(t, 0.95, putRewrite["protected_survival_rate"], 1e-9,
+		"omitted rewrite field must fall back to default (field-wise merge)")
+	assert.Equal(t, float64(2), putData["keep_latest_images"], "omitted field must fall back to default")
+
+	// GET 回读同构。
+	getResp, err := testutil.GetClient().Get(settingsPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, getResp)
+	testutil.AssertSchema(t, getResp, AIContextSettingsSchema)
+	assert.Equal(t, putData, mustUnmarshalMap(t, getResp.Data), "GET readback must equal PUT response")
+
+	// 原始 body 不得出现时间戳键（与 ai-cache-settings 的形态差异点）。
+	body := string(getResp.RawBody)
+	assert.NotContains(t, body, "created_at")
+	assert.NotContains(t, body, "updated_at")
+
+	t.Cleanup(func() {
+		// 恢复全默认值（等价空表形态），避免影响其他模块。
+		_, _ = testutil.GetClient().Put(settingsPath, map[string]interface{}{})
+	})
+}
+
+// assertSettingsDefaults 定向断言空表默认值对象：8 项文档默认值 + rewrite 2 键。
+func assertSettingsDefaults(t *testing.T, data []byte) {
+	t.Helper()
+	payload := mustUnmarshalMap(t, data)
+	assert.InDelta(t, 0.7, payload["trigger_ratio"], 1e-9)
+	assert.Equal(t, float64(2), payload["keep_latest_images"])
+	assert.Equal(t, float64(2000), payload["tool_result_max_chars"])
+	assert.Equal(t, "trim-all-but-last", payload["thinking_policy"])
+	assert.Equal(t, float64(4), payload["chars_per_token"])
+	assert.Equal(t, float64(1200), payload["image_token_estimate"])
+	rewrite, ok := payload["rewrite"].(map[string]interface{})
+	require.True(t, ok, "rewrite should be object")
+	assert.Equal(t, "lite", rewrite["strength"])
+	assert.InDelta(t, 0.95, rewrite["protected_survival_rate"], 1e-9)
+}
+
+func mustUnmarshalMap(t *testing.T, data []byte) map[string]interface{} {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &payload))
+	return payload
+}
+
+// ---------- traffic-mirror-rules ----------
+
+// testTrafficMirrorSchema 覆盖流量镜像规则集合（GET/PUT 同构）。
+// 集合级资源无 /{id} 端点："GET 单查" 即全量查询的重复拉取（唯一读形状）。
+// 另做定向断言：最小提交规则恰为 6 固定键（可选键缺席），全字段提交恰为 10 键，
+// 均不得含内部 id、无 enabled（traffic-mirror-rules.md §1，家族1 省略语义 / #201 幻影键）。
+func testTrafficMirrorSchema(t *testing.T) {
+	clusterName, err := testutil.CreateCluster(testutil.UniqueClusterName())
+	require.NoError(t, err)
+
+	fixedKeys := []string{"name", "cond", "mirror_cluster", "percentage", "created_at", "updated_at"}
+	fullKeys := []string{
+		"name", "cond", "mirror_cluster", "percentage",
+		"remove_headers", "set_headers", "body_rewrites", "path_rewrite",
+		"created_at", "updated_at",
+	}
+
+	// 建集合（PUT）：1 条最小 + 1 条全字段。
+	putResp, err := testutil.GetClient().Put("/open-api/v1/traffic-mirror-rules", map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{"name": testutil.UniqueName("schema-tm-1"), "cond": `default_t()`, "mirror_cluster": clusterName},
+			map[string]interface{}{
+				"name": testutil.UniqueName("schema-tm-2"), "cond": `req_path_prefix_in("/v1/completions", true)`, "mirror_cluster": clusterName,
+				"percentage":     10,
+				"remove_headers": []interface{}{"Authorization"},
+				"set_headers":    map[string]interface{}{"X-A": "1"},
+				"body_rewrites":  []interface{}{map[string]interface{}{"path": "model", "value": "m2"}},
+				"path_rewrite":   "/v1/internal/x",
+			},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, TrafficMirrorRulesSchema)
+
+	// GET 列表（全量查询）。
+	listResp, err := testutil.GetClient().Get("/open-api/v1/traffic-mirror-rules")
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, listResp)
+	testutil.AssertSchema(t, listResp, TrafficMirrorRulesSchema)
+
+	// 定向合同锁：rules[0] 精确 6 固定键（可选键缺席），rules[1] 精确 10 键。
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(listResp.Data, &data))
+	rules, ok := data["rules"].([]interface{})
+	require.True(t, ok, "rules should be array")
+	require.Len(t, rules, 2)
+	for i, wantKeys := range [][]string{fixedKeys, fullKeys} {
+		rule, ok := rules[i].(map[string]interface{})
+		require.True(t, ok, "rules[%d] should be object", i)
+		keys := make([]string, 0, len(rule))
+		for k := range rule {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t, wantKeys, keys,
+			"rules[%d] keys must exactly match contract (no id/enabled)", i)
+	}
+
+	t.Cleanup(func() {
+		// 恢复空集合，避免影响其他模块。
+		_, _ = testutil.GetClient().Put("/open-api/v1/traffic-mirror-rules", map[string]interface{}{
+			"rules": []interface{}{},
+		})
+	})
+}
 
 // ---------- epp-pool ----------
 
@@ -756,7 +1200,6 @@ func testEppPoolSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -787,7 +1230,7 @@ func testEppPoolSchema(t *testing.T) {
 	g1 := groups[0].(map[string]interface{})
 	require.Equal(t, "g1", g1["name"])
 	insts := g1["instances"].([]interface{})
-	require.Len(t, insts, 2)
+	require.Len(t, insts, 1)
 	inst0 := insts[0].(map[string]interface{})
 	require.Equal(t, "epp-a", inst0["id"])
 	require.Equal(t, "10.0.0.1", inst0["host"])
@@ -804,7 +1247,6 @@ func testEppAssignmentsSchema(t *testing.T) {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -826,7 +1268,7 @@ func testEppAssignmentsSchema(t *testing.T) {
 	createResp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         clusterName,
 		"balance_mode": "EPP",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": providerName,
@@ -846,7 +1288,7 @@ func testEppAssignmentsSchema(t *testing.T) {
 	testutil.AssertSuccess(t, viewResp)
 	testutil.AssertSchema(t, viewResp, EppAssignmentsViewSchema)
 
-	assertAssignmentEntry(t, viewResp.Data, clusterName, false)
+	assertAssignmentEntry(t, viewResp.Data, clusterName)
 
 	idleVal, err := testutil.GetDataField(viewResp, "idle_groups")
 	require.NoError(t, err)
@@ -862,22 +1304,25 @@ func testEppAssignmentsSchema(t *testing.T) {
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, oneResp)
 	testutil.AssertSchema(t, oneResp, EppAssignmentsViewSchema)
-	assertAssignmentEntry(t, oneResp.Data, clusterName, false)
+	assertAssignmentEntry(t, oneResp.Data, clusterName)
 
-	// 手工覆写后单条响应结构（standby 换为另一实例）。
+	// 手工覆写到另一组后单条响应结构。
 	entry := findAssignmentEntry(t, oneResp.Data, clusterName)
-	standby := entry["standby"].(map[string]interface{})
+	origGroup := entry["group"].(string)
+	target := "g2"
+	if origGroup == "g2" {
+		target = "g1"
+	}
 	putResp, err := testutil.GetClient().Put("/open-api/v1/epp-assignments/"+clusterName, map[string]interface{}{
-		"group_name":          "g1",
-		"primary_instance_id": standby["id"],
+		"group_name": target,
 	})
 	require.NoError(t, err)
 	testutil.AssertSuccess(t, putResp)
 	testutil.AssertSchema(t, putResp, EppClusterAssignmentOverrideSchema)
 
-	putPrimary, err := testutil.GetDataField(putResp, "primary")
+	putGroup, err := testutil.GetDataField(putResp, "group")
 	require.NoError(t, err)
-	require.Equal(t, standby["id"], putPrimary.(map[string]interface{})["id"])
+	require.Equal(t, target, putGroup)
 }
 
 // findAssignmentEntry 从全量视图中取出指定 cluster 的分配条目。
@@ -898,19 +1343,337 @@ func findAssignmentEntry(t *testing.T, data []byte, clusterName string) map[stri
 	return nil
 }
 
-// assertAssignmentEntry 定向断言指定 cluster 已分配（group/primary/standby 非空）。
-func assertAssignmentEntry(t *testing.T, data []byte, clusterName string, unassigned bool) {
+// assertAssignmentEntry 定向断言指定 cluster 已分配（group 非空，视图中
+// 不含 primary/standby/instances/degraded 字段）。
+func assertAssignmentEntry(t *testing.T, data []byte, clusterName string) {
 	t.Helper()
 	entry := findAssignmentEntry(t, data, clusterName)
-	require.Equal(t, unassigned, entry["degraded"].(bool))
-	if unassigned {
-		require.Nil(t, entry["primary"])
-		return
-	}
 	require.NotNil(t, entry["group"])
-	primary, ok := entry["primary"].(map[string]interface{})
-	require.True(t, ok, "primary should be an object")
-	require.NotEmpty(t, primary["id"])
-	require.NotEmpty(t, primary["host"])
-	require.NotNil(t, entry["standby"])
+	for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+		require.NotContains(t, entry, legacy)
+	}
+}
+
+// ---------- intent-config ----------
+
+// testIntentConfigSchema 覆盖意图配置单例（GET/PUT 同构，单例级全量读写）。
+// 单例资源无 /{id} 端点："GET 单查" 即重复拉取（唯一读形状）。
+// 另做定向断言：顶层键精确为合同 4 字段，不得含内部 version、无 id/enabled
+// （单行覆盖式存储，intent-config.md §1）；questions 元素按 type 互斥
+// （choice 恰 4 键 / score 恰 5 键），不泄漏内部字段；空 questions 软开关
+// （questions: []）PUT/GET 往返合法。
+func testIntentConfigSchema(t *testing.T) {
+	intentPath := "/open-api/v1/intent-config"
+
+	// 未发布态：资源不存在错误码（Model.NullData → 404）。
+	notFoundResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, notFoundResp, 404)
+
+	// PUT 完整文档（1 choice + 1 score），含逐问题阈值覆盖。
+	putResp, err := testutil.GetClient().Put(intentPath, map[string]interface{}{
+		"min_confidence": 0.6,
+		"questions": []interface{}{
+			map[string]interface{}{
+				"name":         testutil.UniqueName("schema-ic-choice"),
+				"type":         "choice",
+				"instructions": "这条请求属于哪类研发任务？",
+				"criteria": map[string]interface{}{
+					"coding":       "编写或修改代码、调试、重构、代码审查",
+					"test_writing": "编写测试用例、单元测试、集成测试、补充断言",
+				},
+			},
+			map[string]interface{}{
+				"name":           testutil.UniqueName("schema-ic-score"),
+				"type":           "score",
+				"instructions":   "这个任务的复杂度如何？",
+				"min_confidence": 0.7,
+				"levels": []interface{}{
+					map[string]interface{}{"name": "simple", "description": "单步即可完成"},
+					map[string]interface{}{"name": "complex", "description": "需要深入推理"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, putResp)
+	testutil.AssertSchema(t, putResp, IntentConfigSchema)
+	assertIntentConfigContract(t, putResp.Data)
+
+	// GET（唯一读形状，与 PUT 响应同构）。
+	getResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, getResp)
+	testutil.AssertSchema(t, getResp, IntentConfigSchema)
+	assertIntentConfigContract(t, getResp.Data)
+
+	// 非法 PUT：参数错误码（422），配置保持原状。
+	invalidBodies := []map[string]interface{}{
+		// min_confidence 越界
+		{"min_confidence": 1.5, "questions": []interface{}{}},
+		// 选项名含 '|'
+		{"questions": []interface{}{map[string]interface{}{
+			"name": "schema-ic-pipe", "type": "choice", "instructions": "i",
+			"criteria": map[string]interface{}{"a|b": "d"},
+		}}},
+		// criteria/levels 互斥违反（choice 带 levels）
+		{"questions": []interface{}{map[string]interface{}{
+			"name": "schema-ic-mutex", "type": "choice", "instructions": "i",
+			"criteria": map[string]interface{}{"a": "b"},
+			"levels":   []interface{}{map[string]interface{}{"name": "l", "description": "d"}},
+		}}},
+		// questions 超 10 个
+		{"questions": make([]interface{}, 11)},
+	}
+	for _, body := range invalidBodies {
+		badResp, err := testutil.GetClient().Put(intentPath, body)
+		require.NoError(t, err)
+		testutil.AssertErrCode(t, badResp, 422)
+	}
+
+	// 拒绝后配置不变（仍是完整文档）。
+	unchangedResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, unchangedResp)
+	assertIntentConfigContract(t, unchangedResp.Data)
+
+	// 空 questions 软开关（questions: []）PUT/GET 往返合法。
+	emptyPutResp, err := testutil.GetClient().Put(intentPath, map[string]interface{}{"questions": []interface{}{}})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyPutResp)
+	testutil.AssertSchema(t, emptyPutResp, IntentConfigSchema)
+
+	var emptyData map[string]interface{}
+	require.NoError(t, json.Unmarshal(emptyPutResp.Data, &emptyData))
+	assert.ElementsMatch(t, []string{"min_confidence", "questions", "created_at", "updated_at"}, keysOfMap(emptyData))
+	assert.Empty(t, emptyData["questions"], "questions:[] must round trip as empty array")
+
+	emptyGetResp, err := testutil.GetClient().Get(intentPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyGetResp)
+	testutil.AssertSchema(t, emptyGetResp, IntentConfigSchema)
+	emptyQuestions, err := testutil.GetDataField(emptyGetResp, "questions")
+	require.NoError(t, err)
+	assert.Empty(t, emptyQuestions)
+}
+
+// assertIntentConfigContract 定向合同锁：顶层键精确 4 字段（无 version/id/enabled），
+// questions[0]（choice）恰 4 键、questions[1]（score）恰 5 键（互斥 + 逐问题阈值），
+// levels 元素恰 {name,description}，均不泄漏内部字段（intent-config.md §1/§2.2）。
+func assertIntentConfigContract(t *testing.T, data []byte) {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &payload))
+
+	assert.ElementsMatch(t,
+		[]string{"min_confidence", "questions", "created_at", "updated_at"}, keysOfMap(payload),
+		"top-level keys must exactly match contract (no version/id/enabled)")
+
+	questions, ok := payload["questions"].([]interface{})
+	require.True(t, ok, "questions should be array")
+	require.Len(t, questions, 2)
+
+	choice, ok := questions[0].(map[string]interface{})
+	require.True(t, ok, "questions[0] should be object")
+	assert.ElementsMatch(t,
+		[]string{"name", "type", "instructions", "criteria"}, keysOfMap(choice),
+		"choice question keys must exactly match contract (no levels, no internal fields)")
+	assert.Equal(t, "choice", choice["type"])
+
+	score, ok := questions[1].(map[string]interface{})
+	require.True(t, ok, "questions[1] should be object")
+	assert.ElementsMatch(t,
+		[]string{"name", "type", "instructions", "min_confidence", "levels"}, keysOfMap(score),
+		"score question keys must exactly match contract (no criteria, per-question threshold exported)")
+	assert.Equal(t, "score", score["type"])
+	assert.InDelta(t, 0.7, score["min_confidence"], 1e-9)
+
+	levels, ok := score["levels"].([]interface{})
+	require.True(t, ok, "levels should be array")
+	require.NotEmpty(t, levels)
+	for i, item := range levels {
+		level, ok := item.(map[string]interface{})
+		require.True(t, ok, "levels[%d] should be object", i)
+		assert.ElementsMatch(t, []string{"name", "description"}, keysOfMap(level),
+			"levels[%d] must not leak internal fields", i)
+	}
+
+	// 原始 body 不得出现内部 version 键（下发链路内部字段，核心断言）。
+	assert.NotContains(t, string(data), `"version"`)
+	assert.NotContains(t, string(data), `"id"`)
+	assert.NotContains(t, string(data), `"enabled"`)
+}
+
+func keysOfMap(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// ---------- batches ----------
+
+// testBatchSchema 覆盖批量任务详情端点（batches.md §3.2）：Data 即任务对象
+// 本身（无 task/files 包装层），关联 batch_files 为 §2.2 视图形状。
+// 定向断言：batch_files 元素键集合精确锁（防内部字段泄漏回归，issue #249）；
+// 无关联文件时 batch_files 键缺席（omitempty）。
+func testBatchSchema(t *testing.T) {
+	db := helper.OpenDB(t, sm)
+
+	// 带输入/输出文件的任务。
+	tag := helper.Unique("schema-bt")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: tag, APIKeyID: tag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Endpoint: "/v1/batches",
+		InputFileID: tag + "-in", OutputFileID: tag + "-out",
+		Status: "in_progress", SettleStatus: "reserved", SyncSource: "log",
+		IdemKey: tag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, tag)
+	helper.InsertBatchFile(t, db, helper.BatchFileRow{
+		FileID: tag + "-in", Provider: "deepseek", APIKeyID: tag + "-ak",
+		ProductName: helper.TestProductName, Direction: "input", Purpose: "batch_input",
+		Filename: "input.jsonl", Bytes: 1024,
+	})
+	defer helper.DeleteBatchFile(t, db, tag+"-in", "deepseek")
+
+	resp, err := testutil.GetClient().Get("/open-api/v1/batches/" + tag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, resp)
+	testutil.AssertSchema(t, resp, BatchTaskDetailSchema)
+
+	payload := mustUnmarshalMap(t, resp.Data)
+	_, hasTask := payload["task"]
+	_, hasFiles := payload["files"]
+	assert.False(t, hasTask, "Data.task wrapper must not exist (batches.md §3.2)")
+	assert.False(t, hasFiles, "Data.files wrapper must not exist (batches.md §3.2)")
+
+	filesVal, ok := payload["batch_files"].([]interface{})
+	require.True(t, ok, "batch_files should be array")
+	require.Len(t, filesVal, 1)
+	elem, ok := filesVal[0].(map[string]interface{})
+	require.True(t, ok, "batch_files[0] should be object")
+	// issue #254：filename 由 provider File 对象落库后纳入 §2.2 六字段锁。
+	assert.ElementsMatch(t,
+		[]string{"file_id", "provider", "purpose", "filename", "bytes", "created_at"}, keysOfMap(elem),
+		"batch_files element keys must exactly match contract (batches.md §2.2, no internal fields)")
+	assert.Equal(t, "input.jsonl", elem["filename"])
+
+	// 无关联文件的任务：batch_files 键缺席（omitempty）。
+	bareTag := helper.Unique("schema-bt-bare")
+	helper.InsertBatchTask(t, db, helper.BatchTaskRow{
+		BatchID: bareTag, APIKeyID: bareTag + "-ak", ProductName: helper.TestProductName,
+		Provider: "deepseek", Status: "queued", SettleStatus: "reserved",
+		SyncSource: "redis", IdemKey: bareTag + "-idem",
+	})
+	defer helper.DeleteBatchTask(t, db, bareTag)
+
+	bareResp, err := testutil.GetClient().Get("/open-api/v1/batches/" + bareTag)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, bareResp)
+	testutil.AssertSchema(t, bareResp, BatchTaskDetailSchema)
+	_, hasBatchFiles := mustUnmarshalMap(t, bareResp.Data)["batch_files"]
+	assert.False(t, hasBatchFiles, "batch_files must be omitted when no associated files")
+}
+
+
+// ---------- security/reencrypt-sweeps ----------
+
+// testSecuritySchema 覆盖密钥收敛任务三端点的响应形状（security.md）：
+// POST 触发（触发响应不回填 created_by/时间/summary）、GET by task_id
+// 与 GET 列表（任务对象含 created_by/finished_at 终态形态）。
+// 本模块服务器无 keyring：reencrypt 模式空收敛（transform 直接 skip），
+// dry-run 任务必然 succeeded——语义用例见 secret_at_rest SAR-3-xxx，
+// 此处只锁报文形状。列表过滤带参 GET 只做形状 sanity（total 断言）。
+func testSecuritySchema(t *testing.T) {
+	const sweepPath = "/open-api/v1/security/reencrypt-sweeps"
+
+	// 零任务：空列表 + 分页结构。
+	emptyResp, err := testutil.GetClient().Get(sweepPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, emptyResp)
+	testutil.AssertPagedListSchema(t, emptyResp, SweepTaskSchema)
+
+	// 触发 dry-run（无 keyring：active_key_id=0 为合法形态，不锁枚举）。
+	triggerResp, err := testutil.GetClient().Post(sweepPath, map[string]interface{}{
+		"mode": "reencrypt", "dry_run": true, "scope": "providers",
+	})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, triggerResp)
+	testutil.AssertSchema(t, triggerResp, SweepTriggerSchema)
+	taskIDVal, err := testutil.GetDataField(triggerResp, "task_id")
+	require.NoError(t, err)
+	taskID := taskIDVal.(string)
+	require.NotEmpty(t, taskID)
+
+	// 非法 mode：422。
+	badResp, err := testutil.GetClient().Post(sweepPath, map[string]interface{}{"mode": "rot13"})
+	require.NoError(t, err)
+	testutil.AssertErrCode(t, badResp, 422)
+
+	// 轮询至终态：summary/finished_at/duration_ms 完成时落库，终态形态可锁。
+	waitSweepTaskTerminal(t, sweepPath, taskID)
+
+	// GET by task_id：任务对象全字段 + 键集合合同锁（12 键，无内部字段）。
+	oneResp, err := testutil.GetClient().Get(sweepPath + "/" + taskID)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, oneResp)
+	testutil.AssertSchema(t, oneResp, SweepTaskSchema)
+	assert.ElementsMatch(t,
+		[]string{"task_id", "status", "mode", "dry_run", "scope", "active_key_id",
+			"created_by", "started_at", "finished_at", "duration_ms", "summary", "error"},
+		keysOfMap(mustUnmarshalMap(t, oneResp.Data)),
+		"task keys must exactly match contract (security.md §1)")
+	// dry-run 终态任务 error 固定 "dry_run"（§1 修正语义）。
+	testutil.AssertDataFieldEquals(t, oneResp, "error", "dry_run")
+
+	// GET 列表：1 元素 + total=1。
+	listResp, err := testutil.GetClient().Get(sweepPath)
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, listResp)
+	testutil.AssertPagedListSchema(t, listResp, SweepTaskSchema)
+	var listPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(listResp.Data, &listPayload))
+	pagination, ok := listPayload["pagination"].(map[string]interface{})
+	require.True(t, ok, "pagination should be object")
+	require.Equal(t, float64(1), pagination["total"])
+
+	// 带参 GET（过滤形状 sanity）：status+dry_run 命中 1，running 命中 0。
+	filteredResp, err := testutil.GetClient().Get(sweepPath, map[string]string{"status": "succeeded", "dry_run": "true"})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, filteredResp)
+	testutil.AssertPagedListSchema(t, filteredResp, SweepTaskSchema)
+	var filteredPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(filteredResp.Data, &filteredPayload))
+	require.Equal(t, float64(1), filteredPayload["pagination"].(map[string]interface{})["total"])
+
+	runningResp, err := testutil.GetClient().Get(sweepPath, map[string]string{"status": "running"})
+	require.NoError(t, err)
+	testutil.AssertSuccess(t, runningResp)
+	testutil.AssertPagedListSchema(t, runningResp, SweepTaskSchema)
+	var runningPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(runningResp.Data, &runningPayload))
+	require.Equal(t, float64(0), runningPayload["pagination"].(map[string]interface{})["total"])
+}
+
+// waitSweepTaskTerminal 轮询任务至非 running 终态，要求 succeeded，返回 Data。
+func waitSweepTaskTerminal(t *testing.T, sweepPath, taskID string) map[string]interface{} {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp, err := testutil.GetClient().Get(sweepPath + "/" + taskID)
+		require.NoError(t, err)
+		testutil.AssertSuccess(t, resp)
+		payload := mustUnmarshalMap(t, resp.Data)
+		if status, _ := payload["status"].(string); status != "running" {
+			require.Equal(t, "succeeded", status, "task %s must succeed (schema server has no keyring, dry-run only scans)", taskID)
+			return payload
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sweep task %s not terminal in 15s", taskID)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

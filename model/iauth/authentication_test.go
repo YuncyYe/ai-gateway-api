@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xcrypto"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/stretchr/testify/assert"
@@ -171,6 +172,87 @@ func TestAuthenticateManager_Authenticate_Password(t *testing.T) {
 			Type:     AuthTypePassword,
 			Identify: "alice",
 			Extend:   "wrong",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Password Wrong")
+	})
+
+	t.Run("bcrypt stored password", func(t *testing.T) {
+		require.NoError(t, xcrypto.SetPasswordHashCost(4))
+		t.Cleanup(func() {
+			require.NoError(t, xcrypto.SetPasswordHashCost(xcrypto.DefaultPasswordHashCost))
+		})
+		userName := "alice"
+		hashed, err := xcrypto.HashPassword("secret123")
+		require.NoError(t, err)
+		store := &fakeAuthenticateStorager{
+			fetchUserFn: func(ctx context.Context, param *UserFilter) (*User, error) {
+				if param.SessionKey != nil {
+					return nil, nil // session-key collision check: never taken
+				}
+				return &User{Name: userName, Password: hashed}, nil
+			},
+			updateUserFn: func(ctx context.Context, user *User, param *UserParam) error {
+				assert.Nil(t, param.Password, "hashed row must not be re-hashed")
+				return nil
+			},
+		}
+		m := NewAuthenticateManager(&fakeTxn{}, store, &fakeAuthorizeStorager{})
+
+		v, err := m.Authenticate(ctx, &AuthenticateParam{
+			Type:     AuthTypePassword,
+			Identify: userName,
+			Extend:   "secret123",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, v)
+		assert.Equal(t, userName, v.GetName())
+	})
+
+	t.Run("legacy plaintext migrates on login", func(t *testing.T) {
+		require.NoError(t, xcrypto.SetPasswordHashCost(4))
+		t.Cleanup(func() {
+			require.NoError(t, xcrypto.SetPasswordHashCost(xcrypto.DefaultPasswordHashCost))
+		})
+		store := &fakeAuthenticateStorager{
+			fetchUserFn: func(ctx context.Context, param *UserFilter) (*User, error) {
+				if param.SessionKey != nil {
+					return nil, nil // session-key collision check: never taken
+				}
+				return &User{Name: "alice", Password: "secret123"}, nil
+			},
+			updateUserFn: func(ctx context.Context, user *User, param *UserParam) error {
+				require.NotNil(t, param.Password)
+				assert.True(t, xcrypto.IsHashedPassword(*param.Password),
+					"legacy plaintext must be re-hashed on login, got %q", *param.Password)
+				assert.NotNil(t, param.SessionKey)
+				return nil
+			},
+		}
+		m := NewAuthenticateManager(&fakeTxn{}, store, &fakeAuthorizeStorager{})
+
+		v, err := m.Authenticate(ctx, &AuthenticateParam{
+			Type:     AuthTypePassword,
+			Identify: "alice",
+			Extend:   "secret123",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, v)
+		assert.True(t, xcrypto.IsHashedPassword(v.User.Password))
+	})
+
+	t.Run("SKIP literal no longer bypasses", func(t *testing.T) {
+		store := &fakeAuthenticateStorager{
+			fetchUserFn: func(ctx context.Context, param *UserFilter) (*User, error) {
+				return &User{Name: "alice", Password: "realpass"}, nil
+			},
+		}
+		m := NewAuthenticateManager(&fakeTxn{}, store, &fakeAuthorizeStorager{})
+
+		_, err := m.Authenticate(ctx, &AuthenticateParam{
+			Type:     AuthTypePassword,
+			Identify: "alice",
+			Extend:   "SKIP",
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Password Wrong")
@@ -369,6 +451,9 @@ func TestAuthenticateManager_CreateUser(t *testing.T) {
 				return nil, nil
 			},
 			createUserFn: func(ctx context.Context, param *UserParam) error {
+				require.NotNil(t, param.Password)
+				assert.True(t, xcrypto.IsHashedPassword(*param.Password),
+					"storager must receive the hashed password, got %q", *param.Password)
 				return nil
 			},
 		}
@@ -387,7 +472,7 @@ func TestAuthenticateManager_CreateUser(t *testing.T) {
 		password := "123"
 		err := m.CreateUser(ctx, &UserParam{Password: &password})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Password Lenght Must Bigger Than 6")
+		assert.Contains(t, err.Error(), "Password Length Must Be Between 8 and 72 Bytes")
 	})
 
 	t.Run("user existed", func(t *testing.T) {
@@ -449,18 +534,49 @@ func TestAuthenticateManager_UpdateUserPassword(t *testing.T) {
 	ctx := context.Background()
 	setupConfig(t)
 
-	t.Run("success", func(t *testing.T) {
+	t.Run("success with legacy plaintext old password", func(t *testing.T) {
 		store := &fakeAuthenticateStorager{
 			fetchUserFn: func(ctx context.Context, param *UserFilter) (*User, error) {
 				return &User{Name: "alice", Password: "oldpass"}, nil
 			},
 			updateUserFn: func(ctx context.Context, user *User, param *UserParam) error {
+				require.NotNil(t, param.Password)
+				assert.True(t, xcrypto.IsHashedPassword(*param.Password),
+					"new password must be stored hashed, got %q", *param.Password)
 				return nil
 			},
 		}
 		m := NewAuthenticateManager(&fakeTxn{}, store, &fakeAuthorizeStorager{})
 
 		err := m.UpdateUserPassword(ctx, &PasswordChangeData{
+			UserName:    "alice",
+			OldPassword: "oldpass",
+			Password:    "newpass123",
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("success with bcrypt old password", func(t *testing.T) {
+		require.NoError(t, xcrypto.SetPasswordHashCost(4))
+		t.Cleanup(func() {
+			require.NoError(t, xcrypto.SetPasswordHashCost(xcrypto.DefaultPasswordHashCost))
+		})
+		hashedOld, err := xcrypto.HashPassword("oldpass")
+		require.NoError(t, err)
+		store := &fakeAuthenticateStorager{
+			fetchUserFn: func(ctx context.Context, param *UserFilter) (*User, error) {
+				return &User{Name: "alice", Password: hashedOld}, nil
+			},
+			updateUserFn: func(ctx context.Context, user *User, param *UserParam) error {
+				require.NotNil(t, param.Password)
+				assert.True(t, xcrypto.IsHashedPassword(*param.Password),
+					"new password must be stored hashed, got %q", *param.Password)
+				return nil
+			},
+		}
+		m := NewAuthenticateManager(&fakeTxn{}, store, &fakeAuthorizeStorager{})
+
+		err = m.UpdateUserPassword(ctx, &PasswordChangeData{
 			UserName:    "alice",
 			OldPassword: "oldpass",
 			Password:    "newpass123",

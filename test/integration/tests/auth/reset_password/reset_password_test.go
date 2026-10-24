@@ -78,6 +78,28 @@ func TestAuth_ResetPassword(t *testing.T) {
 		testutil.AssertErrCode(t, resp, 404)
 	})
 
+	t.Run("AUTH-3-005 管理员代改内置 admin 密码", func(t *testing.T) {
+		// issue #226：保留名校验不得阻断对内置账号的引用。
+		// 集成环境 SkipTokenValidate=true，visitor 为 SkipUser，走代改路径无需 old_password。
+		resp, err := testutil.GetClient().Patch("/open-api/v1/auth/users/admin/passwd", map[string]interface{}{
+			"password": "admin-reset@789",
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+	})
+
+	t.Run("AUTH-3-006 密码 7 字节边界（tag min=8 拦截）", func(t *testing.T) {
+		resp, err := testutil.GetClient().Patch("/open-api/v1/auth/users/"+userName+"/passwd", map[string]interface{}{
+			"password": "short12",
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+	})
+
 	t.Cleanup(func() {
 		testutil.DeleteUser(userName)
 	})

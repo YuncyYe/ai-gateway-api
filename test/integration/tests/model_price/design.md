@@ -41,7 +41,8 @@ Model Price 模块负责模型定价数据的管理，支持：
 | 按组合键删除单条 | 2 |
 | 查询 Provider 名称列表 | 2 |
 | tier_prices 字段场景 | 6 |
-| **合计** | **44** |
+| batch_discount 专项（MPB） | 4 |
+| **合计** | **48** |
 
 ## 4. 认证方式
 
@@ -68,6 +69,8 @@ model_price/
 │   └── get_providers_test.go
 └── tier_prices/
     └── tier_prices_test.go
+└── batch_price/
+    └── batch_price_test.go      # mode=batch 定价 + batch_discount 校验与 Inner 导出展开（MPB）
 ```
 
 ## 6. 测试数据约定
@@ -1173,7 +1176,38 @@ models:
 
 ---
 
-## 18. 附录
+## 18. batch_discount 专项（MPB，2026-10-07 批量与异步任务支持一期）
+
+### 18.1 测试目标
+
+验证批量定价能力：`mode=batch` 价格行 CRUD；`batch_discount`（(0,1]
+区间）校验；InnerAPI 导出 `ModelTable` 时携带 `batch_discount` 的非
+batch 行自动展开为 `mode=batch` 行，展开价 = 基价 × discount（8 位小数
+定点舍入，口径 `batchPricePrecision=1e8`）；未配置 discount 的行无展开行。
+
+### 18.2 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| MPB-1-001 | 创建 mode=batch 价格行 | 正常参数 | 创建成功，mode 回读一致 |
+| MPB-1-002 | chat 行携带 batch_discount=0.5 | 正常参数 | 创建成功，discount 精确回读 |
+| MPB-1-003 | 非法 batch_discount | 合法性条件 | 0 / -0.5 / 1.5 三例，返回 422 |
+| MPB-1-004 | Inner 导出展开 | 返回数据 | 带 discount 的行展开 mode=batch 行且价格=基价×0.5（1e-8 定点）；不带 discount 的行无展开行 |
+
+### 18.3 断言要点
+
+- 导出取数复用 MP-5-004 配方：显式创建 provider（models 覆盖被测模型）
+  + cluster 引用，读 `/inner-api/v1/configs/tls_conf/server_data_conf` 的
+  `ClusterConf.Config.{cluster}.AIConf.ModelTable.Models`；
+- 展开价定点比较：`expected = round(base × 0.5 × 1e8) / 1e8`，
+  InDelta 1e-12；chat 原行价格不受折扣影响；
+- 手工维护的 `(provider, model, mode=batch)` 行优先于展开（实现含该
+  分支与告警日志）——本专项不重复覆盖，由 model 层单测
+  `cluster_batch_price_test.go` 承担。
+
+---
+
+## 19. 附录
 
 ### 18.1 通用断言说明
 

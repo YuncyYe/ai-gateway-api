@@ -15,9 +15,11 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xmask"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xreq"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
@@ -49,7 +51,28 @@ func tokenOneActionProcess(req *http.Request) (*TokenData, error) {
 		return nil, xerror.WrapRecordNotExist("Token")
 	}
 
-	return newTokenData(list[0], true), nil
+	data := newTokenData(list[0], true)
+	if err := maskTokensIfReadonly(req.Context(), data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// maskTokensIfReadonly masks the token value for the read-only system admin
+// (系统管理员（只读）). Full admins are never masked; Support tokens cannot
+// reach these read endpoints (403 at authorization).
+func maskTokensIfReadonly(ctx context.Context, tokens ...*TokenData) error {
+	v, err := iauth.MustGetVisitor(ctx)
+	if err != nil {
+		return err
+	}
+	if !v.IsSystemReadonly() {
+		return nil
+	}
+	for _, t := range tokens {
+		t.Token = xmask.Secret(t.Token)
+	}
+	return nil
 }
 
 var _ xreq.Handler = TokenOneAction

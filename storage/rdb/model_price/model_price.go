@@ -210,6 +210,7 @@ func toDAOParam(param *imodel_price.ModelPrice) (*dao.TModelPriceParam, error) {
 		Limits:              limits,
 		Prices:              prices,
 		TierPrices:          tierPrices,
+		BatchDiscount:       param.BatchDiscount,
 		PriceCurrency:       lib.PString(param.PriceCurrency),
 		Metadata:            metadata,
 	}, nil
@@ -246,6 +247,7 @@ func fromDAO(one *dao.TModelPrice) *imodel_price.ModelPrice {
 		Limits:              unmarshalMap(one.Limits),
 		Prices:              unmarshalPriceMap(one.Prices),
 		TierPrices:          unmarshalTierPrices(one.TierPrices),
+		BatchDiscount:       one.BatchDiscount,
 		PriceCurrency:       one.PriceCurrency,
 		Metadata:            unmarshalMap(one.Metadata),
 		CreateTime:          &createTime,

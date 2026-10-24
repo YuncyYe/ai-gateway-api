@@ -31,10 +31,12 @@ package icluster_conf
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 
 	"github.com/bfenetworks/bfe/bfe_config/bfe_cluster_conf/cluster_conf"
 	"github.com/bfenetworks/bfe/bfe_config/bfe_route_conf/route_rule_conf"
+	"github.com/bfenetworks/go-lib/log"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
@@ -152,6 +154,10 @@ type ClusterParam struct {
 	// configuration (user shape, unset keys not persisted). Non-empty values
 	// are validated regardless of BalanceMode; required when BalanceMode=EPP.
 	EppConfig *string
+	// EppRuntime is the raw JSON of the BFE-side EPP runtime parameters
+	// (check/timeout, unset keys not persisted). Non-empty values are validated
+	// regardless of BalanceMode; only exported when BalanceMode=EPP.
+	EppRuntime *string
 
 	// InstancePool auto-creates instance-pool and sub-cluster from these instances
 	InstancePool []Instance
@@ -221,13 +227,28 @@ type KeyAffinity struct {
 	PenaltyEnable *bool   `json:"penalty_enable"` // default true
 }
 
+// NormalizeUpstreamError configures upstream error normalization (unified
+// error codes) for this cluster. Nil means disabled: the exported AIConf
+// carries no NormalizeUpstreamError and BFE keeps the historical
+// pass-through behavior. Field semantics and validation mirror the BFE
+// AIConfCheck rules (no default synthesis here; BFE Effective() applies
+// defaults at load time).
+type NormalizeUpstreamError struct {
+	Enabled            *bool   `json:"enabled"`             // non-streaming normalization switch, default false
+	StreamEnabled      *bool   `json:"stream_enabled"`      // streaming (SSE) normalization switch, default false
+	UnrecognizedAction *string `json:"unrecognized_action"` // passthrough / rewrite_generic
+	MaxBodyBytes       *int64  `json:"max_body_bytes"`      // error body read limit; <=0/unset uses BFE default 65536
+	RedactSecrets      *bool   `json:"redact_secrets"`      // credential redaction; nil = BFE default true, explicit false disables
+}
+
 type LLMConfig struct {
-	Models        []string        `json:"models"`         // model name list
-	ModelMappings []*Mapping      `json:"model_mappings"` // model mapping
-	Keys          []ClusterKeyRef `json:"keys"`           // references to provider keys with weights
-	KeyPolicy     *KeyPolicy      `json:"key_policy"`     // key routing policy
-	KeyAffinity   *KeyAffinity    `json:"key_affinity"`   // session-level key affinity
-	Provider      *string         `json:"provider"`       // provider name; required
+	Models                 []string                `json:"models"`                   // model name list
+	ModelMappings          []*Mapping              `json:"model_mappings"`           // model mapping
+	Keys                   []ClusterKeyRef         `json:"keys"`                     // references to provider keys with weights
+	KeyPolicy              *KeyPolicy              `json:"key_policy"`               // key routing policy
+	KeyAffinity            *KeyAffinity            `json:"key_affinity"`             // session-level key affinity
+	NormalizeUpstreamError *NormalizeUpstreamError `json:"normalize_upstream_error"` // upstream error normalization (unified error codes)
+	Provider               *string                 `json:"provider"`                 // provider name; required
 
 	// MatchPrefix defines the provider/model prefix this cluster matches.
 	// Must end with '/' to avoid matching model names themselves.
@@ -298,6 +319,9 @@ type Cluster struct {
 	// EppConfig is the raw JSON of the simplified EPP scheduling configuration
 	// (empty means unset). Stored verbatim so GET round-trips the written value.
 	EppConfig string
+	// EppRuntime is the raw JSON of the BFE-side EPP runtime parameters
+	// (empty means unset). Stored verbatim so GET round-trips the written value.
+	EppRuntime string
 }
 
 func (cluster *Cluster) SubClusterNames() []string {
@@ -437,6 +461,16 @@ func (cm *ClusterManager) CreateCluster(ctx context.Context, product *ibasic.Pro
 		*param.EppConfig = eppConfigRaw
 	}
 
+	eppRuntimeRaw, err := validateClusterEppRuntime(param.EppRuntime)
+	if err != nil {
+		return err
+	}
+	if eppRuntimeRaw == nil {
+		param.EppRuntime = nil
+	} else if param.EppRuntime != nil {
+		*param.EppRuntime = *eppRuntimeRaw
+	}
+
 	var clusterID int64
 	err = cm.txn.AtomExecute(ctx, func(ctx context.Context) error {
 		old, err := cm.storager.FetchClusterList(ctx, &ClusterFilter{
@@ -483,12 +517,15 @@ func (cm *ClusterManager) CreateCluster(ctx context.Context, product *ibasic.Pro
 			// balance_mode=EPP creates a Role=EPP pool that still carries the
 			// provider instance list, so cluster_table export has RS entries for
 			// EPP backend discovery and BFE local fallback (design-changes.md §2.3);
-			// WRR keeps the same provider-snapshot path.
+			// WRR keeps the same provider-snapshot path. The snapshot uses the
+			// provider's effective pool, so a k8s_pool-mode provider with an
+			// empty mirror yields an empty (but present) pool — the clear
+			// semantics required by the k8s_pool flow.
 			poolRole := ProductPoolRoleCommon
 			if balanceMode == BalanceModeEPP {
 				poolRole = ProductPoolRoleEPP
 			}
-			poolInstances := providerInstancesToClusterInstances(provider.InstancePool)
+			poolInstances := providerInstancesToClusterInstances(iprovider.EffectiveInstancePool(provider))
 
 			pool, err := cm.poolStorager.CreatePool(ctx, product, &PoolParam{
 				Name:      &poolName,
@@ -762,6 +799,17 @@ func (cm *ClusterManager) UpdateCluster(ctx context.Context, product *ibasic.Pro
 		*param.EppConfig = eppConfigRaw
 	}
 
+	eppRuntimeRaw, err := validateClusterEppRuntime(param.EppRuntime)
+	if err != nil {
+		cm.recordClusterOperation(ctx, string(ioperlog.ActionUpdate), oldData.ID, oldData.Name, clusterToMap(oldData), clusterParamToMap(param), err)
+		return err
+	}
+	if eppRuntimeRaw == nil {
+		param.EppRuntime = nil
+	} else if param.EppRuntime != nil {
+		*param.EppRuntime = *eppRuntimeRaw
+	}
+
 	err = cm.txn.AtomExecute(ctx, func(ctx context.Context) error {
 		// Validate and sync provider changes.
 		if param.LLMConfig != nil && param.LLMConfig.Provider != nil && *param.LLMConfig.Provider != "" {
@@ -896,17 +944,15 @@ func providerModelsEqual(a, b []string) bool {
 	return true
 }
 
-// ProviderInstancePoolSyncer returns a hook suitable for passing to
-// iprovider.ProviderManager.UpdateProvider. When the provider's instance_pool
-// changes, it updates the instance pool of every non-EPP sub-cluster that
-// references the provider to match the new provider instances.
-func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
-	oldProvider, newProvider *iprovider.Provider) error {
-
-	if newProvider == nil || len(newProvider.InstancePool) == 0 {
-		return nil
-	}
-	if oldProvider != nil && providerInstancePoolEqual(oldProvider.InstancePool, newProvider.InstancePool) {
+// SyncProviderEffectivePool propagates the provider's effective instance pool
+// to every sub-cluster pool of clusters referencing the provider. An empty
+// effective pool is written as an empty instance list (clear semantics): K8s
+// instances come and go dynamically, and "pool does not exist" must be
+// equivalent to "zero instances" downstream. EPP-role pools are synced as
+// well since they carry the provider instance snapshot for EPP backend
+// discovery and BFE local fallback.
+func (cm *ClusterManager) SyncProviderEffectivePool(ctx context.Context, provider *iprovider.Provider) error {
+	if provider == nil {
 		return nil
 	}
 
@@ -915,12 +961,15 @@ func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
 		return err
 	}
 
-	newInstances := providerInstancesToClusterInstances(newProvider.InstancePool)
+	// providerInstancesToClusterInstances always returns a non-nil slice, so
+	// an empty effective pool is stored as "[]" instead of being skipped by
+	// the DAO nil-skip (which would leave stale instances behind).
+	newInstances := providerInstancesToClusterInstances(iprovider.EffectiveInstancePool(provider))
 	for _, cluster := range clusters {
 		if cluster.LLMConfig == nil || cluster.LLMConfig.Provider == nil {
 			continue
 		}
-		if *cluster.LLMConfig.Provider != newProvider.Name {
+		if *cluster.LLMConfig.Provider != provider.Name {
 			continue
 		}
 
@@ -928,10 +977,6 @@ func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
 			if sc.InstancePool == nil {
 				continue
 			}
-			// EPP-role pools are synced as well: they carry the provider
-			// instance snapshot for EPP backend discovery and BFE local
-			// fallback, so instance_pool changes (e.g. weight=0 drain) must
-			// reach them too (same rationale as the creation path).
 			if err := cm.poolStorager.UpdatePool(ctx, sc.InstancePool, &PoolParam{
 				Instances: newInstances,
 			}); err != nil {
@@ -941,6 +986,25 @@ func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
 	}
 
 	return nil
+}
+
+// ProviderInstancePoolSyncer returns a hook suitable for passing to
+// iprovider.ProviderManager.UpdateProvider. When the provider's effective
+// instance pool changes (including mode switches and becoming empty), it
+// updates the instance pool of every sub-cluster that references the provider
+// to match the new effective instances.
+func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
+	oldProvider, newProvider *iprovider.Provider) error {
+
+	if newProvider == nil {
+		return nil
+	}
+	if oldProvider != nil && providerInstancePoolEqual(
+		iprovider.EffectiveInstancePool(oldProvider), iprovider.EffectiveInstancePool(newProvider)) {
+		return nil
+	}
+
+	return cm.SyncProviderEffectivePool(ctx, newProvider)
 }
 
 // ProviderKeyRefChecker returns a hook that verifies all clusters referencing
@@ -1210,7 +1274,7 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 	providerProtocolTable map[string][]string,
 	providerProtocolPathsTable map[string]map[string]string,
 	providerPricingTable map[string]ProviderPricingInfo,
-	eppResolver EPPAssignmentResolver) *cluster_conf.BfeClusterConf {
+	eppResolver EPPAssignmentResolver) (*cluster_conf.BfeClusterConf, error) {
 	clusterConfMap := cluster_conf.ClusterToConf{}
 
 	int322intp := func(i int32) *int {
@@ -1261,13 +1325,44 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 		}
 
 		if balanceMode := cluster.getBalanceMode(); balanceMode == BalanceModeEPP {
-			// EPPAddr is assignment-driven ([0]=primary, [1]=standby). Without a
-			// valid assignment the cluster degrades to WRR without EPPAddr and an
-			// error-level log is emitted; the rest of the export is unaffected
-			// (design-changes.md §4.3).
+			// EPPAddr is assignment-driven: the assigned group's instance
+			// addresses (a single address in the current single-instance
+			// stage). Without a valid assignment the cluster degrades to WRR
+			// without EPPAddr and an error-level log is emitted; the rest of
+			// the export is unaffected (design-changes.md §4.3).
 			if addrs, ok := fetchEPPAssignmentAddrs(ctx, eppResolver, cluster.Name); ok {
 				clusterConf.GslbBasic.BalanceMode = lib.PString(BalanceModeEPP)
 				clusterConf.GslbBasic.EPPAddr = &addrs
+
+				// EPPTLS is fixed to plaintext and EPPBreaker is fixed disabled;
+				// neither is user-configurable (design-changes.md §5). They are
+				// emitted for every EPP cluster so BFE no longer falls back to the
+				// legacy insecure default.
+				clusterConf.GslbBasic.EPPTLS = &cluster_conf.EPPTLSConf{Plaintext: true}
+				clusterConf.GslbBasic.EPPBreaker = &cluster_conf.EPPBreakerConf{Disabled: true}
+
+				// check/timeout are exported only when epp_runtime is stored;
+				// otherwise they stay nil and BFE applies the same defaults at
+				// load time.
+				if cluster.EppRuntime != "" {
+					if rt, err := ParseEppRuntime(cluster.EppRuntime); err == nil && rt != nil {
+						if c := rt.Check; c != nil {
+							clusterConf.GslbBasic.EPPCheck = &cluster_conf.EPPCheckConf{
+								Disabled:         boolPtrValue(c.Disabled),
+								CheckInterval:    c.CheckInterval,
+								FailThreshold:    c.FailThreshold,
+								Cooldown:         c.Cooldown,
+								SuccessThreshold: c.SuccessThreshold,
+							}
+						}
+						if t := rt.Timeout; t != nil {
+							clusterConf.GslbBasic.EPPTimeout = &cluster_conf.EPPTimeoutConf{
+								Connect: t.Connect,
+								Call:    t.Call,
+							}
+						}
+					}
+				}
 			} else {
 				clusterConf.GslbBasic.BalanceMode = lib.PString(BalanceModeWRR)
 			}
@@ -1296,23 +1391,7 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 			}
 			if provider != "" {
 				if entries, ok := providerModelTable[provider]; ok && len(entries) > 0 {
-					models := make([]cluster_conf.ModelPrice, 0, len(entries))
-					for _, e := range entries {
-						if e != nil {
-							models = append(models, cluster_conf.ModelPrice{
-								Provider:            e.Provider,
-								Model:               e.Model,
-								BaseModel:           e.BaseModel,
-								Mode:                e.Mode,
-								Capabilities:        e.Capabilities,
-								SupportedParameters: e.SupportedParameters,
-								Limits:              e.Limits,
-								Prices:              cluster_conf.PriceMap(e.Prices),
-								TierPrices:          cluster_conf.TierPriceMap(e.TierPrices),
-								Metadata:            e.Metadata,
-							})
-						}
-					}
+					models := buildModelTableModels(entries)
 					pricingInfo := providerPricingTable[provider]
 					timeZone := pricingInfo.TimeZone
 					if timeZone == "" {
@@ -1334,10 +1413,115 @@ func NewBfeClusterConf(ctx context.Context, version string, clusters []*Cluster,
 
 		clusterConfMap[cluster.Name] = clusterConf
 	}
+
+	// Field-level encryption at rest: encrypt AIConf.Keys[].Key so no
+	// upstream provider key lands on BFE disk in plaintext. Name/Weight/
+	// KeyPolicy/model mappings stay readable. Any failure aborts the
+	// export rather than emitting a half-encrypted file.
+	if stateful.ExportCryptoEnabled() {
+		for name, conf := range clusterConfMap {
+			if conf.AIConf == nil {
+				continue
+			}
+			for i := range conf.AIConf.Keys {
+				enc, err := stateful.ExportEncrypt(conf.AIConf.Keys[i].Key)
+				if err != nil {
+					return nil, fmt.Errorf("cluster %s: encrypt AIConf.Keys[%d] failed: %s", name, i, err)
+				}
+				conf.AIConf.Keys[i].Key = enc
+			}
+		}
+	}
+
 	return &cluster_conf.BfeClusterConf{
 		Version: &version,
 		Config:  &clusterConfMap,
+	}, nil
+}
+
+// batchPricePrecision keeps expanded batch prices on the 1e-8 fixed-point
+// denomination (same as quota.RmbPrecision used by the data-plane cost math).
+const batchPricePrecision = 1e8
+
+// buildModelTableModels converts stored model price entries into the BFE
+// ModelTable rows. Entries carrying a BatchDiscount additionally expand into
+// an explicit mode=batch row whose price keys are multiplied by the discount
+// (rounded to 8 decimal places). A manually maintained (provider, model,
+// mode=batch) row takes precedence over the expanded row: the expansion is
+// skipped with a warning log and the export continues.
+func buildModelTableModels(entries []*imodel_price.ModelPrice) []cluster_conf.ModelPrice {
+	manualBatch := map[string]bool{}
+	for _, e := range entries {
+		if e != nil && e.Mode == "batch" {
+			manualBatch[e.Model] = true
+		}
 	}
+
+	models := make([]cluster_conf.ModelPrice, 0, len(entries))
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		models = append(models, cluster_conf.ModelPrice{
+			Provider:            e.Provider,
+			Model:               e.Model,
+			BaseModel:           e.BaseModel,
+			Mode:                e.Mode,
+			Capabilities:        e.Capabilities,
+			SupportedParameters: e.SupportedParameters,
+			Limits:              e.Limits,
+			Prices:              cluster_conf.PriceMap(e.Prices),
+			TierPrices:          cluster_conf.TierPriceMap(e.TierPrices),
+			Metadata:            e.Metadata,
+		})
+
+		if e.BatchDiscount == nil || e.Mode == "batch" {
+			continue
+		}
+		if manualBatch[e.Model] {
+			log.Logger.Warn("model price export: manual (provider=%s, model=%s, mode=batch) row exists, skip batch_discount expansion", e.Provider, e.Model)
+			continue
+		}
+
+		models = append(models, cluster_conf.ModelPrice{
+			Provider:            e.Provider,
+			Model:               e.Model,
+			BaseModel:           e.BaseModel,
+			Mode:                "batch",
+			Capabilities:        e.Capabilities,
+			SupportedParameters: e.SupportedParameters,
+			Limits:              e.Limits,
+			Prices:              scaleBatchPrices(e.Prices, *e.BatchDiscount),
+			TierPrices:          scaleBatchTierPrices(e.TierPrices, *e.BatchDiscount),
+			Metadata:            e.Metadata,
+		})
+	}
+	return models
+}
+
+// scaleBatchPrices multiplies every price key by the batch discount, rounding
+// to 8 decimal places so the 1e-8 fixed-point denomination stays clean.
+func scaleBatchPrices(src imodel_price.PriceMap, discount float64) cluster_conf.PriceMap {
+	if src == nil {
+		return nil
+	}
+	rst := make(cluster_conf.PriceMap, len(src))
+	for k, v := range src {
+		rst[k] = math.Round(v*discount*batchPricePrecision) / batchPricePrecision
+	}
+	return rst
+}
+
+// scaleBatchTierPrices expands tier prices tier by tier with the same factor.
+func scaleBatchTierPrices(src imodel_price.TierPriceMap, discount float64) cluster_conf.TierPriceMap {
+	if src == nil {
+		return nil
+	}
+	rst := make(cluster_conf.TierPriceMap, len(src))
+	for tier, prices := range src {
+		rst[tier] = scaleBatchPrices(prices, discount)
+	}
+	return rst
 }
 
 func newAIConf(llmConfig *LLMConfig, modelTable *cluster_conf.ModelTable,
@@ -1399,6 +1583,17 @@ func newAIConf(llmConfig *LLMConfig, modelTable *cluster_conf.ModelTable,
 		aiConf.KeyPolicy.SessionAffinityRedisPrefix = derefString(llmConfig.KeyAffinity.RedisPrefix, "bfe:ai:key_affinity")
 		aiConf.KeyPolicy.SessionAffinityPenaltyEnable = derefBool(llmConfig.KeyAffinity.PenaltyEnable, true)
 	}
+	if llmConfig.NormalizeUpstreamError != nil {
+		aiConf.NormalizeUpstreamError = &cluster_conf.UpstreamErrorNormalizeConf{
+			Enabled:            derefBool(llmConfig.NormalizeUpstreamError.Enabled, false),
+			StreamEnabled:      derefBool(llmConfig.NormalizeUpstreamError.StreamEnabled, false),
+			UnrecognizedAction: derefString(llmConfig.NormalizeUpstreamError.UnrecognizedAction, ""),
+			MaxBodyBytes:       derefInt64(llmConfig.NormalizeUpstreamError.MaxBodyBytes, 0),
+			// pointer passthrough: nil stays nil so BFE can distinguish
+			// "unset" (default true) from an explicit false
+			RedactSecrets: llmConfig.NormalizeUpstreamError.RedactSecrets,
+		}
+	}
 
 	return aiConf
 }
@@ -1411,6 +1606,13 @@ func derefString(s *string, defaultValue string) string {
 }
 
 func derefInt(i *int, defaultValue int) int {
+	if i == nil {
+		return defaultValue
+	}
+	return *i
+}
+
+func derefInt64(i *int64, defaultValue int64) int64 {
 	if i == nil {
 		return defaultValue
 	}

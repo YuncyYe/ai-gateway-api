@@ -24,7 +24,7 @@ import (
 
 func TestEndpoints(t *testing.T) {
 	eps := endpoints()
-	require.Len(t, eps, 11)
+	require.Len(t, eps, 19)
 
 	paths := make([]string, 0, len(eps))
 	for _, ep := range eps {
@@ -46,8 +46,16 @@ func TestEndpoints(t *testing.T) {
 		"/configs/mod-body-process",
 		"/quota/trigger-reset",
 		"/configs/rate-limit-policy",
+		"/configs/ai-cache-rule",
+		"/configs/ai-context-rule",
+		"/configs/traffic-mirror-rule",
 		"/configs/ai-route",
+		"/configs/mod-ai-intent",
 		"/configs/epp_data/config",
+		"/k8s_pools/{name}/instances",
+		"/k8s_pools/{name}",
+		"/k8s_pools",
+		"/k8s_pools/{name}",
 	}, paths)
 }
 
@@ -76,6 +84,13 @@ func TestRegisterRouter(t *testing.T) {
 	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/mod-body-process")
 	assert.Contains(t, matchedPaths, "/inner-api/v1/quota/trigger-reset")
 	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/rate-limit-policy")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/ai-cache-rule")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/ai-context-rule")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/traffic-mirror-rule")
 	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/ai-route")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/mod-ai-intent")
 	assert.Contains(t, matchedPaths, "/inner-api/v1/configs/epp_data/config")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/k8s_pools/{name}/instances")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/k8s_pools/{name}")
+	assert.Contains(t, matchedPaths, "/inner-api/v1/k8s_pools")
 }

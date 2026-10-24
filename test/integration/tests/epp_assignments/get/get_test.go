@@ -52,7 +52,6 @@ func twoGroupsBody() map[string]interface{} {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -76,7 +75,7 @@ func createEPPCluster(t *testing.T, name string) string {
 	resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         name,
 		"balance_mode": "EPP",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": providerName,
@@ -123,6 +122,31 @@ func findClusterEntry(t *testing.T, data map[string]interface{}, cluster string)
 	return nil
 }
 
+// assertNoLegacyKeys asserts the assignment view no longer carries any
+// primary/standby-era field.
+func assertNoLegacyKeys(t *testing.T, raw []byte) {
+	t.Helper()
+	for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+		assert.NotContains(t, string(raw), "\""+legacy+"\"")
+	}
+}
+
+// TestEppAssignments_UnassignedFilter 验证未分配 cluster 的过滤查询形态。
+// 必须在任何 PATCH /epp-pool 之前运行（空池上创建的 EPP cluster 保持未分配态，
+// 池中无可分配组时 reconciler 不会自动分配）。
+func TestEppAssignments_UnassignedFilter(t *testing.T) {
+	t.Run("EA-1-005 过滤未分配的 EPP cluster 返回空 clusters 并列入 unassigned", func(t *testing.T) {
+		unassigned := testutil.UniqueClusterName()
+		createEPPCluster(t, unassigned)
+		defer testutil.DeleteCluster(unassigned)
+
+		data := getAssignments(t, map[string]string{"cluster": unassigned})
+		clusters := data["clusters"].([]interface{})
+		assert.Empty(t, clusters)
+		assert.Contains(t, data["unassigned_clusters"], unassigned)
+	})
+}
+
 func TestEppAssignments_Get(t *testing.T) {
 	clusterName := testutil.UniqueClusterName()
 
@@ -137,25 +161,18 @@ func TestEppAssignments_Get(t *testing.T) {
 		createEPPCluster(t, clusterName)
 
 		data := getAssignments(t)
+		raw, err := json.Marshal(data)
+		require.NoError(t, err)
+		assertNoLegacyKeys(t, raw)
+
 		entry := findClusterEntry(t, data, clusterName)
 		require.NotNil(t, entry, "cluster should appear in assignment view")
-		assert.False(t, entry["degraded"].(bool))
 		assert.Equal(t, "g1", entry["group"], "greedy allocator picks least-loaded group, tie-break by name")
-
-		primary, ok := entry["primary"].(map[string]interface{})
-		require.True(t, ok, "primary should be non-null after auto assignment")
-		assert.Contains(t, []string{"epp-a", "epp-b"}, primary["id"])
-		assert.NotEmpty(t, primary["host"])
-		assert.NotEmpty(t, primary["port"])
-
-		standby, ok := entry["standby"].(map[string]interface{})
-		require.True(t, ok, "standby should be expanded from the same group")
-		assert.NotEqual(t, primary["id"], standby["id"])
-		assert.Contains(t, []string{"epp-a", "epp-b"}, standby["id"])
-
+		assert.NotContains(t, data["idle_groups"], "g1")
 		assert.Contains(t, data["idle_groups"], "g2")
 		assert.NotContains(t, data["unassigned_clusters"], clusterName)
 	})
+
 
 	t.Run("EA-1-002 按 cluster 过滤查询", func(t *testing.T) {
 		data := getAssignments(t, map[string]string{"cluster": clusterName})
@@ -163,7 +180,7 @@ func TestEppAssignments_Get(t *testing.T) {
 		require.Len(t, clusters, 1)
 		entry := clusters[0].(map[string]interface{})
 		assert.Equal(t, clusterName, entry["cluster"])
-		assert.NotNil(t, entry["primary"])
+		assert.NotEmpty(t, entry["group"])
 	})
 
 	t.Run("EA-1-003 过滤不存在的 cluster 返回 404", func(t *testing.T) {
@@ -193,10 +210,10 @@ func TestEppAssignments_Get(t *testing.T) {
 	})
 }
 
-// TestEppAssignments_GroupShrinkRepair 验证统一组规模规则（每组 1~2 实例）下的
-// 悬空修复语义：PATCH /epp-pool 同步触发修复，单实例组是合法组。
-func TestEppAssignments_GroupShrinkRepair(t *testing.T) {
-	t.Run("EA-1-005 组缩容到单实例（保留 primary）后分配保留", func(t *testing.T) {
+// TestEppAssignments_GroupRepair 验证单实例组规则下的悬空修复语义：
+// PATCH /epp-pool 同步触发修复，分配粒度为组（组仍在则分配保留）。
+func TestEppAssignments_GroupRepair(t *testing.T) {
+	t.Run("EA-1-006 组被移除后跨组重分配", func(t *testing.T) {
 		resp := patchEppPool(t, twoGroupsBody())
 		testutil.AssertSuccess(t, resp)
 
@@ -206,15 +223,13 @@ func TestEppAssignments_GroupShrinkRepair(t *testing.T) {
 
 		entry := findClusterEntry(t, getAssignments(t), cluster)
 		require.NotNil(t, entry)
-		group := entry["group"].(string)
-		primary := entry["primary"].(map[string]interface{})
 
-		// 全量替换为：组名不变、仅保留该 primary 的单实例组。
+		// 全量替换为另一个全新组（原组被移除）→ 悬空修复跨组重分配。
 		resp = patchEppPool(t, map[string]interface{}{
 			"groups": []interface{}{
 				map[string]interface{}{
-					"name":      group,
-					"instances": []interface{}{primary},
+					"name":      "g-new",
+					"instances": []interface{}{map[string]interface{}{"id": "epp-new", "host": "10.0.9.9", "port": 9002}},
 				},
 			},
 		})
@@ -222,13 +237,10 @@ func TestEppAssignments_GroupShrinkRepair(t *testing.T) {
 
 		entry = findClusterEntry(t, getAssignments(t), cluster)
 		require.NotNil(t, entry)
-		assert.Equal(t, group, entry["group"], "单实例组合法：分配不换组")
-		assert.Equal(t, primary["id"], entry["primary"].(map[string]interface{})["id"], "分配不换主")
-		assert.Nil(t, entry["standby"])
-		assert.False(t, entry["degraded"].(bool))
+		assert.Equal(t, "g-new", entry["group"], "原组被移除：跨组重分配")
 	})
 
-	t.Run("EA-1-006 primary 被移除后同组重选", func(t *testing.T) {
+	t.Run("EA-1-007 同组换实例后分配保留", func(t *testing.T) {
 		resp := patchEppPool(t, twoGroupsBody())
 		testutil.AssertSuccess(t, resp)
 
@@ -240,7 +252,7 @@ func TestEppAssignments_GroupShrinkRepair(t *testing.T) {
 		require.NotNil(t, entry)
 		group := entry["group"].(string)
 
-		// 同组名替换为全新实例（模拟原 primary 下线、同组换机）。
+		// 同组名替换为全新实例（组仍在）→ 分配保留在组上。
 		replacement := map[string]interface{}{"id": "epp-replacement", "host": "10.0.9.9", "port": 9002}
 		resp = patchEppPool(t, map[string]interface{}{
 			"groups": []interface{}{
@@ -254,9 +266,6 @@ func TestEppAssignments_GroupShrinkRepair(t *testing.T) {
 
 		entry = findClusterEntry(t, getAssignments(t), cluster)
 		require.NotNil(t, entry)
-		assert.Equal(t, group, entry["group"], "组仍存在：不换组，同组重选 primary")
-		assert.Equal(t, replacement["id"], entry["primary"].(map[string]interface{})["id"])
-		assert.Nil(t, entry["standby"])
-		assert.False(t, entry["degraded"].(bool))
+		assert.Equal(t, group, entry["group"], "组仍存在：分配不换组")
 	})
 }

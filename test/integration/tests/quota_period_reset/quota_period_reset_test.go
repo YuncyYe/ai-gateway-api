@@ -155,6 +155,11 @@ func TestQuotaPeriodReset_AutoResetAndIdempotency(t *testing.T) {
 }
 
 func TestQuotaPeriodReset_MultiInstanceLock(t *testing.T) {
+	// 先记录主测试服务器的 URL 并在返回前恢复；注意必须在启动实例 A 之前
+	// 捕获——StartServerWithSharedInfra(nil, "") 会把全局客户端指向实例 A。
+	origURL := testutil.GetClient().BaseURL
+	defer testutil.SetServerURL(origURL)
+
 	// 启动实例 A，并创建其 DB 与 Redis
 	smA, err := testutil.StartServerWithSharedInfra(nil, "")
 	require.NoError(t, err, "start server A failed")
@@ -166,9 +171,7 @@ func TestQuotaPeriodReset_MultiInstanceLock(t *testing.T) {
 	defer smB.Shutdown()
 
 	// 后续请求发到实例 A
-	origURL := testutil.GetClient().BaseURL
 	testutil.SetServerURL(smA.ServerURL)
-	defer testutil.SetServerURL(origURL)
 
 	apiKeyAID, apiKeyAValue, err := testutil.CreateAPIKeyWithKey("quota-period-reset-multi-ak", "")
 	require.NoError(t, err, "setup api-key failed")

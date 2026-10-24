@@ -37,12 +37,12 @@ v0.0.7 起，`llm_config` 支持多 API-Key：
 
 | 接口 | 测试用例数 |
 |------|-----------|
-| 创建集群 | 28 |
+| 创建集群 | 31 |
 | 查询集群列表 | 1 |
 | 查询集群详情 | 1 |
-| 更新集群 | 11 |
+| 更新集群 | 15 |
 | 删除集群 | 8 |
-| **合计** | **49** |
+| **合计** | **56** |
 
 ## 4. 认证方式
 
@@ -86,7 +86,7 @@ clusters/
 | 参数名 | 类型 | 必填 | 说明 | 合法性条件 |
 |--------|------|------|------|------------|
 | name | string | Y | 集群名，全局唯一 | 长度 1-64；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；全局唯一；不能包含空白字符 |
-| description | string | N | 集群描述 | 长度 ≤256；不能包含控制字符 |
+| description | string | N | 集群描述 | 长度 ≤256 字节（按 UTF-8 字节计）；不能包含控制字符 |
 | instance_pool | []Instance | Y | 实例列表 | ≥1 个元素；(hostname, ip) 组合唯一；至少一个实例 weight>0 |
 | instance_pool[].hostname | string | Y | 实例主机名 | 符合 Hostname 类型 |
 | instance_pool[].ip | string | Y | 实例 IP 地址 | 符合 IP Address 类型 |
@@ -194,6 +194,9 @@ clusters/
 | CL-1-042 | basic.timeouts.timeout_conn_serv 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-1-043 | basic 边界合法值 | 正常参数 | max_idle=0/max_retry=0/buffer=1/timeout=1 创建成功且回显正确 |
 | CL-1-044 | basic 空对象 | 正常参数 | 验证默认值填充（0/2/512/50000 等） |
+| CL-1-045 | description 恰好 256 字节 | 边界值（issue #244 / SC2101-TC024） | 合法上界，创建成功且 GET 回读一致 |
+| CL-1-046 | description 257 字节 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422，报错含 `description length must be <= 256` |
+| CL-1-047 | description 含控制字符 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422，报错含 `control characters` |
 
 ### 6.4 测试场景详细设计
 
@@ -1622,6 +1625,112 @@ clusters/
 
 ---
 
+#### 6.4.45 CL-1-045：description 恰好 256 字节（边界值，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1/§2.1 规定 `description` 长度 0-256 字节。256 是合法上界，必须被接受并原样落库（与 CL-1-046 构成上界两侧）。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 256 个 ASCII 字符（= 256 字节）。
+2. 验证返回 200 且 `Data.description` 与提交值一致。
+3. GET 回读，验证 `description` 仍与提交值一致。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "<256 个字节的字符串>",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 256 字节字符串 | Equals |
+| description（GET 回读） | 提交的 256 字节字符串 | Equals |
+
+---
+
+#### 6.4.46 CL-1-046：description 257 字节（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+修复前 `/clusters` 对 `description` 无任何长度校验，257 字节会被接受并落库（`SC2101-TC024` 的失败摘要 `Cluster description length 257 code=200`）。本用例钉住修复后的拒绝行为。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 257 个 ASCII 字符。
+2. 验证返回 422，且报错信息包含长度上限。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "<257 个字节的字符串>",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `description length must be <= 256`  
+**Data**：null
+
+---
+
+#### 6.4.47 CL-1-047：description 含控制字符（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1 要求"不能包含控制字符"。修复前该规则在集群路径上完全缺失（`\x01` 会被接受），本用例钉住新增拦截。
+
+##### 前提数据准备
+
+已存在可用 provider。
+
+##### 执行步骤
+
+1. POST 创建集群，`description` 为 `"abc\u0001def"`。
+2. 验证返回 422，且报错信息指向控制字符。
+
+##### 请求参数
+
+```json
+{
+    "name": "<随机唯一集群名>",
+    "description": "abc\u0001def",
+    "llm_config": { "models": ["deepseek-chat"], "provider": "<provider>" }
+}
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `control characters`  
+**Data**：null
+
+---
+
 ## 7. 查询集群列表
 
 ### 7.1 接口信息
@@ -1848,6 +1957,10 @@ URI：`c`
 | CL-4-021 | PATCH basic.buffers.req_write_buffer_size 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-4-022 | PATCH basic.timeouts.timeout_conn_serv 零值 | 合法性条件（issue #173） | 验证 ErrNum=422 且错误可归因 |
 | CL-4-023 | PATCH 非法 basic 不污染存量配置 | 业务规则（issue #173） | 非法 PATCH 被拒后 GET 回读，存量 basic 配置保持不变 |
+| CL-4-024 | description 恰好 256 字节 | 边界值（issue #244 / SC2101-TC024） | 合法上界，返回 200 且 GET 回读一致 |
+| CL-4-025 | description 257 字节 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422（修复前为 200，SC2101-TC024 的失败臂） |
+| CL-4-026 | description 含控制字符 | 合法性条件（issue #244 / SC2101-TC024） | 验证 ErrNum=422 且旧值保留 |
+| CL-4-027 | PATCH 非法 description 不污染存量值 | 原子性 | 257 字节被拒后 GET 回读，存量 description 保持不变 |
 
 ### 9.4 测试场景详细设计
 
@@ -2373,6 +2486,133 @@ URI：`cluster_update_key_affinity`
 
 ---
 
+#### 9.4.24 CL-4-024：description 恰好 256 字节（边界值，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+`clusters.md` §1/§2.1 规定 `description` 长度 0-256 字节；256 是合法上界，PATCH 必须接受并原样落库（与 CL-4-025 构成上界两侧）。
+
+##### 前提数据准备
+
+已存在可用集群。
+
+##### 执行步骤
+
+1. PATCH `description` 为 256 个 ASCII 字符（= 256 字节），验证 200 且 `Data.description` 一致。
+2. GET 回读，验证 `description` 仍一致。
+
+##### 请求参数
+
+```json
+{ "description": "<256 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：200  
+**ErrMsg**：success
+
+**Data 字段校验**：
+
+| 字段 | 预期值 | 校验方式 |
+|------|--------|---------|
+| description | 提交的 256 字节字符串 | Equals |
+| description（GET 回读） | 提交的 256 字节字符串 | Equals |
+
+---
+
+#### 9.4.25 CL-4-025：description 257 字节被拒绝（合法性条件，issue #244 / SC2101-TC024）
+
+##### 设计思路
+
+修复前 PATCH `description` 257 字节返回 200 并改写库值（`SC2101-TC024` 的失败臂）；修复后必须 422。
+
+##### 前提数据准备
+
+已存在可用集群。
+
+##### 执行步骤
+
+1. PATCH `description` 为 257 个 ASCII 字符。
+2. 验证返回 422。
+
+##### 请求参数
+
+```json
+{ "description": "<257 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `description length must be <= 256`  
+**Data**：null
+
+---
+
+#### 9.4.26 CL-4-026：description 含控制字符被拒绝且旧值保留（合法性条件）
+
+##### 设计思路
+
+`clusters.md` §1 要求"不能包含控制字符"；修复前该路径无此校验。同时验证被拒请求不改写存量值。
+
+##### 前提数据准备
+
+已存在可用集群，并 PATCH 一个已知基线描述。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述。
+2. PATCH 提交含 `\u0001` 的 `description`，验证 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{ "description": "abc\u0001def" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**ErrMsg**：包含 `control characters`  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
+
+---
+
+#### 9.4.27 CL-4-027：PATCH 非法 description 不污染存量值（原子性）
+
+##### 设计思路
+
+校验发生在 `xreq.Bind` 阶段、早于 `UpdateCluster`；被拒请求不得改写库中既存描述（与 CL-4-104 同模式）。
+
+##### 前提数据准备
+
+已存在可用集群，并 PATCH 一个已知基线描述。
+
+##### 执行步骤
+
+1. PATCH 设置基线描述。
+2. PATCH 提交 257 字节 `description`，验证 422。
+3. GET 回读，验证 `description` 仍为基线值。
+
+##### 请求参数
+
+```json
+{ "description": "<257 个字节的字符串>" }
+```
+
+##### 预期返回结果
+
+**ErrNum**：422  
+**Data**：null
+
+**GET 回读**：`description` == 基线值
+
+---
+
 ## 10. 删除集群
 
 ### 10.1 接口信息
@@ -2794,7 +3034,35 @@ URI：`c`
 3. 测试环境数据库需包含产品线初始化数据，以支持 `{product_name}.{cluster_name}` 实例池命名。
 4. 涉及 global/entity/apikey 路由规则的用例，需先通过对应接口写入规则，测试结束后清理规则或清空 `rules` 数组，避免影响其他用例。
 
-## 12. 注意事项
+## 12. normalize_upstream_error 用例（2026-10-06 上游错误体归一）
+
+### 12.1 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| CL-1-101 | 全字段创建 normalize_upstream_error | 正常参数 | 验证五字段写入与 GET 回读一致 |
+| CL-1-102 | 部分字段创建（仅 enabled） | 正常参数 | 验证未配置字段回读为 null（全指针结构，与 key_affinity 一致） |
+| CL-1-103 | unrecognized_action 非法值 | 合法性条件 | 验证 ErrNum=422 且消息归因该字段；导出产物防泄漏 |
+| CL-1-104 | max_body_bytes 越界（-1 / 4MB+1） | 合法性条件 | 验证 ErrNum=422；边界 0 与 4MB 为合法（见 CL-1-105/106） |
+| CL-1-105 | max_body_bytes=0（用默认） | 正常参数 | 验证 200 且导出 MaxBodyBytes=0（BFE 按 65536 处理） |
+| CL-1-106 | max_body_bytes=4194304（上限边界） | 正常参数 | 验证 200 |
+| CL-4-101 | PATCH 省略字段保留原值 | 更新语义 | 全字段创建后 PATCH 只改 description，GET 断言 normalize_upstream_error 五字段原值不变（检查项 #1） |
+| CL-4-102 | PATCH 整体替换 nue 对象 | 更新语义 | 对齐 CL-4-011 key_affinity 模式：PATCH 提交完整 nue 对象（五字段全量、部分改值），GET 断言新值全量生效 |
+| CL-4-103 | PATCH llm_config 省略 nue = 清空 | 更新语义 | `llm_config` PATCH 为整体替换（与 `keys` 全量替换同合同语义）：省略 `normalize_upstream_error` 即清空，GET 断言为 null |
+| CL-4-104 | PATCH 非法值拒绝 + 回读零变更 | 合法性条件 | 非法 body PATCH → 422 且消息归因字段；GET 逐字段不变（检查项 #3）。注：`/clusters` 无 PUT 接口（405 实证），对称性检查项 #2 不适用 |
+
+### 12.2 详细设计要点
+
+- 合同依据：`design-docs/api-define/OpenAPI接口定义/clusters.md` 表"上游错误归一配置"
+  与 `modifications/2026-10-06-upstream-error-normalization/api-changes.md`；
+- 防泄漏（检查项 #4）：CL-1-103/104 的集群名不得出现在 InnerAPI 导出
+  `ClusterConf.Config` 中（该集群未创建成功）；
+- 审计（检查项 #7）：沿用 create/update 既有审计断言模式，本批用例不重复展开
+  （字段随 llm_config 整体快照，无独立审计键）；
+- 并发（检查项 #10）：本变更为纯配置透传，无 ID 生成/行锁路径，**不适用**，
+  不新增 `//go:build mysql` 用例。
+
+## 13. 注意事项
 
 1. v0.3.0 已删除 `/clusters/{cluster_name}/ready`、`/model-providers`、`/models`。
 2. 返回中不应出现 `ready`、`sub_clusters`、`scheduler`、`Instance.tags`、`llm_config.service_name`、`llm_config.group`。

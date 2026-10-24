@@ -24,12 +24,11 @@ import (
 
 // OverrideParam is the body of PUT /epp-assignments/{cluster}
 // (epp-assignments.md §2.2). The cluster must reference an existing
-// balance_mode=EPP cluster; the group and the primary instance must exist
-// in the current EPP instance pool.
+// balance_mode=EPP cluster; the group must exist and be non-empty in the
+// current EPP instance pool.
 type OverrideParam struct {
-	Cluster           string `uri:"cluster"`
-	GroupName         string `json:"group_name"`
-	PrimaryInstanceID string `json:"primary_instance_id"`
+	Cluster   string `uri:"cluster"`
+	GroupName string `json:"group_name"`
 }
 
 // OverrideRoute route
@@ -52,7 +51,7 @@ func OverrideAction(req *http.Request) (interface{}, error) {
 		return nil, err
 	}
 
-	view, err := container.EppPoolManager.OverrideAssignment(req.Context(), param.Cluster, param.GroupName, param.PrimaryInstanceID)
+	view, err := container.EppPoolManager.OverrideAssignment(req.Context(), param.Cluster, param.GroupName)
 	if err != nil {
 		return nil, err
 	}

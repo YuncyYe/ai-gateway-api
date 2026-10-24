@@ -54,7 +54,10 @@ type InstanceFilter struct {
 	GroupName *string
 }
 
-// InstanceGroup is a named group of EPP instances (primary/standby unit).
+// InstanceGroup is a named group of EPP instances. A group holds exactly one
+// instance in the current single-instance deployment stage; the group stays
+// as the allocation unit and the array form of Instances is reserved for
+// future multi-instance expansion.
 type InstanceGroup struct {
 	Name      string           `json:"name"`
 	Instances []*InstanceParam `json:"instances"`
@@ -66,12 +69,12 @@ type EppPool struct {
 	Groups []*InstanceGroup `json:"groups"`
 }
 
-// AssignmentParam is one cluster to instance-group assignment (primary only;
-// standby is expanded at read time from the instances of the same group).
+// AssignmentParam is one cluster to instance-group assignment. The
+// assignment granularity is the group: the serving instance is derived from
+// the group's instances at read/export time.
 type AssignmentParam struct {
-	Cluster           string `json:"cluster"`
-	GroupName         string `json:"group_name"`
-	PrimaryInstanceID string `json:"primary_instance_id"`
+	Cluster   string `json:"cluster"`
+	GroupName string `json:"group_name"`
 }
 
 // EPPClusterInfo describes one cluster whose balance_mode is EPP, as seen by
@@ -300,11 +303,12 @@ func (m *EppPoolManager) validateGroups(groups []*InstanceGroup) ([]*InstancePar
 	return flat, nil
 }
 
-// validateGroupSize enforces the per-group instance count: 1 (primary only)
-// or 2 (primary + standby); empty groups and groups with 3+ instances are rejected.
+// validateGroupSize enforces the per-group instance count: exactly 1. Empty
+// groups and groups with 2+ instances are rejected (backup/standby pairs are
+// no longer accepted at the API write path).
 func (m *EppPoolManager) validateGroupSize(group *InstanceGroup) error {
-	if n := len(group.Instances); n < 1 || n > 2 {
-		return xerror.WrapParamErrorWithMsg("epp pool group %q requires 1 or 2 instances, got %d", group.Name, n)
+	if n := len(group.Instances); n != 1 {
+		return xerror.WrapParamErrorWithMsg("epp pool group %q requires exactly 1 instance, got %d", group.Name, n)
 	}
 	return nil
 }

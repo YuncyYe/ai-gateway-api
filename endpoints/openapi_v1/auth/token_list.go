@@ -42,6 +42,10 @@ func tokenListActionProcess(req *http.Request) ([]*TokenData, error) {
 		tokens = append(tokens, newTokenData(one, true))
 	}
 
+	if err := maskTokensIfReadonly(req.Context(), tokens...); err != nil {
+		return nil, err
+	}
+
 	return tokens, nil
 }
 

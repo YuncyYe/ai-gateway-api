@@ -162,6 +162,13 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/tls_conf/server_data_co
                     "MatchPrefix": "deepseek/",
                     "StripPrefix": true,
                     "ModelProtocols": ["openai"],
+                    "NormalizeUpstreamError": {
+                        "Enabled": true,
+                        "StreamEnabled": false,
+                        "UnrecognizedAction": "passthrough",
+                        "MaxBodyBytes": 65536,
+                        "RedactSecrets": true
+                    },
                     "ModelTable": {
                         "Currency": "RMB",
                         "TimeZone": "Asia/Shanghai",
@@ -216,7 +223,7 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/tls_conf/server_data_co
 | Provider | string | 对应 OpenAPI `llm_config.provider`；默认空字符串 |
 | Keys | array | API-Key 列表；为空数组时表示该 cluster 不配置 API-Key |
 | Keys[].Name | string | Key 名称/标识（必填） |
-| Keys[].Key | string | API-Key 值 |
+| Keys[].Key | string | API-Key 值；**`[Security].EncryptExports=true` 时为 `enc$v1$` 字段级密文**（同 mod-api-key 信封规范），无此前缀按明文直通 |
 | Keys[].Weight | int | 权重，范围 `[0,100]` |
 | KeyPolicy | object | Key 路由策略 |
 | KeyPolicy.Strategy | string | 本版仅支持 `weighted_random` |
@@ -230,6 +237,12 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/tls_conf/server_data_co
 | MatchPrefix | string | 需要匹配的 provider/model 前缀；对应 OpenAPI `llm_config.match_prefix` |
 | StripPrefix | bool | 是否裁剪 `MatchPrefix` 前缀；对应 OpenAPI `llm_config.strip_prefix` |
 | ModelProtocols | []string | 该集群所属 provider 支持的模型访问协议；来源为 OpenAPI `/providers` 的 `model_protocols`。枚举值如 `openai`、`anthropic`；为空数组时 BFE 兜底为仅支持 `openai` |
+| NormalizeUpstreamError | object | 上游错误体归一配置；对应 OpenAPI `llm_config.normalize_upstream_error`；**未配置时整个字段不下发**（BFE 关闭归一，历史透传行为）；缺省字段不在导出中合成默认值，由 BFE 加载期 `Effective()` 合成（单一默认值来源） |
+| NormalizeUpstreamError.Enabled | bool | 非流式归一开关；对应 `normalize_upstream_error.enabled`，默认 `false` |
+| NormalizeUpstreamError.StreamEnabled | bool | 流式（SSE）归一开关；对应 `normalize_upstream_error.stream_enabled`，默认 `false` |
+| NormalizeUpstreamError.UnrecognizedAction | string | 未识别错误体处理；对应 `normalize_upstream_error.unrecognized_action`；`""`/`passthrough`（默认）/ `rewrite_generic` |
+| NormalizeUpstreamError.MaxBodyBytes | int64 | 错误响应体读取上限（字节）；对应 `normalize_upstream_error.max_body_bytes`；`0`（默认）= BFE 按 65536 处理；最大 4194304 |
+| NormalizeUpstreamError.RedactSecrets | *bool | 凭证脱敏开关；对应 `normalize_upstream_error.redact_secrets`；未配置（nil）= BFE 按 `true` 处理；显式 `false` 关闭。**指针类型以区分"未配置"与"显式 false"** |
 | ModelTable | object | 该 cluster 的成本定价表 |
 | ModelTable.Currency | string | 价格货币；固定为 `"RMB"` |
 | ModelTable.TimeZone | string | 计算时段所使用的时区；默认 `"Asia/Shanghai"` |
@@ -252,13 +265,55 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/tls_conf/server_data_co
 
 > **说明**：`ModelTable` 由 InnerAPI 根据 `cluster.llm_config.provider` 查询 `/providers` 的 `time_zone` / `tiers` 与 `/model-prices` 的 `prices` / `tier_prices` 拼接后自动填充，不在 OpenAPI `/clusters` 端点中展示。`Currency` 固定为 `RMB`。
 
-### 3.3 GslbBasic.EPPAddr 有序主备语义
+### 3.3 GslbBasic.EPPAddr 语义（分配组实例地址）
 
-`GslbBasic.EPPAddr` 为**有序列表**：`[0]`=主、`[1]`=备，仅 `BalanceMode=EPP` 时有值（`BalanceMode=WRR` 时为 `null`）。单实例组（测试环境）时仅 `[主]`。
+`GslbBasic.EPPAddr` 为分配的实例组实例地址列表，仅 `BalanceMode=EPP` 时有值（`BalanceMode=WRR` 时为 `null`）。当前单实例部署阶段**恒为单元素列表**（每组恰 1 实例）；bfe 侧按通用地址列表消费，failover 机制为未来多实例扩容预留。
 
-- 由 `epp_assignments` 分配驱动生成（见 OpenAPI 接口定义 [epp-assignments.md](../OpenAPI接口定义/epp-assignments.md)）：按 cluster 的分配记录取 `{primary, standby}`，实例地址由 `epp_instances` 的 host/port 经 `net.JoinHostPort` 拼接为 `host:port`（IPv6 自动加括号）。
-- EPP 模式 cluster 无有效分配记录时**降级导出**：该 cluster `BalanceMode` 置为 `WRR`、不生成 `EPPAddr`，同时 ai-gateway-api 输出 error 级日志（含 cluster 名与原因）；单 cluster 降级不阻塞整份 server_data_conf 下发，分配恢复后下轮导出自动回到 `EPP`。
+- 由 `epp_assignments` 分配驱动生成（见 OpenAPI 接口定义 [epp-assignments.md](../OpenAPI接口定义/epp-assignments.md)）：按 cluster 的分配记录取分配的组，组内实例地址由 `epp_instances` 的 host/port 经 `net.JoinHostPort` 拼接为 `host:port`（IPv6 自动加括号）。
+- EPP 模式 cluster 无有效分配记录时**降级导出**：该 cluster `BalanceMode` 置为 `WRR`、不生成 `EPPAddr`，同时 ai-gateway-api 输出 error 级日志（含 cluster 名与原因）；单 cluster 降级不阻塞整份 server_data_conf 下发，分配恢复后下轮导出自动回到 `EPP`。**降级时不导出任何 EPP 运行时字段**（见 §3.4）。
 - 分配变更（cluster 进入 EPP 模式自动分配、`/epp-pool` 变更触发悬空修复、`PUT /api/v1/epp-assignments/{cluster}` 手工覆写）即时生效，下次导出自然带出。
+
+### 3.4 GslbBasic EPP 运行时字段（EPPCheck / EPPTimeout / EPPTLS / EPPBreaker）
+
+当 cluster `balance_mode=EPP` 且分配有效时，`ClusterConf.Config.<cluster>.GslbBasic` 会携带以下 EPP 运行时字段（来源为 OpenAPI `/clusters` 的 `epp_runtime`；固定值由 api 注入）：
+
+```json
+{
+    "GslbBasic": {
+        "BalanceMode": "EPP",
+        "EPPAddr": ["10.0.0.1:8443"],
+        "EPPTLS": { "Plaintext": true },
+        "EPPCheck": {
+            "Disabled": false,
+            "CheckInterval": "2s",
+            "FailThreshold": 3,
+            "Cooldown": "45s",
+            "SuccessThreshold": 2
+        },
+        "EPPTimeout": { "Connect": "500ms", "Call": "3s" },
+        "EPPBreaker": { "Disabled": true }
+    }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `EPPTLS` | object | **固定** `{ "Plaintext": true }`（统一明文接入 EPP）。取代 BFE legacy `{Insecure:true}` 默认，消除 BFE warning 并使 EPP 明文可达。`Insecure`/`CAFile` 恒为 false/空。 |
+| `EPPCheck` | object | 来源 OpenAPI `epp_runtime.check`；**未配置 `epp_runtime` 时不下发**，由 BFE 加载期补默认 |
+| `EPPCheck.Disabled` | bool | `check.disabled`，默认 `false` |
+| `EPPCheck.CheckInterval` | string | `check.check_interval`，默认 `2s` |
+| `EPPCheck.FailThreshold` | int | `check.fail_threshold`，默认 `3` |
+| `EPPCheck.Cooldown` | string | `check.cooldown`，默认 `45s` |
+| `EPPCheck.SuccessThreshold` | int | `check.success_threshold`，默认 `2` |
+| `EPPTimeout` | object | 来源 OpenAPI `epp_runtime.timeout`；**未配置 `epp_runtime` 时不下发**，由 BFE 加载期补默认 |
+| `EPPTimeout.Connect` | string | `timeout.connect`，默认 `500ms` |
+| `EPPTimeout.Call` | string | `timeout.call`，默认 `3s` |
+| `EPPBreaker` | object | **固定** `{ "Disabled": true }`（关闭熔断）；`WindowSize`/`MinVolume`/`ErrorRatePercent`/`OpenTimeout` 不下发 |
+
+> **说明**：
+> - 上述字段仅在 `BalanceMode=EPP`（分配有效）时输出。**未配置 `epp_runtime` 的 EPP cluster 也会输出固定 `EPPTLS` 与 `EPPBreaker`**（首次生效会产生一次 version bump / reload），但 `EPPCheck`/`EPPTimeout` 不下发。
+> - `BalanceMode=WRR`（含 EPP 分配缺失降级）时**不输出**任何 EPP 运行时字段。
+> - `EPPTLS` / `EPPBreaker` 由控制面固定注入，OpenAPI 不接受用户配置（见 [clusters.md](../OpenAPI接口定义/clusters.md) 表：EPP运行时配置）。
 
 ## 4. 配置未变化返回示例
 

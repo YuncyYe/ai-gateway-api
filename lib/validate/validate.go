@@ -50,13 +50,24 @@ const (
 	MaxTokenNameLength      = 64
 	MaxClusterNameLength    = 64
 	MaxCertNameLength       = 64
-	MaxEntityTypeNameLength    = 32
-	MaxEntityNameLength        = 64
-	MaxDescriptionLength       = 256
+	MaxEntityTypeNameLength = 32
+	MaxEntityNameLength     = 64
+	// MaxEntityTypeDescriptionLength 是 /entity-types 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/entity-types.md §1/§2.1：0-255。
+	MaxEntityTypeDescriptionLength = 255
+	// MaxEntityDescriptionLength 是 /entities 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/entities.md §1：0-255。
 	MaxEntityDescriptionLength = 255
-	MaxAPIDescriptionLength    = 512
-	MaxLLMKeyLength         = 512
-	MaxRateLimitNameLength  = 128
+	// MaxClusterDescriptionLength 是 /clusters 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/clusters.md §1/§2.1：0-256。
+	MaxClusterDescriptionLength = 256
+	// MaxCertificateDescriptionLength 是 /certificates 的 description 上限，
+	// 依据 design-docs/api-define/OpenAPI接口定义/certificates.md §1/§2.1：必填 2-256。
+	// 下限（必填、≥2）由 CreateParam 的 `required,min=2` tag 承担。
+	MaxCertificateDescriptionLength = 256
+	MaxAPIDescriptionLength         = 512
+	MaxLLMKeyLength                 = 512
+	MaxRateLimitNameLength          = 128
 )
 
 var reservedUserNames = map[string]bool{
@@ -190,15 +201,24 @@ func validateNameEdges(s string, name string) error {
 	return nil
 }
 
-// UserName validates a user name.
-func UserName(s string) error {
+// userNameFormat validates the generic user_name format: length 1..64,
+// charset [a-zA-Z0-9_.-], and no leading/trailing '.', '-', '_'.
+// It does not check reserved names.
+func userNameFormat(s string) error {
 	if err := validateName(s, 1, MaxUserNameLength, "user_name"); err != nil {
 		return err
 	}
 	if err := validateNamePattern(s, nameToken, "user_name"); err != nil {
 		return err
 	}
-	if err := validateNameEdges(s, "user_name"); err != nil {
+	return validateNameEdges(s, "user_name")
+}
+
+// UserName validates a user name for creating a new user: format plus the
+// reserved names (admin/root/system). Use only on create-style endpoints to
+// prevent new accounts from squatting on system identities.
+func UserName(s string) error {
+	if err := userNameFormat(s); err != nil {
 		return err
 	}
 	if reservedUserNames[strings.ToLower(s)] {
@@ -207,10 +227,20 @@ func UserName(s string) error {
 	return nil
 }
 
-// Password validates a password. It must not equal the user name or its reverse.
+// UserNameRef validates a user_name that references an existing user (the
+// by-name lookup used by update/query endpoints): format only, reserved names
+// are allowed — the built-in account "admin" must remain operable through
+// these very endpoints. Do not add a reserved-name check here.
+func UserNameRef(s string) error {
+	return userNameFormat(s)
+}
+
+// Password validates a password. It must not equal the user name or its
+// reverse. Length is measured in bytes (Go's len) and capped at 72, the
+// bcrypt input limit.
 func Password(password, userName string) error {
-	if len(password) < 8 || len(password) > 128 {
-		return xerror.WrapParamErrorWithMsg("password length must be between 8 and 128")
+	if len(password) < 8 || len(password) > 72 {
+		return xerror.WrapParamErrorWithMsg("password length must be between 8 and 72 bytes")
 	}
 	for _, r := range password {
 		if unicode.IsSpace(r) {
@@ -313,6 +343,8 @@ func EntityTypeName(s string) error {
 }
 
 // Description validates a description string: no control chars, length <= max.
+// The length is counted in bytes (UTF-8), matching the "字节（按 UTF-8 字节计）"
+// wording of entity-types.md / entities.md / clusters.md.
 func Description(s string, maxLen int, name string) error {
 	if len(s) > maxLen {
 		return xerror.WrapParamErrorWithMsg("%s length must be <= %d", name, maxLen)
@@ -358,16 +390,17 @@ func ExpiredTime(t *int64) error {
 
 // Scope validates an auth token scope.
 func Scope(s string) error {
-	if s != "System" && s != "Support" {
-		return xerror.WrapParamErrorWithMsg("scope must be System or Support")
+	if s != "System" && s != "SystemReadonly" && s != "Support" {
+		return xerror.WrapParamErrorWithMsg("scope must be System, SystemReadonly or Support")
 	}
 	return nil
 }
 
-// IsAdmin validates that is_admin is true (the system only supports true).
-func IsAdmin(b bool) error {
-	if !b {
-		return xerror.WrapParamErrorWithMsg("is_admin must be true")
+// Role validates a user role. Keep the literals in sync with the role
+// constants in model/iauth (lib must not import model to avoid cycles).
+func Role(s string) error {
+	if s != "system_admin" && s != "system_admin_readonly" {
+		return xerror.WrapParamErrorWithMsg("role must be system_admin or system_admin_readonly")
 	}
 	return nil
 }
@@ -442,8 +475,9 @@ func RateLimitPolicy(p *shared.RateLimitPolicyParam) error {
 		hasTpm := len(p.Rules.TpmConfigs) > 0
 		hasRpm := len(p.Rules.RpmConfigs) > 0
 		hasConcurrency := p.Rules.MaxConcurrency != nil && *p.Rules.MaxConcurrency >= 0
-		if !hasTpm && !hasRpm && !hasConcurrency {
-			return xerror.WrapParamErrorWithMsg("when rate_limit_policy.enabled is true, at least one of rules.tpm, rules.rpm, or rules.max_concurrency(>=0) must be set")
+		hasBatch := p.Rules.BatchLimits != nil
+		if !hasTpm && !hasRpm && !hasConcurrency && !hasBatch {
+			return xerror.WrapParamErrorWithMsg("when rate_limit_policy.enabled is true, at least one of rules.tpm, rules.rpm, rules.max_concurrency(>=0), or rules.batch_limits must be set")
 		}
 	}
 	if p.Rules == nil {
@@ -457,6 +491,20 @@ func RateLimitPolicy(p *shared.RateLimitPolicyParam) error {
 	}
 	if p.Rules.MaxConcurrency != nil && *p.Rules.MaxConcurrency < -1 {
 		return xerror.WrapParamErrorWithMsg("max_concurrency must be -1 or >= 0")
+	}
+	if p.Rules.BatchLimits != nil {
+		if p.Rules.BatchLimits.MaxCreateRPM < 0 {
+			return xerror.WrapParamErrorWithMsg("batch_limits.max_create_rpm must be >= 0")
+		}
+		if p.Rules.BatchLimits.MaxActiveBatches < 0 {
+			return xerror.WrapParamErrorWithMsg("batch_limits.max_active_batches must be >= 0")
+		}
+		if p.Rules.BatchLimits.MaxFileBytes < 0 {
+			return xerror.WrapParamErrorWithMsg("batch_limits.max_file_bytes must be >= 0")
+		}
+		if p.Rules.BatchLimits.MaxFileLines < 0 {
+			return xerror.WrapParamErrorWithMsg("batch_limits.max_file_lines must be >= 0")
+		}
 	}
 
 	nameSet := map[string]struct{}{}
@@ -633,6 +681,375 @@ func RouteRules(p *shared.RouteRulesParam) error {
 	return nil
 }
 
+const (
+	// MaxAICacheRuleNameLength bounds the AI cache rule name length.
+	MaxAICacheRuleNameLength = 128
+
+	// AI cache key strategies (BFE mod_ai_cache contract).
+	AICacheKeyStrategyLastQuestion = "lastQuestion"
+	AICacheKeyStrategyAllQuestions = "allQuestions"
+	AICacheKeyStrategyDisabled     = "disabled"
+)
+
+// Semantic settings bounds and threshold relations (BFE mod_ai_cache
+// contract; the defaults themselves live in model/ai_cache).
+const (
+	MinAICacheSemanticTopK = 1
+	MaxAICacheSemanticTopK = 10
+
+	MinAICacheSemanticThreshold = 0.0
+	MaxAICacheSemanticThreshold = 2.0
+
+	AICacheSemanticThresholdRelationLT  = "lt"
+	AICacheSemanticThresholdRelationLTE = "lte"
+	AICacheSemanticThresholdRelationGT  = "gt"
+	AICacheSemanticThresholdRelationGTE = "gte"
+)
+
+// AICacheRules validates an AI cache rule set (the full-replace PUT body).
+// A nil rules list is treated as empty (clear all rules); any single failure
+// rejects the whole collection with a param error (HTTP 422).
+//
+// Collection-level cond uniqueness mirrors the data plane contract: BFE
+// mod_ai_cache keys the rules of a product by the cond string and rejects the
+// whole file on a duplicate ("can't have same cond"), which leaves conf-agent
+// retrying the same unloadable version forever. The comparison is byte-wise
+// because that is exactly what BFE does — no trimming or normalisation.
+func AICacheRules(param *shared.AICacheRulesParam) error {
+	if param == nil {
+		return nil
+	}
+
+	rules := param.Rules
+	if rules == nil {
+		rules = []*shared.AICacheRuleParam{}
+	}
+
+	nameSet := map[string]struct{}{}
+	condSet := map[string]struct{}{}
+	for i, rule := range rules {
+		if rule == nil {
+			return xerror.WrapParamErrorWithMsg("ai cache rule #%d is null", i)
+		}
+
+		if rule.Name == nil || *rule.Name == "" {
+			return xerror.WrapParamErrorWithMsg("ai cache rule name is required")
+		}
+		if len(*rule.Name) > MaxAICacheRuleNameLength {
+			return xerror.WrapParamErrorWithMsg("ai cache rule name length must be <= %d", MaxAICacheRuleNameLength)
+		}
+		if _, ok := nameSet[*rule.Name]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate ai cache rule name: %s", *rule.Name)
+		}
+		nameSet[*rule.Name] = struct{}{}
+
+		if rule.Cond == nil || *rule.Cond == "" {
+			return xerror.WrapParamErrorWithMsg("ai cache rule %s cond is required", *rule.Name)
+		}
+		if err := ConditionExpression(*rule.Cond); err != nil {
+			return xerror.WrapParamErrorWithMsg("ai cache rule %s cond: %v", *rule.Name, err)
+		}
+		if _, ok := condSet[*rule.Cond]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate ai cache rule cond: %s", *rule.Cond)
+		}
+		condSet[*rule.Cond] = struct{}{}
+
+		if rule.CacheKeyStrategy != nil {
+			switch *rule.CacheKeyStrategy {
+			case AICacheKeyStrategyLastQuestion, AICacheKeyStrategyAllQuestions, AICacheKeyStrategyDisabled:
+			default:
+				return xerror.WrapParamErrorWithMsg("ai cache rule %s cache_key_strategy must be one of %s/%s/%s",
+					*rule.Name, AICacheKeyStrategyLastQuestion, AICacheKeyStrategyAllQuestions, AICacheKeyStrategyDisabled)
+			}
+		}
+
+		if rule.CacheTTL != nil && *rule.CacheTTL < 0 {
+			return xerror.WrapParamErrorWithMsg("ai cache rule %s cache_ttl must be >= 0", *rule.Name)
+		}
+
+		if rule.MaxBodyBytes != nil && *rule.MaxBodyBytes <= 0 {
+			return xerror.WrapParamErrorWithMsg("ai cache rule %s max_body_bytes must be > 0", *rule.Name)
+		}
+
+		if rule.MaxValueBytes != nil && *rule.MaxValueBytes <= 0 {
+			return xerror.WrapParamErrorWithMsg("ai cache rule %s max_value_bytes must be > 0", *rule.Name)
+		}
+
+		// enable_semantic_cache is a plain bool: nil is treated as false by the
+		// model layer default fill; no range or combination validation (a
+		// cache_key_strategy=disabled rule ignores the flag on the BFE side).
+	}
+
+	return nil
+}
+
+// AICacheSemanticSettings validates the singleton semantic settings (the
+// full-replace PUT body). Omitted fields fall back to the documented
+// defaults (filled by the model layer); any out-of-range value or illegal
+// threshold relation rejects the whole write with a param error (HTTP 422).
+func AICacheSemanticSettings(param *shared.AICacheSemanticSettingsParam) error {
+	if param == nil {
+		return nil
+	}
+
+	if param.TopK != nil && (*param.TopK < MinAICacheSemanticTopK || *param.TopK > MaxAICacheSemanticTopK) {
+		return xerror.WrapParamErrorWithMsg("ai cache semantic settings top_k must be in [%d, %d]",
+			MinAICacheSemanticTopK, MaxAICacheSemanticTopK)
+	}
+
+	if param.Threshold != nil && (*param.Threshold < MinAICacheSemanticThreshold || *param.Threshold > MaxAICacheSemanticThreshold) {
+		return xerror.WrapParamErrorWithMsg("ai cache semantic settings threshold must be in [%v, %v]",
+			MinAICacheSemanticThreshold, MaxAICacheSemanticThreshold)
+	}
+
+	if param.ThresholdRelation != nil {
+		switch *param.ThresholdRelation {
+		case AICacheSemanticThresholdRelationLT, AICacheSemanticThresholdRelationLTE,
+			AICacheSemanticThresholdRelationGT, AICacheSemanticThresholdRelationGTE:
+		default:
+			return xerror.WrapParamErrorWithMsg("ai cache semantic settings threshold_relation must be one of %s/%s/%s/%s",
+				AICacheSemanticThresholdRelationLT, AICacheSemanticThresholdRelationLTE,
+				AICacheSemanticThresholdRelationGT, AICacheSemanticThresholdRelationGTE)
+		}
+	}
+
+	return nil
+}
+
+const (
+	// AI context compression modes (BFE mod_ai_context contract).
+	AIContextModeOff          = "off"
+	AIContextModeConservative = "conservative"
+	AIContextModeBalanced     = "balanced"
+	AIContextModeAggressive   = "aggressive"
+
+	// AI context thinking policies (BFE mod_ai_context contract).
+	AIContextThinkingPolicyTrimAllButLast = "trim-all-but-last"
+	AIContextThinkingPolicyKeep           = "keep"
+
+	// AI context rewrite strengths (BFE mod_ai_context contract).
+	AIContextRewriteStrengthLite = "lite"
+	AIContextRewriteStrengthFull = "full"
+)
+
+// AIContextRules validates an AI context rule set (the full-replace PUT body).
+// A nil rules list is treated as empty (clear all rules); any single failure
+// rejects the whole collection with a param error (HTTP 422). Mode is
+// required (the BFE loader rejects the whole file on missing/illegal mode);
+// cond is checked non-empty only — compiling the expression stays on the BFE
+// side to avoid version coupling with condition primitives.
+func AIContextRules(param *shared.AIContextRulesParam) error {
+	if param == nil {
+		return nil
+	}
+
+	rules := param.Rules
+	if rules == nil {
+		rules = []*shared.AIContextRuleParam{}
+	}
+
+	condSet := map[string]struct{}{}
+	for i, rule := range rules {
+		if rule == nil {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d is null", i)
+		}
+
+		if rule.Cond == nil || *rule.Cond == "" {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d cond is required", i)
+		}
+		if err := ConditionExpression(*rule.Cond); err != nil {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d cond: %v", i, err)
+		}
+		if _, ok := condSet[*rule.Cond]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate ai context rule cond: %s", *rule.Cond)
+		}
+		condSet[*rule.Cond] = struct{}{}
+
+		if rule.Mode == nil || *rule.Mode == "" {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d mode is required", i)
+		}
+		switch *rule.Mode {
+		case AIContextModeOff, AIContextModeConservative, AIContextModeBalanced, AIContextModeAggressive:
+		default:
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d mode must be one of %s/%s/%s/%s",
+				i, AIContextModeOff, AIContextModeConservative, AIContextModeBalanced, AIContextModeAggressive)
+		}
+
+		if rule.MaxContextTokens != nil && *rule.MaxContextTokens < 0 {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d max_context_tokens must be >= 0", i)
+		}
+
+		if rule.ReserveTokens != nil && *rule.ReserveTokens < 0 {
+			return xerror.WrapParamErrorWithMsg("ai context rule #%d reserve_tokens must be >= 0", i)
+		}
+	}
+
+	return nil
+}
+
+// AIContextSettings validates the singleton AI context global settings (the
+// full-replace PUT body). Omitted fields fall back to the documented defaults
+// (filled by the model layer); any out-of-range value or illegal enum rejects
+// the whole write with a param error (HTTP 422). A nil rewrite sub-object (or
+// its nil fields) falls back to the defaults as well.
+func AIContextSettings(param *shared.AIContextSettingsParam) error {
+	if param == nil {
+		return nil
+	}
+
+	if param.TriggerRatio != nil && (*param.TriggerRatio <= 0 || *param.TriggerRatio > 1) {
+		return xerror.WrapParamErrorWithMsg("ai context settings trigger_ratio must be in (0, 1]")
+	}
+
+	if param.KeepLatestImages != nil && *param.KeepLatestImages < 0 {
+		return xerror.WrapParamErrorWithMsg("ai context settings keep_latest_images must be >= 0")
+	}
+
+	if param.ToolResultMaxChars != nil && *param.ToolResultMaxChars < 0 {
+		return xerror.WrapParamErrorWithMsg("ai context settings tool_result_max_chars must be >= 0")
+	}
+
+	if param.ThinkingPolicy != nil {
+		switch *param.ThinkingPolicy {
+		case AIContextThinkingPolicyTrimAllButLast, AIContextThinkingPolicyKeep:
+		default:
+			return xerror.WrapParamErrorWithMsg("ai context settings thinking_policy must be one of %s/%s",
+				AIContextThinkingPolicyTrimAllButLast, AIContextThinkingPolicyKeep)
+		}
+	}
+
+	if param.CharsPerToken != nil && *param.CharsPerToken < 1 {
+		return xerror.WrapParamErrorWithMsg("ai context settings chars_per_token must be >= 1")
+	}
+
+	if param.ImageTokenEstimate != nil && *param.ImageTokenEstimate < 0 {
+		return xerror.WrapParamErrorWithMsg("ai context settings image_token_estimate must be >= 0")
+	}
+
+	if param.Rewrite != nil {
+		if param.Rewrite.Strength != nil {
+			switch *param.Rewrite.Strength {
+			case AIContextRewriteStrengthLite, AIContextRewriteStrengthFull:
+			default:
+				return xerror.WrapParamErrorWithMsg("ai context settings rewrite.strength must be one of %s/%s",
+					AIContextRewriteStrengthLite, AIContextRewriteStrengthFull)
+			}
+		}
+
+		if param.Rewrite.ProtectedSurvivalRate != nil &&
+			(*param.Rewrite.ProtectedSurvivalRate <= 0 || *param.Rewrite.ProtectedSurvivalRate > 1) {
+			return xerror.WrapParamErrorWithMsg("ai context settings rewrite.protected_survival_rate must be in (0, 1]")
+		}
+	}
+
+	return nil
+}
+
+const (
+	// MaxTrafficMirrorRuleNameLength bounds the traffic mirror rule name length.
+	MaxTrafficMirrorRuleNameLength = 128
+	// MaxTrafficMirrorClusterNameLength bounds the mirror_cluster name length
+	// (existence is checked separately by the endpoint).
+	MaxTrafficMirrorClusterNameLength = 128
+
+	// TrafficMirrorBodyRewritePathModel is the only body rewrite path supported
+	// in phase 1 (aligned with BFE mod_traffic_mirror Check).
+	TrafficMirrorBodyRewritePathModel = "model"
+)
+
+// TrafficMirrorRules validates a traffic mirror rule set (the full-replace PUT
+// body). A nil rules list is treated as empty (clear all rules); any single
+// failure rejects the whole collection with a param error (HTTP 422). The
+// mirror_cluster existence check is intentionally not done here; it is checked
+// separately by the endpoint against the cluster manager.
+func TrafficMirrorRules(param *shared.TrafficMirrorRulesParam) error {
+	if param == nil {
+		return nil
+	}
+
+	rules := param.Rules
+	if rules == nil {
+		rules = []*shared.TrafficMirrorRuleParam{}
+	}
+
+	nameSet := map[string]struct{}{}
+	condSet := map[string]struct{}{}
+	for i, rule := range rules {
+		if rule == nil {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule #%d is null", i)
+		}
+
+		if rule.Name == nil || *rule.Name == "" {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule name is required")
+		}
+		if len(*rule.Name) > MaxTrafficMirrorRuleNameLength {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule name length must be <= %d", MaxTrafficMirrorRuleNameLength)
+		}
+		if _, ok := nameSet[*rule.Name]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate traffic mirror rule name: %s", *rule.Name)
+		}
+		nameSet[*rule.Name] = struct{}{}
+
+		if rule.Cond == nil || *rule.Cond == "" {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s cond is required", *rule.Name)
+		}
+		if err := ConditionExpression(*rule.Cond); err != nil {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s cond: %v", *rule.Name, err)
+		}
+		if _, ok := condSet[*rule.Cond]; ok {
+			return xerror.WrapParamErrorWithMsg("duplicate traffic mirror rule cond: %s", *rule.Cond)
+		}
+		condSet[*rule.Cond] = struct{}{}
+
+		if rule.MirrorCluster == nil || *rule.MirrorCluster == "" {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s mirror_cluster is required", *rule.Name)
+		}
+		if len(*rule.MirrorCluster) > MaxTrafficMirrorClusterNameLength {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s mirror_cluster length must be <= %d", *rule.Name, MaxTrafficMirrorClusterNameLength)
+		}
+
+		if rule.Percentage != nil && (*rule.Percentage < 0 || *rule.Percentage > 100) {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s percentage must be between 0 and 100", *rule.Name)
+		}
+
+		if rule.RemoveHeaders != nil {
+			for _, header := range *rule.RemoveHeaders {
+				if header == "" {
+					return xerror.WrapParamErrorWithMsg("traffic mirror rule %s remove_headers cannot contain empty header", *rule.Name)
+				}
+			}
+		}
+
+		if rule.SetHeaders != nil {
+			for key, value := range rule.SetHeaders {
+				if key == "" || value == "" {
+					return xerror.WrapParamErrorWithMsg("traffic mirror rule %s set_headers key/value cannot be empty", *rule.Name)
+				}
+			}
+		}
+
+		if rule.BodyRewrites != nil {
+			for _, rewrite := range rule.BodyRewrites {
+				if rewrite == nil {
+					return xerror.WrapParamErrorWithMsg("traffic mirror rule %s body_rewrites cannot contain null element", *rule.Name)
+				}
+				if rewrite.Path == nil || *rewrite.Path != TrafficMirrorBodyRewritePathModel {
+					return xerror.WrapParamErrorWithMsg("traffic mirror rule %s body_rewrites path must be %q", *rule.Name, TrafficMirrorBodyRewritePathModel)
+				}
+				if rewrite.Value == nil || *rewrite.Value == "" {
+					return xerror.WrapParamErrorWithMsg("traffic mirror rule %s body_rewrites value is required and cannot be empty", *rule.Name)
+				}
+			}
+		}
+
+		if rule.PathRewrite != nil && *rule.PathRewrite != "" && !strings.HasPrefix(*rule.PathRewrite, "/") {
+			return xerror.WrapParamErrorWithMsg("traffic mirror rule %s path_rewrite must start with '/'", *rule.Name)
+		}
+	}
+
+	return nil
+}
+
 // LLMConfig validates the LLM configuration block used by clusters.
 func LLMConfig(c *icluster_conf.LLMConfig) error {
 	if c == nil {
@@ -725,6 +1142,21 @@ func LLMConfig(c *icluster_conf.LLMConfig) error {
 		}
 		if c.KeyAffinity.RedisPrefix != nil && *c.KeyAffinity.RedisPrefix == "" {
 			return xerror.WrapParamErrorWithMsg("llm_config.key_affinity.redis_prefix must not be empty")
+		}
+	}
+
+	// Validate normalize_upstream_error; the rules mirror the BFE
+	// AIConfCheck exactly so an accepted config never fails BFE loading.
+	if c.NormalizeUpstreamError != nil {
+		nue := c.NormalizeUpstreamError
+		if nue.UnrecognizedAction != nil && *nue.UnrecognizedAction != "" &&
+			*nue.UnrecognizedAction != "passthrough" && *nue.UnrecognizedAction != "rewrite_generic" {
+			return xerror.WrapParamErrorWithMsg(
+				"llm_config.normalize_upstream_error.unrecognized_action must be passthrough or rewrite_generic")
+		}
+		if nue.MaxBodyBytes != nil && (*nue.MaxBodyBytes < 0 || *nue.MaxBodyBytes > 4*1024*1024) {
+			return xerror.WrapParamErrorWithMsg(
+				"llm_config.normalize_upstream_error.max_body_bytes must be between 0 and 4194304")
 		}
 	}
 

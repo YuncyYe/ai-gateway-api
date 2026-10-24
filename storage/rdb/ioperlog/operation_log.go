@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/bfenetworks/bfe/bfe_util/redis_client"
+
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ioperlog"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao"
@@ -26,12 +28,16 @@ import (
 // OperationLogStorager implements ioperlog.OperationLogStorager.
 type OperationLogStorager struct {
 	dbCtxFactory lib.DBContextFactory
+	counter      *countCache
 }
 
-// NewOperationLogStorager creates a new OperationLogStorager.
-func NewOperationLogStorager(dbCtxFactory lib.DBContextFactory) *OperationLogStorager {
+// NewOperationLogStorager creates a new OperationLogStorager. counterRedis
+// backs the exact pagination-total cache; nil disables it (every count runs
+// against the database).
+func NewOperationLogStorager(dbCtxFactory lib.DBContextFactory, counterRedis redis_client.Client) *OperationLogStorager {
 	return &OperationLogStorager{
 		dbCtxFactory: dbCtxFactory,
+		counter:      newCountCache(counterRedis),
 	}
 }
 
@@ -54,7 +60,31 @@ func (s *OperationLogStorager) BatchCreate(ctx context.Context, entries []*ioper
 	}
 
 	_, err = dao.TOperationLogCreate(dbCtx, params...)
+	if err == nil && s.counter != nil {
+		// Flushed entries must be visible to totals immediately: bump the
+		// generation so per-filter cached counts are not served again.
+		s.counter.invalidate()
+	}
 	return err
+}
+
+// count returns the exact filtered total, served from the per-filter cache
+// when possible. On any cache miss or Redis failure it runs the live count
+// and back-fills the cache (issue #280).
+func (s *OperationLogStorager) count(dbCtx lib.DBContexter, where *dao.TOperationLogParam, filter *ioperlog.OperationLogFilter) (int64, error) {
+	if s.counter != nil {
+		if total, ok := s.counter.get(filter); ok {
+			return total, nil
+		}
+	}
+	total, err := dao.TOperationLogCount(dbCtx, where)
+	if err != nil {
+		return 0, err
+	}
+	if s.counter != nil {
+		s.counter.set(filter, total)
+	}
+	return total, nil
 }
 
 // List queries operation logs with the given filter.
@@ -66,12 +96,31 @@ func (s *OperationLogStorager) List(ctx context.Context, filter *ioperlog.Operat
 
 	where := filterToParam(filter)
 
-	total, err := dao.TOperationLogCount(dbCtx, where)
+	total, err := s.count(dbCtx, where, filter)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	list, err := dao.TOperationLogList(dbCtx, where)
+	paged := filter != nil && filter.Page != nil && filter.PageSize != nil
+	offset := 0
+	if paged {
+		offset = (*filter.Page - 1) * (*filter.PageSize)
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
+	var list []*dao.TOperationLog
+	switch {
+	case !paged:
+		list, err = dao.TOperationLogList(dbCtx, where)
+	case int64(offset) >= total:
+		// Beyond the last page: serve an empty page without touching the
+		// table, so an out-of-range page cannot degenerate into a full scan.
+		list = []*dao.TOperationLog{}
+	default:
+		list, err = dao.TOperationLogListDeferred(dbCtx, where)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -104,11 +153,16 @@ func entryToParam(entry *ioperlog.OperationLogEntry) *dao.TOperationLogParam {
 		CreatedAt:        &entry.CreatedAt,
 	}
 
-	if len(entry.ChangeSummary) > 0 {
-		bs, _ := json.Marshal(entry.ChangeSummary)
-		changeSummary := string(bs)
-		param.ChangeSummary = &changeSummary
-	}
+	// ChangeSummary is always assigned (even for empty/nil summaries) so that
+	// every row of a batch insert carries the same column set. struct2map skips
+	// nil pointers, and gendry's insert builder rejects batches whose rows have
+	// mismatched keys with "insert data not match" — one summary-less entry
+	// (e.g. a failed delete of a missing resource, which has neither before
+	// nor after) used to poison the whole batch and silently drop every log
+	// in it.
+	bs, _ := json.Marshal(entry.ChangeSummary)
+	changeSummary := string(bs)
+	param.ChangeSummary = &changeSummary
 
 	return param
 }
@@ -192,7 +246,10 @@ func filterToParam(filter *ioperlog.OperationLogFilter) *dao.TOperationLogParam 
 			offset = 0
 		}
 		param.Limit = []uint{uint(offset), uint(*filter.PageSize)}
-		orderBy := "created_at DESC"
+		// created_at 为秒级时间戳：同秒批量落盘的日志（异步刷盘常态）只靠
+		// created_at 排序时次序不确定（MySQL 与 SQLite 行为不同），补充
+		// id 作决胜键，保证"最新在前"稳定可判。
+		orderBy := "created_at DESC, id DESC"
 		param.OrderBy = &orderBy
 	}
 

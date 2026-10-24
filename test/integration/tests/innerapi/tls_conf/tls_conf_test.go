@@ -484,3 +484,114 @@ func extractAIConf(t *testing.T, resp *testutil.APIResponse, clusterName string)
 	}
 	return aiconf
 }
+
+// TestInnerAPI_ExportNormalizeUpstreamError locks the InnerAPI export of
+// AIConf.NormalizeUpstreamError (2026-10-06 upstream error normalization):
+// presence + per-field values, explicit redact_secrets=false passthrough,
+// and null export for clusters without the config.
+// Design: tests/integration/tests/innerapi/design.md §19.
+func TestInnerAPI_ExportNormalizeUpstreamError(t *testing.T) {
+	providerName := testutil.UniqueProviderName()
+	_, err := testutil.CreateProvider(providerName, map[string]interface{}{
+		"models": []string{"deepseek-chat"},
+	})
+	if err != nil {
+		t.Fatalf("setup provider failed: %v", err)
+	}
+	defer testutil.DeleteProvider(providerName)
+
+	exportAIConf := func(t *testing.T, clusterName string) map[string]interface{} {
+		t.Helper()
+		resp, err := testutil.GetClient().Get("/inner-api/v1/configs/tls_conf/server_data_conf")
+		if err != nil {
+			t.Fatalf("export request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		var data map[string]interface{}
+		if err := json.Unmarshal(resp.Data, &data); err != nil {
+			t.Fatalf("unmarshal failed: %v", err)
+		}
+		clusterConf, _ := data["ClusterConf"].(map[string]interface{})
+		config, _ := clusterConf["Config"].(map[string]interface{})
+		cluster, ok := config[clusterName].(map[string]interface{})
+		if !assert.True(t, ok, "cluster %s should exist in export", clusterName) {
+			return nil
+		}
+		aiconf, ok := cluster["AIConf"].(map[string]interface{})
+		if !assert.True(t, ok, "AIConf should be an object") {
+			return nil
+		}
+		return aiconf
+	}
+	createCluster := func(t *testing.T, nue interface{}) string {
+		t.Helper()
+		name := testutil.UniqueClusterName()
+		llm := map[string]interface{}{
+			"models":   []string{"deepseek-chat"},
+			"provider": providerName,
+		}
+		if nue != nil {
+			llm["normalize_upstream_error"] = nue
+		}
+		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+			"name":       name,
+			"llm_config": llm,
+		})
+		if err != nil {
+			t.Fatalf("setup create cluster failed: %v", err)
+		}
+		if resp.ErrNum != 200 {
+			t.Fatalf("setup create cluster: expected 200, got %d, ErrMsg=%s", resp.ErrNum, resp.ErrMsg)
+		}
+		return name
+	}
+
+	t.Run("IN-NUE-1-001 导出存在性与取值", func(t *testing.T) {
+		name := createCluster(t, map[string]interface{}{
+			"enabled":             true,
+			"stream_enabled":      true,
+			"unrecognized_action": "rewrite_generic",
+			"max_body_bytes":      65536,
+			"redact_secrets":      true,
+		})
+		defer testutil.DeleteCluster(name)
+
+		aiconf := exportAIConf(t, name)
+		nue, ok := aiconf["NormalizeUpstreamError"].(map[string]interface{})
+		if !assert.True(t, ok, "AIConf.NormalizeUpstreamError should be an object") {
+			return
+		}
+		assert.Equal(t, true, nue["Enabled"])
+		assert.Equal(t, true, nue["StreamEnabled"])
+		assert.Equal(t, "rewrite_generic", nue["UnrecognizedAction"])
+		assert.Equal(t, float64(65536), nue["MaxBodyBytes"])
+		assert.Equal(t, true, nue["RedactSecrets"])
+	})
+
+	t.Run("IN-NUE-1-002 redact_secrets 显式 false 导出", func(t *testing.T) {
+		name := createCluster(t, map[string]interface{}{
+			"enabled":       true,
+			"redact_secrets": false,
+		})
+		defer testutil.DeleteCluster(name)
+
+		aiconf := exportAIConf(t, name)
+		nue, ok := aiconf["NormalizeUpstreamError"].(map[string]interface{})
+		if !assert.True(t, ok, "AIConf.NormalizeUpstreamError should be an object") {
+			return
+		}
+		assert.Equal(t, true, nue["Enabled"])
+		// explicit false must survive the export (pointer passthrough)
+		assert.Equal(t, false, nue["RedactSecrets"])
+	})
+
+	t.Run("IN-NUE-1-003 未配置集群导出为 null", func(t *testing.T) {
+		name := createCluster(t, nil)
+		defer testutil.DeleteCluster(name)
+
+		aiconf := exportAIConf(t, name)
+		nue, exists := aiconf["NormalizeUpstreamError"]
+		assert.True(t, exists, "field key should be present (no omitempty)")
+		assert.Nil(t, nue, "unset config must export as null (BFE disabled)")
+	})
+}

@@ -17,9 +17,12 @@ package api_key
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
+	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xcrypto"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/api_key"
+	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao"
 )
 
@@ -42,7 +45,10 @@ func (rpps *APIKeyStorager) CreateAPIKey(ctx context.Context,
 		return 0, err
 	}
 
-	data := newAPIKeyDataToParam(param)
+	data, err := newAPIKeyDataToParam(param)
+	if err != nil {
+		return 0, err
+	}
 
 	models := []string{"*"}
 	if len(param.Models) > 0 {
@@ -63,11 +69,21 @@ func (rpps *APIKeyStorager) CreateAPIKey(ctx context.Context,
 	return dao.TAPIKeyCreate(dbCtx, data)
 }
 
-func newAPIKeyDataToParam(param *api_key.APIKeyParam) *dao.TAPIKeyParam {
+func newAPIKeyDataToParam(param *api_key.APIKeyParam) (*dao.TAPIKeyParam, error) {
+	var key, keyHash *string
+	if param.Key != nil && *param.Key != "" {
+		encKey, err := stateful.EncryptIfEnabled(*param.Key)
+		if err != nil {
+			return nil, fmt.Errorf("api_key %v: encrypt: %v", param.ID, err)
+		}
+		key = lib.PString(encKey)
+		keyHash = lib.PString(xcrypto.KeyHash(*param.Key))
+	}
 	return &dao.TAPIKeyParam{
 		ID:                param.ID,
 		Enable:            param.Enable,
-		Key:               param.Key,
+		Key:               key,
+		KeyHash:           keyHash,
 		Description:       param.Description,
 		UnlimitedQuota:    param.UnlimitedQuota,
 		ExpiredTime:       param.ExpiredTime,
@@ -77,7 +93,7 @@ func newAPIKeyDataToParam(param *api_key.APIKeyParam) *dao.TAPIKeyParam {
 		RateLimitPolicyID: param.RateLimitPolicyID,
 		RouteRulesID:      param.RouteRulesID,
 		UpdatedAt:         lib.PTimeNow(),
-	}
+	}, nil
 }
 
 func newAPIKeyFilterToParam(filter *api_key.APIKeyFilter) *dao.TAPIKeyParam {
@@ -88,13 +104,17 @@ func newAPIKeyFilterToParam(filter *api_key.APIKeyFilter) *dao.TAPIKeyParam {
 	param := &dao.TAPIKeyParam{
 		ProductName:    filter.ProductName,
 		ID:             filter.ID,
-		Key:            filter.Key,
 		InnerID:        filter.InnerID,
 		QuotaPlanID:    filter.QuotaPlanID,
 		RouteRulesID:   filter.RouteRulesID,
 		Enable:         filter.Enabled,
 		EntityID:       filter.EntityID,
 		UnlimitedQuota: filter.UnlimitedQuota,
+	}
+	// By-value lookup goes through the stable HMAC hash column; the api_key
+	// column itself is ciphertext (or legacy plaintext) and not searchable.
+	if filter.Key != nil && *filter.Key != "" {
+		param.KeyHash = lib.PString(xcrypto.KeyHash(*filter.Key))
 	}
 
 	if filter.Page != nil && filter.PageSize != nil {
@@ -119,13 +139,17 @@ func (rpps *APIKeyStorager) FetchAPIKeyList(ctx context.Context,
 
 	var rst []*api_key.APIKeyParam
 	for _, one := range list {
-		rst = append(rst, apiKeyParamToData(one))
+		p, err := apiKeyParamToData(one)
+		if err != nil {
+			return nil, err
+		}
+		rst = append(rst, p)
 	}
 
 	return rst, nil
 }
 
-func apiKeyParamToData(one *dao.TAPIKey) *api_key.APIKeyParam {
+func apiKeyParamToData(one *dao.TAPIKey) (*api_key.APIKeyParam, error) {
 	models := []string{"*"}
 	if one.AllowedModels != "" {
 		json.Unmarshal([]byte(one.AllowedModels), &models)
@@ -145,11 +169,16 @@ func apiKeyParamToData(one *dao.TAPIKey) *api_key.APIKeyParam {
 	createTime := one.CreatedAt.Unix()
 	updateTime := one.UpdatedAt.Unix()
 
+	key, err := stateful.DecryptIfEnabled(one.Key)
+	if err != nil {
+		return nil, fmt.Errorf("api_key %s: decrypt: %v", one.ID, err)
+	}
+
 	return &api_key.APIKeyParam{
 		InnerID:           &one.InnerID,
 		ID:                &one.ID,
 		Enable:            &one.Enable,
-		Key:               &one.Key,
+		Key:               &key,
 		Description:       &one.Description,
 		UnlimitedQuota:    &one.UnlimitedQuota,
 		ExpiredTime:       &one.ExpiredTime,
@@ -163,7 +192,7 @@ func apiKeyParamToData(one *dao.TAPIKey) *api_key.APIKeyParam {
 		QuotaPlanID:       one.QuotaPlanID,
 		RateLimitPolicyID: one.RateLimitPolicyID,
 		RouteRulesID:      one.RouteRulesID,
-	}
+	}, nil
 }
 
 func (rpps *APIKeyStorager) DeleteAPIKey(ctx context.Context, filter *api_key.APIKeyFilter) error {
@@ -183,7 +212,10 @@ func (rpps *APIKeyStorager) UpdateAPIKey(ctx context.Context, filter *api_key.AP
 		return 0, err
 	}
 
-	data := newAPIKeyDataToParam(param)
+	data, err := newAPIKeyDataToParam(param)
+	if err != nil {
+		return 0, err
+	}
 
 	// Omitted models/subnet stay nil so the DAO layer skips the columns and
 	// the existing values are preserved (partial update semantics).

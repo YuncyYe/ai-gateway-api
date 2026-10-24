@@ -145,7 +145,7 @@
 
 | 场景 | ErrNum | HTTP |
 |------|--------|------|
-| 参数缺失/非法（start≥end、窗口超 7 天、metric/dimension 非法值、page_size 超上限） | 参数校验错误（复用现有校验错误码惯例） | 400 |
+| 参数缺失/非法（start≥end、窗口超 7 天、metric/dimension 非法值、page_size 超上限） | 422（Param Illegal） | 422 |
 | 未认证 / 无 FeatureReport 权限 | 现有鉴权错误码 | 401 / 402 |
 | Report 模块未装配（`[Report]` 缺省） | 路由不存在 | 404 |
 | 后端查询失败 | 内部错误码 | 500 |

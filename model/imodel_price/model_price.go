@@ -43,6 +43,7 @@ type ModelPrice struct {
 	Limits              map[string]interface{} `json:"limits,omitempty" yaml:"limits,omitempty"`
 	Prices              PriceMap               `json:"prices,omitempty" yaml:"prices,omitempty"`
 	TierPrices          TierPriceMap           `json:"tier_prices,omitempty" yaml:"tier_prices,omitempty"`
+	BatchDiscount       *float64               `json:"batch_discount,omitempty" yaml:"batch_discount,omitempty"`
 	PriceCurrency       string                 `json:"price_currency,omitempty" yaml:"price_currency,omitempty"`
 	Metadata            map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	CreateTime          *int64                 `json:"create_time,omitempty" yaml:"create_time,omitempty"`

@@ -17,6 +17,7 @@ package clusters_test
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/integration/testutil"
@@ -108,6 +109,84 @@ func TestClusters_Update(t *testing.T) {
 			t.Fatalf("request failed: %v", err)
 		}
 		testutil.AssertErrCode(t, resp, 404)
+	})
+
+	t.Run("CL-4-024 更新 description 恰好 256 字节（合法边界）", func(t *testing.T) {
+		// clusters.md §1/§2.1：0-256 字节，256 是合法上界
+		desc := strings.Repeat("b", 256)
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": desc,
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		testutil.AssertDataFieldEquals(t, resp, "description", desc)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", desc)
+	})
+
+	t.Run("CL-4-025 更新 description 257 字节被拒绝", func(t *testing.T) {
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": strings.Repeat("c", 257),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+	})
+
+	t.Run("CL-4-026 更新 description 含控制字符被拒绝且旧值保留", func(t *testing.T) {
+		baseline := "控制字符基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": "abc\x01def",
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
+	})
+
+	t.Run("CL-4-027 非法 description 不污染存量值（原子性）", func(t *testing.T) {
+		baseline := "原子性基线"
+		if _, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": baseline,
+		}); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+clusterName, map[string]interface{}{
+			"description": strings.Repeat("d", 257),
+		})
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertErrCode(t, resp, 422)
+
+		got, err := testutil.GetClient().Get("/open-api/v1/clusters/" + clusterName)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		testutil.AssertSuccess(t, got)
+		testutil.AssertDataFieldEquals(t, got, "description", baseline)
 	})
 
 	t.Run("CL-4-006 更新 keys（全量替换）", func(t *testing.T) {
@@ -716,5 +795,159 @@ func TestClusters_Update_PreventDeleteReferencedModel(t *testing.T) {
 		testutil.GetClient().Delete("/open-api/v1/api-keys/" + apiKeyID.(string))
 		testutil.DeleteCluster(clusterName)
 		testutil.DeleteProvider(providerName)
+	})
+}
+
+// TestClusters_Update_NormalizeUpstreamError covers PATCH semantics of
+// llm_config.normalize_upstream_error (2026-10-06 upstream error
+// normalization): omitted-field preservation, whole-object replacement
+// (same pattern as CL-4-011 key_affinity), explicit-null equivalence,
+// PUT/PATCH symmetry on invalid values, and read-back-zero-change after
+// 4xx. Design: tests/integration/tests/clusters/design.md §12.
+func TestClusters_Update_NormalizeUpstreamError(t *testing.T) {
+	provider := testutil.UniqueProviderName()
+	if _, err := testutil.CreateProvider(provider, map[string]interface{}{
+		"models": []string{"deepseek-chat"},
+	}); err != nil {
+		t.Fatalf("setup provider failed: %v", err)
+	}
+	defer testutil.DeleteProvider(provider)
+
+	fullNue := func() map[string]interface{} {
+		return map[string]interface{}{
+			"enabled":             true,
+			"stream_enabled":      true,
+			"unrecognized_action": "rewrite_generic",
+			"max_body_bytes":      65536,
+			"redact_secrets":      false,
+		}
+	}
+	llmWithNue := func(nue map[string]interface{}) map[string]interface{} {
+		return map[string]interface{}{
+			"models":                 []string{"deepseek-chat"},
+			"provider":               provider,
+			"normalize_upstream_error": nue,
+		}
+	}
+	newClusterWithNue := func(t *testing.T) string {
+		t.Helper()
+		name := testutil.UniqueClusterName()
+		resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
+			"name":       name,
+			"llm_config": llmWithNue(fullNue()),
+		})
+		if err != nil {
+			t.Fatalf("setup create cluster failed: %v", err)
+		}
+		if resp.ErrNum != 200 {
+			t.Fatalf("setup create cluster: expected 200, got %d, ErrMsg=%s", resp.ErrNum, resp.ErrMsg)
+		}
+		return name
+	}
+	readBackNue := func(t *testing.T, cluster string) map[string]interface{} {
+		t.Helper()
+		resp, err := testutil.GetClient().Get("/open-api/v1/clusters/" + cluster)
+		if err != nil {
+			t.Fatalf("get cluster failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		var data map[string]interface{}
+		json.Unmarshal(resp.Data, &data)
+		llm, _ := data["llm_config"].(map[string]interface{})
+		nue, _ := llm["normalize_upstream_error"].(map[string]interface{})
+		return nue
+	}
+	assertFullNueUnchanged := func(t *testing.T, cluster string) {
+		t.Helper()
+		nue := readBackNue(t, cluster)
+		if assert.NotNil(t, nue, "nue must be preserved") {
+			assert.Equal(t, true, nue["enabled"])
+			assert.Equal(t, true, nue["stream_enabled"])
+			assert.Equal(t, "rewrite_generic", nue["unrecognized_action"])
+			assert.Equal(t, float64(65536), nue["max_body_bytes"])
+			assert.Equal(t, false, nue["redact_secrets"])
+		}
+	}
+
+	t.Run("CL-4-101 PATCH 省略字段保留原值", func(t *testing.T) {
+		name := newClusterWithNue(t)
+		defer testutil.DeleteCluster(name)
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+name, map[string]interface{}{
+			"description": "patch unrelated field only",
+		})
+		if err != nil {
+			t.Fatalf("patch failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		assertFullNueUnchanged(t, name)
+	})
+
+	t.Run("CL-4-102 PATCH 整体替换 nue 对象", func(t *testing.T) {
+		name := newClusterWithNue(t)
+		defer testutil.DeleteCluster(name)
+		replaced := map[string]interface{}{
+			"enabled":             false,
+			"stream_enabled":      false,
+			"unrecognized_action": "passthrough",
+			"max_body_bytes":      131072,
+			"redact_secrets":      true,
+		}
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+name, map[string]interface{}{
+			"llm_config": llmWithNue(replaced),
+		})
+		if err != nil {
+			t.Fatalf("patch failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		nue := readBackNue(t, name)
+		if assert.NotNil(t, nue) {
+			assert.Equal(t, false, nue["enabled"])
+			assert.Equal(t, false, nue["stream_enabled"])
+			assert.Equal(t, "passthrough", nue["unrecognized_action"])
+			assert.Equal(t, float64(131072), nue["max_body_bytes"])
+			assert.Equal(t, true, nue["redact_secrets"])
+		}
+	})
+
+	t.Run("CL-4-103 PATCH llm_config 省略 nue = 清空（全量替换语义）", func(t *testing.T) {
+		name := newClusterWithNue(t)
+		defer testutil.DeleteCluster(name)
+		resp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+name, map[string]interface{}{
+			"llm_config": map[string]interface{}{
+				"models":   []string{"deepseek-chat"},
+				"provider": provider,
+			},
+		})
+		if err != nil {
+			t.Fatalf("patch failed: %v", err)
+		}
+		testutil.AssertSuccess(t, resp)
+		// llm_config is wholesale-replaced on PATCH (same semantics as
+		// llm_config.keys per the clusters contract): an omitted
+		// normalize_upstream_error is cleared, not preserved.
+		nue := readBackNue(t, name)
+		assert.Nil(t, nue, "nue must be cleared when llm_config is patched without it")
+	})
+
+	t.Run("CL-4-104 PATCH 非法值拒绝 + 回读零变更", func(t *testing.T) {
+		name := newClusterWithNue(t)
+		defer testutil.DeleteCluster(name)
+
+		badNue := fullNue()
+		badNue["unrecognized_action"] = "replace"
+		patchResp, err := testutil.GetClient().Patch("/open-api/v1/clusters/"+name, map[string]interface{}{
+			"llm_config": llmWithNue(badNue),
+		})
+		if err != nil {
+			t.Fatalf("patch failed: %v", err)
+		}
+
+		if patchResp.ErrNum != 422 {
+			t.Fatalf("expected 422, got %d, ErrMsg=%s", patchResp.ErrNum, patchResp.ErrMsg)
+		}
+		assert.Contains(t, patchResp.ErrMsg, "unrecognized_action")
+
+		// read-back zero change after the rejection
+		assertFullNueUnchanged(t, name)
 	})
 }

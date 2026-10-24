@@ -38,7 +38,8 @@ Provider 与 Cluster 概念分离后：
 | 获取所有 Provider 名称 | 1 |
 | instance_pool 默认 name 生成 | 1 |
 | 设置高峰/闲时模板 | 11 |
-| **合计** | **66** |
+| K8s 实例池（/k8s_pools + k8s_pool 模式 Provider） | 12 |
+| **合计** | **78** |
 
 ## 4. 认证方式
 
@@ -59,6 +60,8 @@ provider/
 │   └── update_test.go
 ├── instance_pool_sync/
 │   └── instance_pool_sync_test.go
+├── k8s_pool/
+│   └── k8s_pool_test.go
 ├── delete/
 │   └── delete_test.go
 ├── discover/
@@ -1532,3 +1535,41 @@ tiers:
 6. `/providers/tools/discover-models` 为无状态工具接口，不绑定 Provider；集成测试通过本地 `httptest` 服务器模拟远端响应。
 7. `PUT /providers/{provider_name}/pricing-tiers` 只更新 `time_zone`/`tiers`，不会覆盖 provider 的其他字段。
 8. 更新 Provider 时若请求体包含 `name`，接口返回 422；`name` 只能通过创建接口指定。
+
+## 18. K8s 实例池（/k8s_pools）
+
+### 18.1 接口信息
+
+| 项目 | 值 |
+|------|-----|
+| 模块 | Inner API / Provider |
+| 接口名称 | K8s 实例池维护（k8s-pools.md） |
+| 方法 | PUT/GET/DELETE |
+| 路径 | `/inner-api/v1/k8s_pools/{name}/instances`、`/inner-api/v1/k8s_pools/{name}`、`/inner-api/v1/k8s_pools` |
+| 说明 | 发现组件唯一写入通道；provider（`instance_source=k8s_pool`）侧 `k8s_instance_pool` 为只读镜像 |
+
+### 18.2 测试用例
+
+| 用例编号 | 用例名称 | 预期结果 |
+|----------|----------|----------|
+| KP-1-001 | 端到端全链路：PUT pool → 建 k8s_pool provider → 镜像出现 → cluster 引用 → 导出含实例 → 再 PUT 增删实例 → 导出跟随 → DELETE pool → 镜像清空、导出空条目 | 全链路 200/404 断言成立 |
+| KP-2-001 | 查询全部 pool 列表 | 200，`list` 含条目及 `instance_count`/`last_sync_time` |
+| KP-3-001 | 参数校验：非法 pool 名、重复 addr/port、weight/port 越界、缺 addr | 422 |
+| KP-3-002 | 查询/删除不存在的 pool | 404 |
+| KP-4-001 | OpenAPI：k8s_instance_pool 只读 422、非法 instance_source 422、k8s_pool 模式缺 k8s_pool_name 422 | 422 |
+| KP-4-002 | 模式切回 instance_pool 恢复休眠 instance_pool 与 k8s_pool_name | 200，字段休眠保留 |
+| KP-5-001 | 删除被引用 pool（无引用保护） | 200，引用者镜像清空 |
+| KP-6-001 | /k8s_pools ↔ /providers 联动（N:1）：同一 pool 供多 provider 引用，一次 PUT 全部镜像填充、互不影响；DELETE 全部清空且不影响其他 pool 的引用者 | 镜像跟随各自 pool 的 PUT/DELETE，字段值精确匹配 |
+| KP-6-002 | PUT 空实例列表清空镜像（不删 pool） | 200，镜像清空，pool `instance_count=0` 仍在 |
+| KP-6-003 | 模式切换脱离/恢复联动：k8s_pool → instance_pool 切换后镜像清空且 pool PUT 不再到达；切回 k8s_pool 后下一次 PUT 镜像恢复跟随 | 切换后镜像 `[]`，脱离期间 PUT 无效，恢复后镜像跟随 |
+| KP-7-001 | 4xx 回读零变更：PATCH 非法 k8s_pool_name → 422 → provider 的 k8s_pool_name 与 instance_pool 逐字段不变 | 422，读回与操作前一致 |
+| KP-7-002 | 4xx 回读零变更：创建携带只读 k8s_instance_pool → 422 → GET provider 404（未留下半成品资源） | 422，GET 404 |
+| KP-7-003 | 4xx 回读零变更：PATCH 切 k8s_pool 模式缺 k8s_pool_name → 422 → instance_source 与镜像不变 | 422，读回与操作前一致 |
+| KP-7-004 | 4xx 回读零变更 + 防泄漏：已存在 pool 上非法 PUT → 422 → pool、provider 镜像、cluster_table 导出逐字段不变（非法实例不得出现在导出产物） | 422，三方读回不变 |
+| KP-7-005 | PATCH 省略矩阵（k8s 模式）：PATCH 只改 description（合同必填字段照常携带）→ models/keys/休眠 instance_pool/k8s_pool_name/镜像均未提交字段原值不变 | 200，未提交字段全保留 |
+| KP-7-006 | 省略 vs 显式空对照：切回 instance_pool 时显式 `instance_pool: []` → 422 且休眠池原值保留；携带休眠池原值提交 → 200 且休眠池恢复生效、k8s_pool_name 休眠保留 | 前者 422，后者 200 |
+| KP-7-007 | 审计：模式切换 PATCH 产生 provider update 日志，`diff_keys` 精确等于实际变更字段（ElementsMatch，禁止 Contains） | diff_keys = [instance_source, k8s_pool_name] |
+
+> 说明：k8s_pool 模式 provider 创建后，其 `k8s_instance_pool` 镜像在下一次 pool PUT 的 fan-out 时才填充（"池不存在 ≡ 零实例"）；端到端用例中通过再次 PUT 同一实例列表触发镜像出现。
+>
+> KP-6-003 依赖切换时点行为：provider 切换到 `instance_pool` 模式时系统强制清空只读镜像（契约约定该模式下 `k8s_instance_pool` 恒为空数组），镜像刷新始终专属 `/k8s_pools` 写入通道。

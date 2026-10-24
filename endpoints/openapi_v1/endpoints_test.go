@@ -43,6 +43,9 @@ func TestEndpoints(t *testing.T) {
 
 	// Sanity check that some well-known paths are registered.
 	assert.Contains(t, paths, "/auth/users")
+	assert.Contains(t, paths, "/ai-cache-rules")
+	assert.Contains(t, paths, "/traffic-mirror-rules")
+	assert.Contains(t, paths, "/intent-config")
 	assert.Contains(t, paths, "/clusters")
 	assert.Contains(t, paths, "/epp-pool")
 	assert.Contains(t, paths, "/epp-assignments")

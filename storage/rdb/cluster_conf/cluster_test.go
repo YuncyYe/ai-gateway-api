@@ -65,6 +65,7 @@ CREATE TABLE clusters (
   llm_config TEXT,
   balance_mode TEXT NOT NULL DEFAULT 'WRR',
   epp_config TEXT,
+  epp_runtime TEXT,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (name)
@@ -121,7 +122,7 @@ func TestRDBClusterStorager_BalanceModeEppConfig(t *testing.T) {
 	s := setupTestClusterStorager(t)
 
 	t.Run("create with EPP mode and epp_config round-trips", func(t *testing.T) {
-		eppConfig := `{"scheduling_profile":"balanced"}`
+		eppConfig := `{"load_profile":"balanced"}`
 		id, err := s.ClusterCreate(ctx, product, &icluster_conf.ClusterParam{
 			Name:        lib.PString("c-epp"),
 			ProductID:   lib.PInt64(product.ID),
@@ -174,12 +175,73 @@ func TestRDBClusterStorager_BalanceModeEppConfig(t *testing.T) {
 
 		require.NoError(t, s.ClusterUpdate(ctx, product, cluster, &icluster_conf.ClusterParam{
 			BalanceMode: lib.PString(icluster_conf.BalanceModeWRR),
-			EppConfig:   lib.PString(`{"scheduling_profile":"latency-first"}`),
+			EppConfig:   lib.PString(`{"load_profile":"queue-first"}`),
 		}))
 
 		updated, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-epp")})
 		require.NoError(t, err)
 		assert.Equal(t, icluster_conf.BalanceModeWRR, updated.BalanceMode)
-		assert.Equal(t, `{"scheduling_profile":"latency-first"}`, updated.EppConfig)
+		assert.Equal(t, `{"load_profile":"queue-first"}`, updated.EppConfig)
+	})
+}
+
+func TestRDBClusterStorager_EppRuntime(t *testing.T) {
+	ctx := context.Background()
+	product := &ibasic.Product{ID: 2, Name: "test"}
+	s := setupTestClusterStorager(t)
+
+	t.Run("create with epp_runtime round-trips", func(t *testing.T) {
+		eppRuntime := `{"check":{"check_interval":"2s"},"timeout":{"connect":"500ms"}}`
+		id, err := s.ClusterCreate(ctx, product, &icluster_conf.ClusterParam{
+			Name:       lib.PString("c-rt"),
+			ProductID:  lib.PInt64(product.ID),
+			EppRuntime: lib.PString(eppRuntime),
+		}, nil)
+		require.NoError(t, err)
+
+		cluster, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-rt")})
+		require.NoError(t, err)
+		require.NotNil(t, cluster)
+		assert.Equal(t, id, cluster.ID)
+		assert.Equal(t, eppRuntime, cluster.EppRuntime)
+	})
+
+	t.Run("create without epp_runtime yields empty", func(t *testing.T) {
+		_, err := s.ClusterCreate(ctx, product, &icluster_conf.ClusterParam{
+			Name:      lib.PString("c-empty"),
+			ProductID: lib.PInt64(product.ID),
+		}, nil)
+		require.NoError(t, err)
+
+		cluster, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-empty")})
+		require.NoError(t, err)
+		require.NotNil(t, cluster)
+		assert.Equal(t, "", cluster.EppRuntime)
+	})
+
+	t.Run("update without carrying retains stored value", func(t *testing.T) {
+		cluster, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-rt")})
+		require.NoError(t, err)
+		require.NotNil(t, cluster)
+
+		require.NoError(t, s.ClusterUpdate(ctx, product, cluster, &icluster_conf.ClusterParam{}))
+
+		updated, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-rt")})
+		require.NoError(t, err)
+		assert.NotEmpty(t, updated.EppRuntime)
+	})
+
+	t.Run("update carrying epp_runtime overwrites", func(t *testing.T) {
+		cluster, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-rt")})
+		require.NoError(t, err)
+		require.NotNil(t, cluster)
+
+		require.NoError(t, s.ClusterUpdate(ctx, product, cluster, &icluster_conf.ClusterParam{
+			EppRuntime: lib.PString(`{"timeout":{"call":"9s"}}`),
+		}))
+
+		updated, err := s.FetchCluster(ctx, &icluster_conf.ClusterFilter{Name: lib.PString("c-rt")})
+		require.NoError(t, err)
+		assert.Equal(t, `{"timeout":{"call":"9s"}}`, updated.EppRuntime)
 	})
 }

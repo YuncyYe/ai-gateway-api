@@ -24,20 +24,32 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
 )
 
-// Simplified epp_config field values and defaults (see api-changes.md §3.2.1).
+// Simplified epp_config field values and defaults (see api-changes.md §3.2).
 const (
-	SchedulingProfileLatencyFirst    = "latency-first"
-	SchedulingProfileBalanced        = "balanced"
-	SchedulingProfileThroughputFirst = "throughput-first"
+	LoadProfileQueueFirst = "queue-first"
+	LoadProfileBalanced   = "balanced"
+	LoadProfileKVFirst    = "kv-first"
 
-	CacheAffinityLow    = "low"
-	CacheAffinityMedium = "medium"
-	CacheAffinityHigh   = "high"
+	AffinityOff    = "off"
+	AffinityLow    = "low"
+	AffinityMedium = "medium"
+	AffinityHigh   = "high"
 
-	DefaultSchedulingProfile      = SchedulingProfileBalanced
-	DefaultPrefixCacheAffinity    = true
-	DefaultKVCacheUtilizationMax  = 0.9
-	DefaultSessionAffinityEnabled = false
+	DefaultLoadProfile                 = LoadProfileBalanced
+	DefaultAffinity                    = AffinityMedium
+	DefaultPrefixCacheAffinity         = true
+	DefaultKVCacheUtilizationMax       = 0.9
+	DefaultWaitingQueueMax             = 0
+	DefaultRunningRequestsMax          = 0
+	DefaultFallbackOnEmpty             = false
+	DefaultMetricsStalenessThresholdMs = 200
+	DefaultSessionAffinityEnabled      = false
+
+	// Detector internal fixed values (not exposed this round): stalenessPolicy
+	// "ignore" avoids "monitoring jitter halts everything"; queue depth defaults
+	// to 5 when waiting_queue_max is not enabled.
+	defaultSaturationQueueDepthThreshold = 5
+	stalenessPolicyIgnore                = "ignore"
 )
 
 // FlowControlUnlimited marks an explicit "no limit" max_requests.
@@ -48,13 +60,22 @@ const FlowControlUnlimited = -1
 // pointers so that "not set" (follow compiler defaults) is distinguishable
 // from an explicit value; unset fields are not persisted.
 type EppConfigSimplified struct {
-	SchedulingProfile      *string                `json:"scheduling_profile,omitempty"`
-	CacheAffinity          *string                `json:"cache_affinity,omitempty"`
-	PrefixCacheAffinity    *bool                  `json:"prefix_cache_affinity,omitempty"`
-	SessionAffinityEnabled *bool                  `json:"session_affinity_enabled,omitempty"`
-	SessionAffinityHeader  *string                `json:"session_affinity_header,omitempty"`
-	KVCacheUtilizationMax  *float64               `json:"kv_cache_utilization_max,omitempty"`
-	FlowControl            *FlowControlSimplified `json:"flow_control,omitempty"`
+	// ── ① 调度倾向 ──
+	LoadProfile            *string `json:"load_profile,omitempty"`
+	Affinity               *string `json:"affinity,omitempty"`
+	PrefixCacheAffinity    *bool   `json:"prefix_cache_affinity,omitempty"`
+	SessionAffinityEnabled *bool   `json:"session_affinity_enabled,omitempty"`
+	SessionAffinityHeader  *string `json:"session_affinity_header,omitempty"`
+
+	// ── ② 谁能接（准入 + 坏后端剔除） ──
+	KVCacheUtilizationMax       *float64 `json:"kv_cache_utilization_max,omitempty"`
+	WaitingQueueMax             *float64 `json:"waiting_queue_max,omitempty"`
+	RunningRequestsMax          *float64 `json:"running_requests_max,omitempty"`
+	FallbackOnEmpty             *bool    `json:"fallback_on_empty,omitempty"`
+	MetricsStalenessThresholdMs *int     `json:"metrics_staleness_threshold_ms,omitempty"`
+
+	// ── ③ 容量与排队 ──
+	FlowControl *FlowControlSimplified `json:"flow_control,omitempty"`
 }
 
 // FlowControlSimplified is the simplified flow-control section of epp_config.
@@ -87,12 +108,16 @@ func ParseEppConfig(raw string) (*EppConfigSimplified, error) {
 // JSON object {} decodes to an all-nil struct).
 func (c *EppConfigSimplified) IsEmpty() bool {
 	return c == nil ||
-		(c.SchedulingProfile == nil &&
-			c.CacheAffinity == nil &&
+		(c.LoadProfile == nil &&
+			c.Affinity == nil &&
 			c.PrefixCacheAffinity == nil &&
 			c.SessionAffinityEnabled == nil &&
 			c.SessionAffinityHeader == nil &&
 			c.KVCacheUtilizationMax == nil &&
+			c.WaitingQueueMax == nil &&
+			c.RunningRequestsMax == nil &&
+			c.FallbackOnEmpty == nil &&
+			c.MetricsStalenessThresholdMs == nil &&
 			c.FlowControl == nil)
 }
 
@@ -103,21 +128,21 @@ func (c *EppConfigSimplified) Validate() error {
 		return nil
 	}
 
-	if c.SchedulingProfile != nil {
-		switch *c.SchedulingProfile {
-		case SchedulingProfileLatencyFirst, SchedulingProfileBalanced, SchedulingProfileThroughputFirst:
+	if c.LoadProfile != nil {
+		switch *c.LoadProfile {
+		case LoadProfileQueueFirst, LoadProfileBalanced, LoadProfileKVFirst:
 		default:
-			return xerror.WrapParamErrorWithMsg("epp_config.scheduling_profile must be one of %q/%q/%q, got %q",
-				SchedulingProfileLatencyFirst, SchedulingProfileBalanced, SchedulingProfileThroughputFirst, *c.SchedulingProfile)
+			return xerror.WrapParamErrorWithMsg("epp_config.load_profile must be one of %q/%q/%q, got %q",
+				LoadProfileQueueFirst, LoadProfileBalanced, LoadProfileKVFirst, *c.LoadProfile)
 		}
 	}
 
-	if c.CacheAffinity != nil {
-		switch *c.CacheAffinity {
-		case CacheAffinityLow, CacheAffinityMedium, CacheAffinityHigh:
+	if c.Affinity != nil {
+		switch *c.Affinity {
+		case AffinityOff, AffinityLow, AffinityMedium, AffinityHigh:
 		default:
-			return xerror.WrapParamErrorWithMsg("epp_config.cache_affinity must be one of %q/%q/%q, got %q",
-				CacheAffinityLow, CacheAffinityMedium, CacheAffinityHigh, *c.CacheAffinity)
+			return xerror.WrapParamErrorWithMsg("epp_config.affinity must be one of %q/%q/%q/%q, got %q",
+				AffinityOff, AffinityLow, AffinityMedium, AffinityHigh, *c.Affinity)
 		}
 	}
 
@@ -125,6 +150,18 @@ func (c *EppConfigSimplified) Validate() error {
 		if *c.KVCacheUtilizationMax <= 0 || *c.KVCacheUtilizationMax > 1 {
 			return xerror.WrapParamErrorWithMsg("epp_config.kv_cache_utilization_max must be in (0, 1], got %v", *c.KVCacheUtilizationMax)
 		}
+	}
+
+	if c.WaitingQueueMax != nil && *c.WaitingQueueMax < 0 {
+		return xerror.WrapParamErrorWithMsg("epp_config.waiting_queue_max must be >= 0, got %v", *c.WaitingQueueMax)
+	}
+
+	if c.RunningRequestsMax != nil && *c.RunningRequestsMax < 0 {
+		return xerror.WrapParamErrorWithMsg("epp_config.running_requests_max must be >= 0, got %v", *c.RunningRequestsMax)
+	}
+
+	if c.MetricsStalenessThresholdMs != nil && *c.MetricsStalenessThresholdMs <= 0 {
+		return xerror.WrapParamErrorWithMsg("epp_config.metrics_staleness_threshold_ms must be > 0, got %d", *c.MetricsStalenessThresholdMs)
 	}
 
 	if c.SessionAffinityEnabled != nil && *c.SessionAffinityEnabled {
@@ -166,15 +203,29 @@ func (f *FlowControlSimplified) Validate() error {
 		return xerror.WrapParamErrorWithMsg("epp_config.flow_control.no_endpoint_queue_ttl must be >= 0, got %d", *f.NoEndpointQueueTTL)
 	}
 
+	// enable_eviction is not wired in EPP yet; keep it false (the compiled
+	// output never emits it).
+	if f.EnableEviction != nil && *f.EnableEviction {
+		return xerror.WrapParamErrorWithMsg("epp_config.flow_control.enable_eviction is not supported, keep false")
+	}
+
 	return nil
 }
 
-// EffectiveSchedulingProfile returns the profile value with default applied.
-func (c *EppConfigSimplified) EffectiveSchedulingProfile() string {
-	if c == nil || c.SchedulingProfile == nil {
-		return DefaultSchedulingProfile
+// EffectiveLoadProfile returns the load profile value with default applied.
+func (c *EppConfigSimplified) EffectiveLoadProfile() string {
+	if c == nil || c.LoadProfile == nil {
+		return DefaultLoadProfile
 	}
-	return *c.SchedulingProfile
+	return *c.LoadProfile
+}
+
+// EffectiveAffinity returns the affinity strength with default applied.
+func (c *EppConfigSimplified) EffectiveAffinity() string {
+	if c == nil || c.Affinity == nil {
+		return DefaultAffinity
+	}
+	return *c.Affinity
 }
 
 // EffectivePrefixCacheAffinity returns the prefix cache affinity switch with default applied.
@@ -191,6 +242,38 @@ func (c *EppConfigSimplified) EffectiveKVCacheUtilizationMax() float64 {
 		return DefaultKVCacheUtilizationMax
 	}
 	return *c.KVCacheUtilizationMax
+}
+
+// EffectiveWaitingQueueMax returns the waiting-queue filter threshold with default applied.
+func (c *EppConfigSimplified) EffectiveWaitingQueueMax() float64 {
+	if c == nil || c.WaitingQueueMax == nil {
+		return DefaultWaitingQueueMax
+	}
+	return *c.WaitingQueueMax
+}
+
+// EffectiveRunningRequestsMax returns the running-requests filter threshold with default applied.
+func (c *EppConfigSimplified) EffectiveRunningRequestsMax() float64 {
+	if c == nil || c.RunningRequestsMax == nil {
+		return DefaultRunningRequestsMax
+	}
+	return *c.RunningRequestsMax
+}
+
+// EffectiveFallbackOnEmpty returns the filter fallback switch with default applied.
+func (c *EppConfigSimplified) EffectiveFallbackOnEmpty() bool {
+	if c == nil || c.FallbackOnEmpty == nil {
+		return DefaultFallbackOnEmpty
+	}
+	return *c.FallbackOnEmpty
+}
+
+// EffectiveMetricsStalenessThresholdMs returns the bad-endpoint eviction threshold (ms).
+func (c *EppConfigSimplified) EffectiveMetricsStalenessThresholdMs() int {
+	if c == nil || c.MetricsStalenessThresholdMs == nil {
+		return DefaultMetricsStalenessThresholdMs
+	}
+	return *c.MetricsStalenessThresholdMs
 }
 
 // EffectiveSessionAffinityEnabled returns the session affinity switch with default applied.

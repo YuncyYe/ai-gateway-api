@@ -39,6 +39,7 @@ var ValidModes = map[string]bool{
 	"ocr":                 true,
 	"search":              true,
 	"realtime":            true,
+	"batch":               true,
 }
 
 // Capability enums.
@@ -244,6 +245,12 @@ func ValidateModelPrice(m *ModelPrice) error {
 			if err := checkPricePrecision(fmt.Sprintf("%s in tier %s", k, tierName), v); err != nil {
 				return err
 			}
+		}
+	}
+
+	if m.BatchDiscount != nil {
+		if *m.BatchDiscount <= 0 || *m.BatchDiscount > 1 {
+			return xerror.WrapParamErrorWithMsg("batch_discount must be in (0, 1]")
 		}
 	}
 

@@ -55,7 +55,7 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/mod-api-key?version=000
 | version | string | 配置版本号 |
 | config | object | 按产品线分组的 API-Key 路由规则 |
 | QuotaPlans | object | 按产品线分组的配额计划定义，Token 通过 `quota_plans` 数组引用 |
-| tokens | object | 按产品线分组的 Token 配置 |
+| tokens | object | 按产品线分组的 Token 配置；**`[Security].EncryptExports=true` 时外层键为 `enc$v1$` 密文，见 §3.5** |
 
 ### 3.2 config 结构（路由规则）
 
@@ -111,7 +111,7 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/mod-api-key?version=000
 
 | 字段 | 类型 | 说明 | 可能取值 |
 |------|------|------|----------|
-| key | string | API-Key 值 | 系统生成的 Key 字符串 |
+| key | string | API-Key 值；**`EncryptExports=true` 时固定为空串**（明文见外层键密文，消费方解密后回填），见 §3.5 | 系统生成的 Key 字符串 |
 | key_id | string | API-Key 标识 ID | 用于唯一标识该 API-Key，对应 API-Key 的唯一标识 |
 | enabled | bool | 是否启用 | `true`: 启用，`false`: 禁用 |
 | expired_time | int64 | 过期时间 | `-1`: 永不过期；其他为 Unix 时间戳（秒） |
@@ -129,6 +129,46 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/mod-api-key?version=000
 | TagName | string | Entity 类型 | `department`, `team`, `project` |
 | TagValue | string | Entity 名称 | `dept-engineering`, `team-core` |
 | TagLevel | int | 标签级别，取值为 1~5 的整数 | `3` |
+
+### 3.5 tokens 敏感字段加密形态（`[Security].EncryptExports=true` 时）
+
+开关默认关闭，关闭时本节不适用、输出与历史版本一致。开启后**仅** tokens 外层键加密，
+其余字段（含内层 `key_id`/`enabled`/配额/Tags、`config`、`QuotaPlans`）原样可读。
+
+- **信封**：外层键 = `enc$v1$<base64(keyID(1B) | nonce(12B) | AES-256-GCM(api_key)+tag(16B))>`；
+  加密钥为文件钥 keyring（`[Security].ExportKeyFile`）中的 32B 原始密钥，选钥按密文首字节
+  keyID 查 `[Keys]`；密文确定性（同一 keyID+明文 字节恒定，`data_sign` 稳定）。
+- **marker 直通**：无 `enc$v1$` 前缀的值一律按明文处理（灰度/回滚/新旧并存兼容语义），
+  消费方不得拒绝无前缀值。
+- **内层 `key`**：固定空串 `""`。消费方解密外层键后回填明文键；不得因内层 `key` 为空
+  拒绝加载。
+
+```json
+{
+    "tokens": {
+        "ai_product": {
+            "enc$v1$9mJz…": {
+                "key": "",
+                "key_id": "ak-test-key-001",
+                "enabled": true,
+                "expired_time": -1,
+                "unlimited_quota": false,
+                "allow_models": "gpt-4,gpt-3.5-turbo",
+                "block_models": "gpt-4-32k",
+                "subnet": "192.168.0.0/16,10.0.0.0/8",
+                "quota_plans": ["ak-test-key-001", "dept-engineering"],
+                "Tags": [
+                    {"TagName": "department", "TagValue": "dept-engineering", "TagLevel": 3}
+                ]
+            }
+        }
+    }
+}
+```
+
+上线顺序：先全量升级支持解密的 BFE，再开启 `EncryptExports`（错配将导致 BFE reload
+失败、旧配置滞留）。回滚 = 关闭开关，下一导出周期回到明文。详见
+`design-docs/modifications/2026-10-05-export-config-field-encryption/api-changes.md`。
 
 ### 3.4 QuotaPlans 结构（配额计划定义）
 

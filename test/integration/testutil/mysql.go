@@ -21,9 +21,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
 )
 
 // StartServerWithMySQL 以 MySQL 为后端启动测试服务器，供 //go:build mysql
@@ -31,7 +33,7 @@ import (
 // issue #80 / #99 / #132）。
 //
 // adminDSN 为不带库名的管理员连接串，形如 "root:pass@tcp(127.0.0.1:3306)/"
-//（从 AIAPI_MYSQL_DSN 环境变量读取）。流程：
+// （从 AIAPI_MYSQL_DSN 环境变量读取）。流程：
 //  1. CREATE DATABASE ai_gateway_it_<pid>_<rand>
 //  2. 执行项目 db_ddl.sql（含默认产品线种子）
 //  3. 写入 MySQL 版种子数据（对齐 SeedTestData）
@@ -40,59 +42,118 @@ import (
 // 返回的 ServerManager 不接管全局 client（调用方应以 sm.ServerURL 自建
 // Client）；Shutdown 时自动 DROP DATABASE。
 func StartServerWithMySQL(adminDSN string) (*ServerManager, error) {
+	return startServerWithMySQL(adminDSN, "", 0)
+}
+
+// startServerWithMySQL 是 MySQL 后端的统一入口：monitorPortMode 语义同
+// startServer（1=启用随机监控端口），extraTOML 追加在默认配置之后。
+// 每次调用创建独立数据库，Shutdown 时 DROP。
+func startServerWithMySQL(adminDSN, extraTOML string, monitorPortMode int) (*ServerManager, error) {
+	dbName, err := provisionMySQLDatabase(adminDSN)
+	if err != nil {
+		return nil, err
+	}
+	section, err := mysqlDBSection(adminDSN, dbName)
+	if err != nil {
+		dropMySQLDatabase(adminDSN, dbName)
+		return nil, err
+	}
+
+	sm, err := startServer(nil, "", extraTOML, &dbPatch{driver: "mysql", section: section}, monitorPortMode)
+	if err != nil {
+		dropMySQLDatabase(adminDSN, dbName)
+		return nil, err
+	}
+	sm.mysqlAdminDSN = adminDSN
+	sm.mysqlDBName = dbName
+	return sm, nil
+}
+
+// defaultMySQLAdminDSN 是本地开发默认探测的管理员 DSN（root 无口令）。
+const defaultMySQLAdminDSN = "root@tcp(127.0.0.1:3306)/"
+
+// resolveMySQLAdminDSN 决定默认入口（StartServer/StartServerWithMonitor/
+// StartServerWithSharedInfra 等）使用的后端。优先级：
+//  1. AIAPI_FORCE_SQLITE=1 → 回退 SQLite（显式保留旧行为，供无 MySQL 的环境/CI）；
+//  2. AIAPI_MYSQL_DSN（管理员 DSN，不带库名，形如 root:pass@tcp(host:port)/）；
+//  3. 探测 defaultMySQLAdminDSN（本地 root 无口令实例）可达则用 MySQL，否则回退 SQLite。
+func resolveMySQLAdminDSN() string {
+	if v := strings.TrimSpace(os.Getenv("AIAPI_FORCE_SQLITE")); v == "1" || strings.EqualFold(v, "true") {
+		return ""
+	}
+	if d := strings.TrimSpace(os.Getenv("AIAPI_MYSQL_DSN")); d != "" {
+		return d
+	}
+	db, err := sql.Open("mysql", defaultMySQLAdminDSN)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return ""
+	}
+	return defaultMySQLAdminDSN
+}
+
+// provisionMySQLDatabase 创建独立测试库：建库 → 执行项目 db_ddl.sql →
+// 写入 MySQL 版种子数据（对齐 SQLite 的 SeedTestData）。
+func provisionMySQLDatabase(adminDSN string) (string, error) {
 	if strings.TrimSpace(adminDSN) == "" {
-		return nil, fmt.Errorf("adminDSN is empty")
+		return "", fmt.Errorf("adminDSN is empty")
 	}
 	if !strings.HasSuffix(adminDSN, "/") {
-		return nil, fmt.Errorf("adminDSN must end with '/': %q", adminDSN)
+		return "", fmt.Errorf("adminDSN must end with '/': %q", adminDSN)
 	}
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	dbName := fmt.Sprintf("ai_gateway_it_%d_%d", os.Getpid(), time.Now().UnixNano()%100000)
 
-	// adminDSN 形如 "user:pass@tcp(host:port)/"：解析出连接要素，改写为
-	// mysql.Config 字段形态的服务器配置段。
-	cfg, err := mysql.ParseDSN(adminDSN)
-	if err != nil {
-		return nil, fmt.Errorf("parse adminDSN: %w", err)
-	}
-
 	adminDB, err := sql.Open("mysql", adminDSN)
 	if err != nil {
-		return nil, fmt.Errorf("open mysql admin: %w", err)
+		return "", fmt.Errorf("open mysql admin: %w", err)
 	}
 	defer adminDB.Close()
 
 	if _, err := adminDB.Exec(fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
-		return nil, fmt.Errorf("create database %s: %w", dbName, err)
+		return "", fmt.Errorf("create database %s: %w", dbName, err)
 	}
 
 	// multiStatements=true 允许整体执行 db_ddl.sql（库级语句已被过滤）
 	db, err := sql.Open("mysql", adminDSN+dbName+"?multiStatements=true")
 	if err != nil {
-		return nil, fmt.Errorf("open mysql db %s: %w", dbName, err)
+		dropMySQLDatabase(adminDSN, dbName)
+		return "", fmt.Errorf("open mysql db %s: %w", dbName, err)
 	}
 	defer db.Close()
 
 	ddlPath := filepath.Join(projectRoot, "db_ddl.sql")
 	if err := execDDLFile(db, ddlPath); err != nil {
-		return nil, fmt.Errorf("exec mysql ddl: %w", err)
+		dropMySQLDatabase(adminDSN, dbName)
+		return "", fmt.Errorf("exec mysql ddl: %w", err)
 	}
 	if err := seedTestDataMySQL(db); err != nil {
-		return nil, fmt.Errorf("seed mysql test data: %w", err)
+		dropMySQLDatabase(adminDSN, dbName)
+		return "", fmt.Errorf("seed mysql test data: %w", err)
 	}
+	return dbName, nil
+}
 
-	// MySQL 配置在 TOML 中按 mysql.Config 字段展开（非 DSN 串），
-	// 与 conf/ai_gateway_api.toml 生产样例同构。
+// mysqlDBSection 把管理员 DSN 解析为 [Databases.bfe_db] TOML 配置段
+// （按 mysql.Config 字段展开，与 conf/ai_gateway_api.toml 生产样例同构）。
+func mysqlDBSection(adminDSN, dbName string) (string, error) {
+	cfg, err := mysql.ParseDSN(adminDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse adminDSN: %w", err)
+	}
 	net := cfg.Net
 	if net == "" {
 		net = "tcp"
 	}
-	section := fmt.Sprintf(`[Databases.bfe_db]
+	return fmt.Sprintf(`[Databases.bfe_db]
 Driver               = "mysql"
 DBName               = %s
 Addr                 = %s
@@ -110,25 +171,90 @@ ConnMaxLifetimeInMs  = 5000000`,
 		strconv.Quote(cfg.Addr),
 		strconv.Quote(net),
 		strconv.Quote(cfg.User),
-		strconv.Quote(cfg.Passwd))
+		strconv.Quote(cfg.Passwd)), nil
+}
 
-	sm, err := startServer(nil, "", "", &dbPatch{driver: "mysql", section: section})
+// dropMySQLDatabase 尽力删除测试库（清理失败不阻断主流程）。
+func dropMySQLDatabase(adminDSN, dbName string) {
+	db, err := sql.Open("mysql", adminDSN)
 	if err != nil {
-		if admin, oErr := sql.Open("mysql", adminDSN); oErr == nil {
-			admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
-			admin.Close()
-		}
-		return nil, err
+		return
 	}
-	sm.mysqlAdminDSN = adminDSN
-	sm.mysqlDBName = dbName
-	return sm, nil
+	defer db.Close()
+	_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+}
+
+// MySQLDSN 返回 MySQL 后端模式下被测库的完整 DSN（供测试直写种子数据 /
+// 直查断言使用）。非 MySQL（SQLite）模式返回空串，调用方据此后退
+// sm.DBPath + sqlite-strip 驱动。
+func (sm *ServerManager) MySQLDSN() string {
+	if sm.mysqlAdminDSN == "" || sm.mysqlDBName == "" {
+		return ""
+	}
+	return sm.mysqlAdminDSN + sm.mysqlDBName + "?parseTime=true&multiStatements=true"
+}
+
+// OpenDB 打开本测试进程的数据库句柄：MySQL 后端用 mysql 驱动连被测库，
+// 否则用 sqlite-strip 打开 sm.DBPath（busy_timeout 与 createTempConfig
+// 同款，避免与后台审计刷盘瞬态争用写锁）。同一断言代码双后端零改动。
+func OpenDB(t testing.TB, sm *ServerManager) *sql.DB {
+	t.Helper()
+
+	if dsn := sm.MySQLDSN(); dsn != "" {
+		db, err := sql.Open("mysql", dsn)
+		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(sm.DBPath))
+	db, err := sql.Open("sqlite-strip", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// StartServerAuto 按环境选择测试后端：设置 AIAPI_MYSQL_DSN（管理员
+// DSN，不带库名，形如 root:pass@tcp(127.0.0.1:3306)/）时以 MySQL 启动
+// （StartServerWithMySQL：自动建库 ai_gateway_it_*、执行 db_ddl.sql、
+// 用毕 DROP），否则以 SQLite 启动（StartServer）。使同一测试包在两套
+// 后端下零改动运行；MySQL 模式下单实例包补设全局 client URL，保持
+// testutil.GetClient() 可用。
+func StartServerAuto() (*ServerManager, error) {
+	dsn := strings.TrimSpace(os.Getenv("AIAPI_MYSQL_DSN"))
+	if dsn != "" {
+		sm, err := StartServerWithMySQL(dsn)
+		if err != nil {
+			return nil, err
+		}
+		SetServerURL(sm.ServerURL)
+		return sm, nil
+	}
+	return StartServer()
+}
+
+// StartServerWithMonitorAuto 是 StartServerAuto 的「启用监控端口」版本：
+// 设置 AIAPI_MYSQL_DSN 时以 MySQL 启动（monitorPortMode=1，MonitorURL 可用），
+// 否则等价 StartServerWithMonitor（SQLite）。extraTOML 原样注入两套后端，
+// 使 secret_at_rest 这类需要 [Security] 段 + /reload/security 的用例
+// 在两套后端下同一份实现运行。
+func StartServerWithMonitorAuto(extraTOML string) (*ServerManager, error) {
+	dsn := strings.TrimSpace(os.Getenv("AIAPI_MYSQL_DSN"))
+	if dsn != "" {
+		sm, err := startServerWithMySQL(dsn, extraTOML, 1)
+		if err != nil {
+			return nil, err
+		}
+		SetServerURL(sm.ServerURL)
+		return sm, nil
+	}
+	return StartServerWithMonitor(extraTOML)
 }
 
 // execDDLFile 在已选定的库上执行项目 db_ddl.sql。该文件开头含库级语句
-//（DROP DATABASE / CREATE DATABASE / USE open_bfe），且部分语句以 "; \n"
+// （DROP DATABASE / CREATE DATABASE / USE open_bfe），且部分语句以 "; \n"
 // 收尾（按 ";\n" 切分不可靠），因此改为：过滤库级语句后整体执行
-//（multiStatements=true）。MySQL DDL 无触发器/存储过程，整体执行安全。
+// （multiStatements=true）。MySQL DDL 无触发器/存储过程，整体执行安全。
 func execDDLFile(db *sql.DB, ddlPath string) error {
 	ddlContent, err := os.ReadFile(ddlPath)
 	if err != nil {
@@ -154,7 +280,7 @@ func execDDLFile(db *sql.DB, ddlPath string) error {
 }
 
 // seedTestDataMySQL 写入 MySQL 版默认测试数据，行集对齐 SeedTestData
-//（SQLite 方言 INSERT OR IGNORE / datetime('now') 在此替换为
+// （SQLite 方言 INSERT OR IGNORE / datetime('now') 在此替换为
 // INSERT IGNORE / NOW()）。
 func seedTestDataMySQL(db *sql.DB) error {
 	var productID int64

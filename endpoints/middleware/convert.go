@@ -39,4 +39,5 @@ func convert(handler func(*http.Request) (*http.Request, error)) mux.MiddlewareF
 var (
 	McProductProbe = convert(ProductProbeAction)
 	McUserProbe    = convert(UserProbeAction)
+	McIPProbe      = convert(IPProbeAction)
 )

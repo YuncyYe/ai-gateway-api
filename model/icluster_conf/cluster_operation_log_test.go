@@ -107,7 +107,8 @@ func TestClusterParamToMap_APIVocabulary(t *testing.T) {
 			Provider: lib.PString("p1"),
 		},
 		BalanceMode: lib.PString(BalanceModeEPP),
-		EppConfig:   lib.PString(`{"scheduling_profile":"balanced"}`),
+		EppConfig:   lib.PString(`{"load_profile":"balanced"}`),
+		EppRuntime:  lib.PString(`{"timeout":{"connect":"1s"}}`),
 		// Internal bookkeeping fields: must not leak into the snapshot.
 		ID:          lib.PInt64(7),
 		ProductID:   lib.PInt64(2),
@@ -118,7 +119,7 @@ func TestClusterParamToMap_APIVocabulary(t *testing.T) {
 	require.NotNil(t, m)
 	assertNoUppercaseKeys(t, m)
 	assertMapKeys(t, m, "name", "description", "basic", "sticky_sessions",
-		"passive_health_check", "llm_config", "balance_mode", "epp_config")
+		"passive_health_check", "llm_config", "balance_mode", "epp_config", "epp_runtime")
 	for _, internal := range []string{"id", "product_id", "sub_clusters", "scheduler", "instance_pool"} {
 		assert.NotContains(t, m, internal)
 	}
@@ -175,7 +176,11 @@ func TestClusterParamToMap_APIVocabulary(t *testing.T) {
 
 	epp, ok := m["epp_config"].(map[string]interface{})
 	require.True(t, ok, "epp_config should be a decoded JSON object, not an escaped string")
-	assert.Equal(t, "balanced", epp["scheduling_profile"])
+	assert.Equal(t, "balanced", epp["load_profile"])
+
+	eppRuntime, ok := m["epp_runtime"].(map[string]interface{})
+	require.True(t, ok, "epp_runtime should be a decoded JSON object, not an escaped string")
+	assert.Equal(t, map[string]interface{}{"connect": "1s"}, eppRuntime["timeout"])
 }
 
 // TestClusterToMap_APIVocabulary is the issue #205 before-snapshot anchor:
@@ -189,13 +194,14 @@ func TestClusterToMap_APIVocabulary(t *testing.T) {
 	c.ProductID = 2
 	c.Description = "old desc"
 	c.LLMConfig = &LLMConfig{Models: []string{"m1"}, Provider: lib.PString("p1")}
-	c.EppConfig = `{"scheduling_profile":"balanced"}`
+	c.EppConfig = `{"load_profile":"balanced"}`
+	c.EppRuntime = `{"timeout":{"connect":"1s"}}`
 
 	m := clusterToMap(c)
 	require.NotNil(t, m)
 	assertNoUppercaseKeys(t, m)
 	assertMapKeys(t, m, "name", "description", "basic", "sticky_sessions",
-		"passive_health_check", "llm_config", "balance_mode", "epp_config")
+		"passive_health_check", "llm_config", "balance_mode", "epp_config", "epp_runtime")
 	for _, internal := range []string{"id", "ready", "product_id", "scheduler", "sub_clusters", "instance_pool"} {
 		assert.NotContains(t, m, internal)
 	}
@@ -233,7 +239,11 @@ func TestClusterToMap_APIVocabulary(t *testing.T) {
 
 	epp, ok := m["epp_config"].(map[string]interface{})
 	require.True(t, ok, "epp_config should be a decoded JSON object")
-	assert.Equal(t, "balanced", epp["scheduling_profile"])
+	assert.Equal(t, "balanced", epp["load_profile"])
+
+	eppRuntime, ok := m["epp_runtime"].(map[string]interface{})
+	require.True(t, ok, "epp_runtime should be a decoded JSON object")
+	assert.Equal(t, map[string]interface{}{"connect": "1s"}, eppRuntime["timeout"])
 }
 
 // TestClusterToMap_EPPVocabulary covers the EPP balance mode and the
@@ -270,6 +280,20 @@ func TestEppConfigSnapshotValue(t *testing.T) {
 
 	// Defensive: undecodable input falls back to the raw string.
 	assert.Equal(t, "not-json", eppConfigSnapshotValue("not-json"))
+}
+
+func TestEppRuntimeSnapshotValue(t *testing.T) {
+	assert.Nil(t, eppRuntimeSnapshotValue(""))
+
+	v := eppRuntimeSnapshotValue(`{"timeout":{"connect":"1s"}}`)
+	m, ok := v.(map[string]interface{})
+	require.True(t, ok, "valid epp_runtime should decode to a JSON object")
+	timeout, ok := m["timeout"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "1s", timeout["connect"])
+
+	// Defensive: undecodable input falls back to the raw string.
+	assert.Equal(t, "not-json", eppRuntimeSnapshotValue("not-json"))
 }
 
 // TestClusterManager_UpdateCluster_RecordsAPIVocabularyAuditLog is the

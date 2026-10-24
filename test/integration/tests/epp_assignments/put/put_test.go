@@ -52,7 +52,6 @@ func twoGroupsBody() map[string]interface{} {
 				"name": "g1",
 				"instances": []interface{}{
 					map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
-					map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 				},
 			},
 			map[string]interface{}{
@@ -76,7 +75,7 @@ func createEPPCluster(t *testing.T, name string) string {
 	resp, err := testutil.GetClient().Post("/open-api/v1/clusters", map[string]interface{}{
 		"name":         name,
 		"balance_mode": "EPP",
-		"epp_config":   map[string]interface{}{"scheduling_profile": "balanced"},
+		"epp_config":   map[string]interface{}{"load_profile": "balanced"},
 		"llm_config": map[string]interface{}{
 			"models":   []string{"deepseek-chat"},
 			"provider": providerName,
@@ -142,17 +141,18 @@ func TestEppAssignments_Put(t *testing.T) {
 		testutil.DeleteCluster(clusterName)
 	})
 
-	t.Run("EA-2-001 手工覆写切换 primary 并回读验证", func(t *testing.T) {
+	t.Run("EA-2-001 手工覆写到另一组并回读验证", func(t *testing.T) {
 		data := getAssignments(t)
 		entry := findClusterEntry(t, data, clusterName)
 		require.NotNil(t, entry)
-		primary := entry["primary"].(map[string]interface{})
-		standby := entry["standby"].(map[string]interface{})
+		origGroup := entry["group"].(string)
+		target := "g2"
+		if origGroup == "g2" {
+			target = "g1"
+		}
 
-		newPrimary := standby["id"].(string)
 		resp := putOverride(t, clusterName, map[string]interface{}{
-			"group_name":          "g1",
-			"primary_instance_id": newPrimary,
+			"group_name": target,
 		})
 		testutil.AssertSuccess(t, resp)
 
@@ -161,43 +161,39 @@ func TestEppAssignments_Put(t *testing.T) {
 			t.Fatalf("unmarshal failed: %v", err)
 		}
 		assert.Equal(t, clusterName, respData["cluster"])
-		assert.Equal(t, "g1", respData["group"])
-		respPrimary := respData["primary"].(map[string]interface{})
-		assert.Equal(t, newPrimary, respPrimary["id"])
-		respStandby := respData["standby"].(map[string]interface{})
-		assert.Equal(t, primary["id"], respStandby["id"])
+		assert.Equal(t, target, respData["group"])
+		raw, err := json.Marshal(respData)
+		require.NoError(t, err)
+		for _, legacy := range []string{"primary", "standby", "instances", "degraded"} {
+			assert.NotContains(t, string(raw), "\""+legacy+"\"")
+		}
 
 		// GET 视图验证覆写生效
 		view := getAssignments(t, map[string]string{"cluster": clusterName})
 		viewEntry := findClusterEntry(t, view, clusterName)
 		require.NotNil(t, viewEntry)
-		assert.Equal(t, newPrimary, viewEntry["primary"].(map[string]interface{})["id"])
-		assert.Equal(t, primary["id"], viewEntry["standby"].(map[string]interface{})["id"])
+		assert.Equal(t, target, viewEntry["group"])
 	})
 
-	t.Run("EA-2-002 覆写到另一组（单实例组无 standby）", func(t *testing.T) {
+	t.Run("EA-2-002 覆写回原来的组", func(t *testing.T) {
 		resp := putOverride(t, clusterName, map[string]interface{}{
-			"group_name":          "g2",
-			"primary_instance_id": "epp-c",
+			"group_name": "g1",
 		})
 		testutil.AssertSuccess(t, resp)
 
 		var respData map[string]interface{}
 		json.Unmarshal(resp.Data, &respData)
-		assert.Equal(t, "g2", respData["group"])
-		assert.Equal(t, "epp-c", respData["primary"].(map[string]interface{})["id"])
-		assert.Nil(t, respData["standby"])
+		assert.Equal(t, "g1", respData["group"])
 
 		view := getAssignments(t, map[string]string{"cluster": clusterName})
 		viewEntry := findClusterEntry(t, view, clusterName)
 		require.NotNil(t, viewEntry)
-		assert.Nil(t, viewEntry["standby"])
+		assert.Equal(t, "g1", viewEntry["group"])
 	})
 
 	t.Run("EA-2-003 覆写不存在的 cluster 返回 404", func(t *testing.T) {
 		resp := putOverride(t, "not_exist_cluster", map[string]interface{}{
-			"group_name":          "g1",
-			"primary_instance_id": "epp-a",
+			"group_name": "g1",
 		})
 		testutil.AssertErrCode(t, resp, 404)
 	})
@@ -210,36 +206,24 @@ func TestEppAssignments_Put(t *testing.T) {
 		defer testutil.DeleteCluster(wrrCluster)
 
 		resp := putOverride(t, wrrCluster, map[string]interface{}{
-			"group_name":          "g1",
-			"primary_instance_id": "epp-a",
+			"group_name": "g1",
 		})
 		testutil.AssertErrCode(t, resp, 404)
 	})
 
 	t.Run("EA-2-005 覆写到不存在的组返回 422", func(t *testing.T) {
 		resp := putOverride(t, clusterName, map[string]interface{}{
-			"group_name":          "not_exist_group",
-			"primary_instance_id": "epp-a",
+			"group_name": "not_exist_group",
 		})
 		testutil.AssertErrCode(t, resp, 422)
 	})
 
-	t.Run("EA-2-006 primary 不在目标组返回 422", func(t *testing.T) {
-		resp := putOverride(t, clusterName, map[string]interface{}{
-			"group_name":          "g1",
-			"primary_instance_id": "epp-c",
-		})
-		testutil.AssertErrCode(t, resp, 422)
-	})
-
-	t.Run("EA-2-007 缺少必填参数返回 422", func(t *testing.T) {
-		resp := putOverride(t, clusterName, map[string]interface{}{
-			"group_name": "g1",
-		})
+	t.Run("EA-2-006 缺少 group_name 返回 422", func(t *testing.T) {
+		resp := putOverride(t, clusterName, map[string]interface{}{})
 		testutil.AssertErrCode(t, resp, 422)
 
 		resp = putOverride(t, clusterName, map[string]interface{}{
-			"primary_instance_id": "epp-a",
+			"group_name": "",
 		})
 		testutil.AssertErrCode(t, resp, 422)
 	})

@@ -60,6 +60,7 @@ type TCluster struct {
 	LLMConfig              string    `db:"llm_config"`
 	BalanceMode            string    `db:"balance_mode"`
 	EppConfig              string    `db:"epp_config"`
+	EppRuntime             string    `db:"epp_runtime"`
 	CreatedAt              time.Time `db:"created_at"`
 	UpdatedAt              time.Time `db:"updated_at"`
 }
@@ -131,6 +132,7 @@ type TClusterParam struct {
 	LLMConfig              *string    `db:"llm_config"`
 	BalanceMode            *string    `db:"balance_mode"`
 	EppConfig              *string    `db:"epp_config"`
+	EppRuntime             *string    `db:"epp_runtime"`
 	CreatedAt              *time.Time `db:"created_at"`
 	UpdatedAt              *time.Time `db:"updated_at"`
 

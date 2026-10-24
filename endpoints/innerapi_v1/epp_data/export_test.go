@@ -128,30 +128,27 @@ func setupManager(t *testing.T) func() {
 
 	instances := []*epp_pool.InstanceParam{
 		{ID: "epp-a", Host: "10.0.0.1", Port: 9002, GroupName: "g1"},
-		{ID: "epp-b", Host: "10.0.0.2", Port: 9002, GroupName: "g1"},
 		{ID: "epp-c", Host: "10.0.0.3", Port: 9002, GroupName: "g2"},
 	}
 	if _, err := storager.CreateInstances(context.Background(), instances); err != nil {
 		t.Fatalf("seed instances: %v", err)
 	}
 	if err := storager.UpsertAssignment(context.Background(), &epp_pool.AssignmentParam{
-		Cluster:           "cluster-a",
-		GroupName:         "g1",
-		PrimaryInstanceID: "epp-a",
+		Cluster:   "cluster-a",
+		GroupName: "g1",
 	}); err != nil {
 		t.Fatalf("seed assignment: %v", err)
 	}
 	if err := storager.UpsertAssignment(context.Background(), &epp_pool.AssignmentParam{
-		Cluster:           "cluster-b",
-		GroupName:         "g2",
-		PrimaryInstanceID: "epp-c",
+		Cluster:   "cluster-b",
+		GroupName: "g2",
 	}); err != nil {
 		t.Fatalf("seed assignment: %v", err)
 	}
 
 	clusterSource := &fakeClusterSource{clusters: []*epp_pool.EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`},
-		{Name: "cluster-b", EppConfigJSON: `{"scheduling_profile":"latency-first"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`},
+		{Name: "cluster-b", EppConfigJSON: `{"load_profile":"queue-first"}`},
 	}}
 
 	container.EppPoolManager = epp_pool.NewEppPoolManager(
@@ -183,19 +180,15 @@ func TestExportAction(t *testing.T) {
 	assert.Contains(t, conf.Config.EppConfig, "cluster-a")
 	assert.Contains(t, conf.Config.EppConfig, "cluster-b")
 
-	// assignment section: standby is expanded at read time; a single
-	// instance group exports a null standby.
+	// assignment section: cluster to assigned-group mapping.
 	require.Len(t, conf.Config.Assignment, 2)
 	entryA := conf.Config.Assignment["cluster-a"]
 	require.NotNil(t, entryA)
-	assert.Equal(t, "epp-a", entryA.Primary)
-	require.NotNil(t, entryA.Standby)
-	assert.Equal(t, "epp-b", *entryA.Standby)
+	assert.Equal(t, "g1", entryA.Group)
 
 	entryB := conf.Config.Assignment["cluster-b"]
 	require.NotNil(t, entryB)
-	assert.Equal(t, "epp-c", entryB.Primary)
-	assert.Nil(t, entryB.Standby)
+	assert.Equal(t, "g2", entryB.Group)
 }
 
 func TestExportAction_VersionNotChanged(t *testing.T) {

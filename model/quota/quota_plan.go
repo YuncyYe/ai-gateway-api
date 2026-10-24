@@ -35,10 +35,9 @@ type QuotaPlanParam struct {
 
 // QuotaPlanFilter 定义配额计划过滤条件
 type QuotaPlanFilter struct {
-	ID                *int64
-	Unlimited         *bool
-	ResetPeriod       []string
-	LastResetAtBefore *time.Time
+	ID          *int64
+	Unlimited   *bool
+	ResetPeriod []string
 }
 
 // QuotaPlanStorager 定义配额计划存储接口
@@ -48,6 +47,10 @@ type QuotaPlanStorager interface {
 	FetchQuotaPlanList(ctx context.Context, filter *QuotaPlanFilter) ([]*QuotaPlanParam, error)
 	UpdateQuotaPlan(ctx context.Context, filter *QuotaPlanFilter, param *QuotaPlanParam) (int64, error)
 	DeleteQuotaPlan(ctx context.Context, filter *QuotaPlanFilter) error
+	// ClaimQuotaPlanReset 认领周期重置：仅当计划从未重置（last_reset_at IS NULL）
+	// 或上次重置早于 periodStart 时，将 last_reset_at 推进到 now。
+	// 返回影响行数：1 表示认领成功，0 表示本周期已被认领。
+	ClaimQuotaPlanReset(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error)
 }
 
 var _ shared.QuotaPlanStorager = (*quotaPlanStoragerAdapter)(nil)

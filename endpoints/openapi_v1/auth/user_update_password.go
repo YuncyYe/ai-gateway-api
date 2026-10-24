@@ -38,12 +38,12 @@ var UserUpdatePasswordEndpoint = &xreq.Endpoint{
 type UserUpdatePasswordParam struct {
 	UserName    *string `uri:"user_name" validate:"required,min=1"`
 	OldPassword string  `json:"old_password" validate:"omitempty"`
-	Password    *string `json:"password" validate:"required,min=6"`
+	Password    *string `json:"password" validate:"required,min=8"`
 }
 
 // Validate performs centralized business validation on the request parameters.
 func (p *UserUpdatePasswordParam) Validate() error {
-	if err := validate.UserName(*p.UserName); err != nil {
+	if err := validate.UserNameRef(*p.UserName); err != nil {
 		return err
 	}
 	return validate.Password(*p.Password, *p.UserName)

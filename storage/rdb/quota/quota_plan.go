@@ -16,6 +16,7 @@ package quota
 
 import (
 	"context"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -44,8 +45,19 @@ func (s *QuotaPlanStorager) CreateQuotaPlan(ctx context.Context, param *quota.Qu
 
 	data := quotaPlanDataToParam(param)
 	data.CreatedAt = lib.PTimeNow()
+	initLastResetAtAtCreate(data)
 
 	return dao.TQuotaPlanCreate(dbCtx, data)
+}
+
+// initLastResetAtAtCreate 在创建时初始化 last_reset_at：reset_period 为
+// weekly/monthly 的计划将 last_reset_at 置为创建时间，避免 NULL 进入调度器的
+// 到期判断（issue #228）。
+func initLastResetAtAtCreate(data *dao.TQuotaPlanParam) {
+	if data.LastResetAt == nil && data.ResetPeriod != nil &&
+		(*data.ResetPeriod == "weekly" || *data.ResetPeriod == "monthly") {
+		data.LastResetAt = lib.PTimeNow()
+	}
 }
 
 func (s *QuotaPlanStorager) FetchQuotaPlan(ctx context.Context, filter *quota.QuotaPlanFilter) (*quota.QuotaPlanParam, error) {
@@ -98,6 +110,15 @@ func (s *QuotaPlanStorager) UpdateQuotaPlan(ctx context.Context, filter *quota.Q
 	return dao.TQuotaPlanUpdate(dbCtx, data, quotaPlanFilterToParam(filter))
 }
 
+func (s *QuotaPlanStorager) ClaimQuotaPlanReset(ctx context.Context, id int64, periodStart time.Time, now time.Time) (int64, error) {
+	dbCtx, err := s.dbCtxFactory(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	return dao.TQuotaPlanClaimPeriodReset(dbCtx, id, periodStart, now)
+}
+
 func (s *QuotaPlanStorager) DeleteQuotaPlan(ctx context.Context, filter *quota.QuotaPlanFilter) error {
 	dbCtx, err := s.dbCtxFactory(ctx)
 	if err != nil {
@@ -114,8 +135,7 @@ func quotaPlanFilterToParam(filter *quota.QuotaPlanFilter) *dao.TQuotaPlanParam 
 	}
 
 	return &dao.TQuotaPlanParam{
-		ID:                filter.ID,
-		LastResetAtBefore: filter.LastResetAtBefore,
+		ID: filter.ID,
 	}
 }
 

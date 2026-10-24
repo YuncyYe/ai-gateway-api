@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
@@ -40,6 +41,7 @@ type ServerManager struct {
 	cmd         *exec.Cmd
 	cancel      context.CancelFunc
 	ServerURL   string
+	MonitorURL  string // 监控端口地址（仅 StartServerWithMonitor 启动时非空）
 	DBPath      string
 	DataDir     string
 	ConfDir     string
@@ -52,6 +54,9 @@ type ServerManager struct {
 	// Shutdown 时 DROP DATABASE 清理。
 	mysqlAdminDSN string
 	mysqlDBName   string
+	// mysqlShared 为 true 表示该库属于 StartServerWithSharedInfra 共享池，
+	// Shutdown 只递减引用，最后一个实例退出时才 DROP。
+	mysqlShared bool
 }
 
 // dbPatch 以非 SQLite 后端启动时的数据库配置覆盖项（仅 MySQL 并发用例使用）。
@@ -90,9 +95,10 @@ func replaceDBSection(confText, section string) string {
 	return strings.Join(out, "\n")
 }
 
-// StartServer 使用项目编译的 ai-gateway-api.exe 作为子进程启动测试服务器
+// StartServer 使用项目编译的 ai-gateway-api.exe 作为子进程启动测试服务器。
+// 后端由 startServerAuto 决定：本机 MySQL 可用时默认 MySQL，否则 SQLite。
 func StartServer() (*ServerManager, error) {
-	return startServer(nil, "", "", nil)
+	return startServerAuto(nil, "", "", 0, false)
 }
 
 // StartServerWithExtraConfig 启动一个测试服务器，并把 extraTOML 追加到临时
@@ -100,17 +106,122 @@ func StartServer() (*ServerManager, error) {
 // （如 [Report]、[Databases.xxx]）。extraTOML 为空串时行为与 StartServer 完全
 // 一致。注意：额外数据源（如 MySQL）需要测试自身保证可用。
 func StartServerWithExtraConfig(extraTOML string) (*ServerManager, error) {
-	return startServer(nil, "", extraTOML, nil)
+	return startServerAuto(nil, "", extraTOML, 0, false)
 }
 
-// StartServerWithSharedInfra 启动一个测试服务器，可复用外部传入的 miniredis 与 SQLite 数据库文件。
-// 当 sharedRedis == nil 时创建新的 miniredis；当 sharedDBPath == "" 时创建新的 SQLite 数据库。
+// StartServerWithMonitor 启动一个测试服务器，同时把模板中被禁用的监控端口
+// （MonitorPort = -1）改为随机可用端口，用于需要访问 monitor 端口能力
+// （如 /reload/*、/monitor/metrics）的用例。MonitorURL 为监控端口地址。
+func StartServerWithMonitor(extraTOML string) (*ServerManager, error) {
+	return startServerAuto(nil, "", extraTOML, 1, false)
+}
+
+// StartServerWithSharedInfra 启动一个测试服务器，可复用外部传入的 miniredis 与数据库。
+// 当 sharedRedis == nil 时创建新的 miniredis；当 sharedDBPath == "" 时创建新的数据库。
 // 该函数用于多实例部署场景，让多个 ai-gateway-api 实例共享同一 Redis（分布式锁）与同一 DB。
+// MySQL 后端下多个实例共享进程内全局测试库（引用计数，最后一个 Shutdown 时 DROP）。
 func StartServerWithSharedInfra(sharedRedis *miniredis.Miniredis, sharedDBPath string) (*ServerManager, error) {
-	return startServer(sharedRedis, sharedDBPath, "", nil)
+	return startServerAuto(sharedRedis, sharedDBPath, "", 0, true)
 }
 
-func startServer(sharedRedis *miniredis.Miniredis, sharedDBPath string, extraTOML string, dbPatchCfg *dbPatch) (*ServerManager, error) {
+// startServerAuto 是 StartServer 系列入口的后端分发器：
+//   - sharedDBPath != ""：调用方显式共享 SQLite 文件，保持既有语义；
+//   - resolveMySQLAdminDSN() 非空（AIAPI_MYSQL_DSN 或本机默认实例可达）：MySQL，
+//     每次调用独立建库；joinPool=true（SharedInfra 形态）时注册到进程内共享库池；
+//   - 否则回退 SQLite（原 startServer 行为）。
+func startServerAuto(sharedRedis *miniredis.Miniredis, sharedDBPath, extraTOML string, monitorPortMode int, joinPool bool) (*ServerManager, error) {
+	if sharedDBPath != "" {
+		return startServer(sharedRedis, sharedDBPath, extraTOML, nil, monitorPortMode)
+	}
+	adminDSN := resolveMySQLAdminDSN()
+	if adminDSN == "" {
+		return startServer(sharedRedis, sharedDBPath, extraTOML, nil, monitorPortMode)
+	}
+
+	sharedMySQLMu.Lock()
+	if joinPool && sharedMySQLPool != nil {
+		pool := sharedMySQLPool
+		pool.refs++
+		sharedMySQLMu.Unlock()
+
+		sm, err := startServer(sharedRedis, "", extraTOML, &dbPatch{driver: "mysql", section: pool.section}, monitorPortMode)
+		if err != nil {
+			releaseSharedMySQLRef()
+			return nil, err
+		}
+		sm.mysqlAdminDSN = pool.adminDSN
+		sm.mysqlDBName = pool.dbName
+		sm.mysqlShared = true
+		if sharedRedis == nil {
+			SetServerURL(sm.ServerURL)
+		}
+		return sm, nil
+	}
+
+	dbName, err := provisionMySQLDatabase(adminDSN)
+	if err != nil {
+		sharedMySQLMu.Unlock()
+		return nil, err
+	}
+	section, err := mysqlDBSection(adminDSN, dbName)
+	if err != nil {
+		sharedMySQLMu.Unlock()
+		dropMySQLDatabase(adminDSN, dbName)
+		return nil, err
+	}
+	if joinPool {
+		sharedMySQLPool = &sharedMySQLDB{adminDSN: adminDSN, dbName: dbName, section: section, refs: 1}
+	}
+	sharedMySQLMu.Unlock()
+
+	sm, err := startServer(sharedRedis, "", extraTOML, &dbPatch{driver: "mysql", section: section}, monitorPortMode)
+	if err != nil {
+		if joinPool {
+			releaseSharedMySQLRef()
+		} else {
+			dropMySQLDatabase(adminDSN, dbName)
+		}
+		return nil, err
+	}
+	sm.mysqlAdminDSN = adminDSN
+	sm.mysqlDBName = dbName
+	sm.mysqlShared = joinPool
+	if sharedRedis == nil {
+		SetServerURL(sm.ServerURL)
+	}
+	return sm, nil
+}
+
+// sharedMySQLDB 是 MySQL 后端下 StartServerWithSharedInfra 多实例共享的测试库。
+type sharedMySQLDB struct {
+	adminDSN string
+	dbName   string
+	section  string
+	refs     int
+}
+
+var (
+	sharedMySQLMu   sync.Mutex
+	sharedMySQLPool *sharedMySQLDB
+)
+
+// releaseSharedMySQLRef 递减共享库引用；归零时 DROP 并清空池。
+func releaseSharedMySQLRef() {
+	sharedMySQLMu.Lock()
+	defer sharedMySQLMu.Unlock()
+	if sharedMySQLPool == nil {
+		return
+	}
+	sharedMySQLPool.refs--
+	if sharedMySQLPool.refs <= 0 {
+		dropMySQLDatabase(sharedMySQLPool.adminDSN, sharedMySQLPool.dbName)
+		sharedMySQLPool = nil
+	}
+}
+
+// startServer 启动测试服务器。monitorPortMode: 0=沿用模板（禁用监控端口）；
+// 1=把 MonitorPort 替换为随机可用端口并填充 MonitorURL。
+func startServer(sharedRedis *miniredis.Miniredis, sharedDBPath string, extraTOML string, dbPatchCfg *dbPatch, monitorPortMode int) (*ServerManager, error) {
 	sm := &ServerManager{}
 
 	// 1. 获取 integration 目录和项目根目录
@@ -195,7 +306,16 @@ func startServer(sharedRedis *miniredis.Miniredis, sharedDBPath string, extraTOM
 		return nil, fmt.Errorf("get random port: %w", err)
 	}
 
-	tmpConfDir, err := createTempConfig(confDir, sm.binPath, dbPath, port, redisServer.Addr(), extraTOML, dbPatchCfg)
+	// 6.5 监控端口（monitorPortMode=1 时启用随机端口，否则沿用模板禁用态）
+	monitorPort := 0
+	if monitorPortMode == 1 {
+		monitorPort, err = getRandomPort()
+		if err != nil {
+			return nil, fmt.Errorf("get random monitor port: %w", err)
+		}
+	}
+
+	tmpConfDir, err := createTempConfig(confDir, sm.binPath, dbPath, port, redisServer.Addr(), extraTOML, dbPatchCfg, monitorPort)
 	if err != nil {
 		return nil, fmt.Errorf("create temp config: %w", err)
 	}
@@ -230,6 +350,9 @@ func startServer(sharedRedis *miniredis.Miniredis, sharedDBPath string, extraTOM
 	// 8. 等待服务器就绪（TCP 拨号检测，带超时）
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	sm.ServerURL = fmt.Sprintf("http://%s", addr)
+	if monitorPort > 0 {
+		sm.MonitorURL = fmt.Sprintf("http://127.0.0.1:%d", monitorPort)
+	}
 
 	// 启动 stdout 消费 goroutine，防止子进程阻塞
 	go func() {
@@ -290,11 +413,13 @@ func (sm *ServerManager) Shutdown() {
 		sm.Redis.Close()
 	}
 
-	// MySQL 后端：删除本次用例创建的库（须先于全局 client 无关逻辑、在进程终止后执行）
+	// MySQL 后端：删除本次用例创建的库。共享池成员只递减引用，
+	// 最后一个实例退出时才真正 DROP。
 	if sm.mysqlAdminDSN != "" && sm.mysqlDBName != "" {
-		if db, err := sql.Open("mysql", sm.mysqlAdminDSN); err == nil {
-			db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", sm.mysqlDBName))
-			db.Close()
+		if sm.mysqlShared {
+			releaseSharedMySQLRef()
+		} else {
+			dropMySQLDatabase(sm.mysqlAdminDSN, sm.mysqlDBName)
 		}
 	}
 }
@@ -326,7 +451,8 @@ func getRandomPort() (int, error) {
 // createTempConfig 创建临时配置文件（覆盖端口、数据库路径和 Redis 配置）。
 // extraTOML 非空时追加到文件末尾，用于注入 [Report] 等额外配置段。
 // dbPatchCfg 非空时用其 driver/dbName 覆盖默认 SQLite 连接（MySQL 并发用例）。
-func createTempConfig(srcConfDir, binPath, dbPath string, port int, redisAddr string, extraTOML string, dbPatchCfg *dbPatch) (string, error) {
+// monitorPort > 0 时把模板中的 MonitorPort = -1 替换为该端口（启用监控端口）。
+func createTempConfig(srcConfDir, binPath, dbPath string, port int, redisAddr string, extraTOML string, dbPatchCfg *dbPatch, monitorPort int) (string, error) {
 	// 创建临时配置目录
 	tmpDir, err := os.MkdirTemp("", "ai-gateway-test-conf-")
 	if err != nil {
@@ -363,15 +489,27 @@ func createTempConfig(srcConfDir, binPath, dbPath string, port int, redisAddr st
 	}
 
 	confStr := string(content)
-	// 替换端口
+	// 替换端口。注意：测试模板已显式配置 ServerAddr = "127.0.0.1"
+	//（避免 Windows 防火墙弹窗），此处不得再插入 ServerAddr 键（TOML 重复键报错）。
 	confStr = strings.Replace(confStr, "ServerPort = 8199", fmt.Sprintf("ServerPort = %d", port), 1)
+	// 替换监控端口（模板为 -1 禁用；仅 monitorPort > 0 时启用）并绑定回环地址：
+	// 监控端口默认监听所有网卡会触发 Windows 防火墙弹窗，测试环境只需本机访问
+	if monitorPort > 0 {
+		confStr = strings.Replace(confStr, "MonitorPort = -1",
+			fmt.Sprintf("MonitorPort = %d\nMonitorAddr = \"127.0.0.1\"", monitorPort), 1)
+	}
 	if dbPatchCfg != nil {
 		// 外部 DB 覆盖（MySQL）：整体替换 [Databases.bfe_db] 段
 		confStr = replaceDBSection(confStr, dbPatchCfg.section)
 	} else {
-		// 替换数据库路径（使用正斜杠避免 TOML 转义问题）
+		// 替换数据库路径（使用正斜杠避免 TOML 转义问题）。
+		// file: URI + _pragma=busy_timeout：后台审计日志批量刷盘与请求事务
+		// 在 SQLite 单写者模型下会瞬态争用写锁；无 busy_timeout 时直接
+		// SQLITE_BUSY 500（integration/data 下版本单调等高频用例曾因此
+		// 偶发失败）。busy_timeout 让写方毫秒级自旋等待而非立刻报错。
 		dbPathForTOML := strings.ReplaceAll(dbPath, "\\", "/")
-		confStr = strings.Replace(confStr, `DBName  = "./data/test_ai_gateway.db"`, fmt.Sprintf(`DBName  = "%s"`, dbPathForTOML), 1)
+		dbNameURI := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", dbPathForTOML)
+		confStr = strings.Replace(confStr, `DBName  = "./data/test_ai_gateway.db"`, fmt.Sprintf(`DBName  = "%s"`, dbNameURI), 1)
 	}
 	// 替换 Redis 配置为指向 miniredis
 	confStr = strings.Replace(confStr, `Bns = "mock"`, `Bns = "test.redis.miniredis"`, 1)
@@ -438,8 +576,13 @@ func copyFile(src, dst string) error {
 	}
 	defer d.Close()
 
-	_, err = io.Copy(d, s)
-	return err
+	if _, err = io.Copy(d, s); err != nil {
+		return err
+	}
+
+	// The copied binary is exec'd as a child process; preserve the executable
+	// bit (os.Create uses 0666, which is not executable on Linux/macOS).
+	return os.Chmod(dst, 0o755)
 }
 
 // copyDir 复制目录
@@ -465,6 +608,12 @@ func copyDir(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// ConfFile 返回本实例临时配置文件 ai_gateway_api.toml 的完整路径。
+// 用于热加载类用例在运行期改写配置段后触发 /reload/*（配合 MonitorURL）。
+func (sm *ServerManager) ConfFile() string {
+	return filepath.Join(sm.tmpConfDir, "ai_gateway_api.toml")
 }
 
 // SetQuotaRemaining 直接设置 miniredis 中某 owner 的配额剩余量。
@@ -496,12 +645,21 @@ func (sm *ServerManager) GetQuotaRemaining(ownerKey string, unit string) float64
 	return golibquota.FromRedisValue(value, unit)
 }
 
+// openDB 打开被测库句柄：MySQL 后端（mysqlAdminDSN/mysqlDBName 非空）连被测库，
+// 否则读 sm.DBPath（SQLite）。供直接改写/断言库内状态的辅助方法使用。
+func (sm *ServerManager) openDB() (*sql.DB, error) {
+	if dsn := sm.MySQLDSN(); dsn != "" {
+		return sql.Open("mysql", dsn)
+	}
+	return sql.Open("sqlite-strip", sm.DBPath)
+}
+
 // UpdateQuotaPlanLastResetAt 直接更新 SQLite 中某 API-Key / Entity 对应 quota_plans.last_reset_at。
 // ownerType 取 "api_key" 或 "entity"。
 func (sm *ServerManager) UpdateQuotaPlanLastResetAt(ownerID string, ownerType string, lastResetAt time.Time) error {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return fmt.Errorf("open sqlite db: %w", err)
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -527,9 +685,9 @@ func (sm *ServerManager) UpdateQuotaPlanLastResetAt(ownerID string, ownerType st
 
 // GetQuotaPlanLastResetAt 读取某 API-Key / Entity 对应 quota_plans.last_reset_at。
 func (sm *ServerManager) GetQuotaPlanLastResetAt(ownerID string, ownerType string) (*time.Time, error) {
-	db, err := sql.Open("sqlite-strip", sm.DBPath)
+	db, err := sm.openDB()
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite db: %w", err)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
@@ -552,6 +710,69 @@ func (sm *ServerManager) GetQuotaPlanLastResetAt(ownerID string, ownerType strin
 		return nil, fmt.Errorf("select quota_plans.last_reset_at: %w", err)
 	}
 	return &lastResetAt, nil
+}
+
+// NullQuotaPlanLastResetAt 将某 API-Key / Entity 对应 quota_plans.last_reset_at 置为 NULL，
+// 用于模拟修复前创建的存量计划（issue #228）。
+func (sm *ServerManager) NullQuotaPlanLastResetAt(ownerID string, ownerType string) error {
+	db, err := sm.openDB()
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	quotaPlanID, err := lookupQuotaPlanID(db, ownerID, ownerType)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec("UPDATE quota_plans SET last_reset_at = NULL WHERE id = ?", quotaPlanID)
+	if err != nil {
+		return fmt.Errorf("null quota_plans.last_reset_at: %w", err)
+	}
+	return nil
+}
+
+// GetQuotaPlanLastResetAtNullable 读取某 API-Key / Entity 对应 quota_plans.last_reset_at，
+// 列为 NULL 时返回 (nil, nil)。
+func (sm *ServerManager) GetQuotaPlanLastResetAtNullable(ownerID string, ownerType string) (*time.Time, error) {
+	db, err := sm.openDB()
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	quotaPlanID, err := lookupQuotaPlanID(db, ownerID, ownerType)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastResetAt sql.NullTime
+	err = db.QueryRow("SELECT last_reset_at FROM quota_plans WHERE id = ?", quotaPlanID).Scan(&lastResetAt)
+	if err != nil {
+		return nil, fmt.Errorf("select quota_plans.last_reset_at: %w", err)
+	}
+	if !lastResetAt.Valid {
+		return nil, nil
+	}
+	return &lastResetAt.Time, nil
+}
+
+func lookupQuotaPlanID(db *sql.DB, ownerID string, ownerType string) (int64, error) {
+	var quotaPlanID int64
+	var err error
+	switch ownerType {
+	case "api_key":
+		err = db.QueryRow("SELECT quota_plan_id FROM api_keys WHERE id = ?", ownerID).Scan(&quotaPlanID)
+	case "entity":
+		err = db.QueryRow("SELECT quota_plan_id FROM entities WHERE entity_id = ?", ownerID).Scan(&quotaPlanID)
+	default:
+		return 0, fmt.Errorf("unsupported ownerType: %s", ownerType)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find quota_plan_id for %s %s: %w", ownerType, ownerID, err)
+	}
+	return quotaPlanID, nil
 }
 
 // findIntegrationRoot 查找 integration 目录

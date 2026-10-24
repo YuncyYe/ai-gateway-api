@@ -31,15 +31,22 @@ package rdb
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/bfenetworks/bfe/bfe_util/bns"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xreq"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ai_cache"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ai_context"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/epp_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iai_route"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iauth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibasic"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ibatch"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/icluster_conf"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/iintent_config"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/ik8s_pool"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imodel_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/imods"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/ioperlog"
@@ -54,16 +61,23 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/route_rules"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/rainway-ai-gateway/ai-gateway-api/stateful/container"
+	"github.com/rainway-ai-gateway/ai-gateway-api/storage/clickhousereport"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/dorisreport"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/mysqlreport"
+	aiCacheStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/ai_cache"
+	aiContextStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/ai_context"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/ai_route"
 	apiKeyStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/auth"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/basic"
+	batchStoragePkg "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/batch"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/cluster_conf"
 	entityStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/entity"
 	eppPoolStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/epp_pool"
+	intentConfigStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/iintent_config"
 	operationLogStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/ioperlog"
+	k8sPoolStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/k8s_pool"
+	keyrotateStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/keyrotate"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/model_price"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/protocol"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/provider"
@@ -71,16 +85,24 @@ import (
 	rateLimitPolicyStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/rate_limit_policy"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/route_conf"
 	routeRulesStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/route_rules"
+	trafficMirrorStorage "github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/traffic_mirror"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/txn"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/version_control"
+	"github.com/rainway-ai-gateway/ai-gateway-api/storage/starrocksreport"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/entity"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/keyrotate"
+	"github.com/rainway-ai-gateway/ai-gateway-api/model/traffic_mirror"
 )
 
 func Init() error {
 	container.TxnStoragerSingleton = txn.NewRDBTxnStorager(stateful.NewBFEDBContext)
 	container.VersionControlStoragerSingleton = version_control.NewVersionControllerStorage(stateful.NewBFEDBContext)
-	container.OperationLogStorager = operationLogStorage.NewOperationLogStorager(stateful.NewBFEDBContext)
+	container.OperationLogStorager = operationLogStorage.NewOperationLogStorager(
+		stateful.NewBFEDBContext, stateful.DefaultClientSet.RedisClient)
+	container.KeyRotateStorager = keyrotateStorage.NewStorager(
+		stateful.NewBFEDBContext, container.TxnStoragerSingleton, keyrotate.DefaultHeartbeatTTL)
+	container.KeyRotateManager = keyrotate.NewManager(container.KeyRotateStorager, stateful.NewBFEDBContext)
 	container.OperationLogManager = ioperlog.NewOperationLogManager(container.OperationLogStorager, 0)
 	container.OperationLogManager.SetContextExtractor(operationLogContextExtractor)
 
@@ -205,6 +227,16 @@ func Init() error {
 		})
 	container.ClusterManager.SetOperationLogManager(container.OperationLogManager)
 
+	// K8s pool manager: maintains the k8s_pools table and the
+	// k8s_instance_pool mirrors of referencing providers, propagating the
+	// effective pool to derived cluster pools transactionally (k8s-pools.md).
+	container.K8sPoolStorager = k8sPoolStorage.NewRDBK8sPoolStorager(stateful.NewBFEDBContext)
+	container.K8sPoolManager = ik8s_pool.NewK8sPoolManager(
+		container.TxnStoragerSingleton,
+		container.K8sPoolStorager,
+		container.ProviderStoragerSingleton,
+		container.ClusterManager)
+
 	// EPP pool manager: the cluster manager provides the EPPClusterSource
 	// (balance_mode=EPP clusters and their raw epp_config); ManagerOptions are
 	// read from the RunTime config. The reconciler lifecycle follows the
@@ -309,6 +341,41 @@ func Init() error {
 		container.VersionControlManager)
 	container.RateLimitPolicyManager.SetOperationLogManager(container.OperationLogManager)
 
+	container.AICacheStorager = aiCacheStorage.NewAICacheStorager(stateful.NewBFEDBContext)
+	container.AICacheSemanticSettingsStorager = aiCacheStorage.NewAICacheSemanticSettingsStorager(stateful.NewBFEDBContext)
+	container.AICacheManager = ai_cache.NewAICacheManager(
+		container.TxnStoragerSingleton,
+		container.AICacheStorager,
+		container.AICacheSemanticSettingsStorager,
+		container.VersionControlManager,
+		stateful.DefaultConfig.RunTime.AIRouteInnerProductName)
+	container.AICacheManager.SetOperationLogManager(container.OperationLogManager)
+
+	container.AIContextStorager = aiContextStorage.NewAIContextStorager(stateful.NewBFEDBContext)
+	container.AIContextSettingsStorager = aiContextStorage.NewAIContextSettingsStorager(stateful.NewBFEDBContext)
+	container.AIContextManager = ai_context.NewAIContextManager(
+		container.TxnStoragerSingleton,
+		container.AIContextStorager,
+		container.AIContextSettingsStorager,
+		container.VersionControlManager,
+		stateful.DefaultConfig.RunTime.AIRouteInnerProductName)
+	container.AIContextManager.SetOperationLogManager(container.OperationLogManager)
+
+	container.TrafficMirrorStorager = trafficMirrorStorage.NewTrafficMirrorStorager(stateful.NewBFEDBContext)
+	container.TrafficMirrorManager = traffic_mirror.NewTrafficMirrorManager(
+		container.TxnStoragerSingleton,
+		container.TrafficMirrorStorager,
+		container.VersionControlManager,
+		stateful.DefaultConfig.RunTime.AIRouteInnerProductName)
+	container.TrafficMirrorManager.SetOperationLogManager(container.OperationLogManager)
+
+	container.IntentConfigStorager = intentConfigStorage.NewIntentConfigStorager(stateful.NewBFEDBContext)
+	container.IntentConfigManager = iintent_config.NewIntentConfigManager(
+		container.TxnStoragerSingleton,
+		container.IntentConfigStorager,
+		container.VersionControlManager)
+	container.IntentConfigManager.SetOperationLogManager(container.OperationLogManager)
+
 	// Wire nested-resource auditors so Entity/API Key nested quota-plan and
 	// rate-limit-policy writes emit operation logs with resource_parent_id
 	// filled (issue #161).
@@ -334,6 +401,13 @@ func Init() error {
 	container.APIKeyManager.SetQuotaPlanAuditor(container.QuotaPlanManager)
 	container.APIKeyManager.SetRateLimitPolicyAuditor(container.RateLimitPolicyManager)
 
+	// Batch & async tasks (批量任务与对账.md §4/§5): manager serves the
+	// /batches control APIs; the reconcile job is assembled only when
+	// [BatchJob].Enable is set (it needs the provider egress).
+	if err := initBatch(); err != nil {
+		return err
+	}
+
 	// Initialize quota reset scheduler
 	container.BalanceSyncManager = quota.NewBalanceSyncManager(
 		container.TxnStoragerSingleton,
@@ -355,7 +429,82 @@ func Init() error {
 		return err
 	}
 
+	// The batch reconcile job follows the process lifecycle like
+	// QuotaResetScheduler (started in initBatch when enabled).
 	return nil
+}
+
+// initBatch assembles the batch task manager (storage + RedisClient adapter +
+// real querier dependencies) and, when [BatchJob].Enable is set, the
+// reconcile job. Redis SCAN needs every backend instance address: the bfe
+// redis client shards keys by hash and exposes no SCAN, so addresses are
+// re-resolved from the same bns conf the client was built from.
+func initBatch() error {
+	batchStorage := batchStoragePkg.NewBatchStorager(stateful.NewBFEDBContext)
+	redisAdapter := ibatch.NewRedisClientAdapter(stateful.DefaultClientSet.RedisClient, newBatchRedisScanner())
+
+	manager := ibatch.NewManager(
+		batchStorage,
+		redisAdapter,
+		container.APIKeyManager,
+		container.ProviderManager,
+		container.ModelPriceManager,
+		nil, // httpClientFactory：http.DefaultClient + 请求级超时
+		nil, // clock：系统时钟
+	)
+	manager.SetOperationLogManager(container.OperationLogManager)
+	container.BatchManager = manager
+
+	if !stateful.DefaultConfig.BatchJob.Enable {
+		return nil
+	}
+	db, err := stateful.BFEDB()
+	if err != nil {
+		return err
+	}
+	container.BatchJob = ibatch.NewJob(
+		manager,
+		db,
+		time.Duration(stateful.DefaultConfig.BatchJob.IntervalSec)*time.Second,
+	)
+	container.BatchJob.Start()
+	return nil
+}
+
+// newBatchRedisScanner 按 [RedisConf].Bns 解析全部后端实例地址，构建
+// redigo SCAN 器。mock 模式 / 解析失败时返回 nil（同步职责降级为空，
+// 其余职责不受影响）。多集群形态（"bns,weight|bns,weight"）逐一解析：
+// bfe 客户端按 key 哈希把键分片到各集群，每个 bns 名背后的实例集合
+// 持有该集群的全量键，SCAN 必须遍历全部集群。
+func newBatchRedisScanner() ibatch.RedisScanner {
+	cfg := stateful.DefaultConfig.RedisConf
+	if cfg == nil || cfg.Bns == "" || cfg.Bns == "mock" {
+		return nil
+	}
+
+	var addrs []string
+	for _, part := range strings.Split(cfg.Bns, "|") {
+		name := strings.TrimSpace(strings.SplitN(part, ",", 2)[0])
+		if name == "" {
+			continue
+		}
+		resolved, err := bns.NewClient().GetInstancesAddr(name)
+		if err != nil {
+			stateful.AccessLogger.Warn("batch: resolve redis bns %s for scanner failed: %v", name, err)
+			continue
+		}
+		addrs = append(addrs, resolved...)
+	}
+	if len(addrs) == 0 {
+		stateful.AccessLogger.Warn("batch: no redis instance resolved for scanner, sync duty degraded")
+		return nil
+	}
+
+	timeout := time.Duration(cfg.ReadTimeout) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	return ibatch.NewRedigoScanner(addrs, cfg.Password, timeout)
 }
 
 func initReport() error {
@@ -372,7 +521,7 @@ func initReport() error {
 
 	switch cfg.Backend {
 	case "mysql":
-		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database))
+		container.ReportManager = ireport.NewReportManager(mysqlreport.New(db, cfg.Database, "mysql"))
 		if cfg.EnableAggregateJob || cfg.EnablePartitionMgmt {
 			interval := time.Duration(cfg.AggregateIntervalSec) * time.Second
 			if !cfg.EnableAggregateJob {
@@ -387,8 +536,22 @@ func initReport() error {
 		}
 	case "doris":
 		// Doris aggregation is maintained by the existing Doris insert job;
-		// the api only queries.
-		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database))
+		// the api only queries. The backend identifier feeds Capabilities(),
+		// which gates the cache/mirror/intent dimensions (phase 1: mysql
+		// only, see design-docs modifications/2026-09-27-report-cache-mirror-intent-fields).
+		container.ReportManager = ireport.NewReportManager(dorisreport.New(db, cfg.Database, "doris"))
+	case "clickhouse":
+		// ClickHouse aggregation is maintained by the warehouse-side
+		// materialized view and retention by the tables' TTL; the api only
+		// queries, no local job (see design-docs
+		// modifications/2026-10-02-report-clickhouse-backend).
+		container.ReportManager = ireport.NewReportManager(clickhousereport.New(db, cfg.Database, "clickhouse"))
+	case "starrocks":
+		// StarRocks aggregation is maintained by the warehouse-side async
+		// materialized view; retention by dynamic_partition + partition_ttl.
+		// The api only queries, no local job (see design-docs
+		// modifications/2026-10-02-report-starrocks-backend).
+		container.ReportManager = ireport.NewReportManager(starrocksreport.New(db, cfg.Database, "starrocks"))
 	default:
 		container.ReportManager = nil
 		return fmt.Errorf("unsupported [Report].Backend: %s", cfg.Backend)

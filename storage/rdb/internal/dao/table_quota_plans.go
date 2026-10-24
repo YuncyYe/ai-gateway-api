@@ -21,6 +21,7 @@ import (
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xerror"
+	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao/internal"
 )
 
@@ -73,7 +74,6 @@ type TQuotaPlanParam struct {
 	Unit                  *string          `db:"unit"`
 	ResetPeriod           *string          `db:"reset_period"`
 	LastResetAt           *time.Time       `db:"last_reset_at"`
-	LastResetAtBefore     *time.Time       `db:"last_reset_at,<"`
 	CreatedAt             *time.Time       `db:"created_at"`
 	UpdatedAt             *time.Time       `db:"updated_at"`
 
@@ -103,6 +103,33 @@ func TQuotaPlanCreate(dbCtx lib.DBContexter, data ...*TQuotaPlanParam) (int64, e
 // TQuotaPlanUpdate Update One
 func TQuotaPlanUpdate(dbCtx lib.DBContexter, val, where *TQuotaPlanParam) (int64, error) {
 	return internal.Update(dbCtx, tQuotaPlanTableName, where, val)
+}
+
+// TQuotaPlanClaimPeriodReset 认领周期重置（issue #228）：仅当计划从未重置
+// （last_reset_at IS NULL）或上次重置早于本周期起点时，将 last_reset_at
+// 推进到 now。返回影响行数：1 表示认领成功，0 表示本周期已被认领。
+// WHERE 需显式覆盖 NULL——三值逻辑下 `last_reset_at < ?` 对 NULL 行恒不成立，
+// 曾导致标记永不落库、调度器每分钟重复重置。
+func TQuotaPlanClaimPeriodReset(dbCtx lib.DBContexter, id int64, periodStart time.Time, now time.Time) (int64, error) {
+	const query = "UPDATE quota_plans SET last_reset_at = ? WHERE id = ? AND (last_reset_at IS NULL OR last_reset_at < ?)"
+
+	start := time.Now()
+	rst, err := dbCtx.Execer().ExecContext(dbCtx, query, now, id, periodStart)
+	sr := &stateful.SQLRecord{
+		SQL:  query,
+		Args: []interface{}{now, id, periodStart},
+		Err:  err,
+		Cost: time.Since(start),
+	}
+	defer sr.Print(dbCtx)
+	if err != nil {
+		return 0, xerror.WrapDaoError(err)
+	}
+	rows, err := rst.RowsAffected()
+	if err != nil {
+		return 0, xerror.WrapDaoError(err)
+	}
+	return rows, nil
 }
 
 // TQuotaPlanDelete Delete One/Multiple

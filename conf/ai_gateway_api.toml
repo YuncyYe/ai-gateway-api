@@ -1,10 +1,14 @@
 # ---------------------------------
 # AI GATEWAY API Config
 [Server]
+# server bind address
+ServerAddr = "0.0.0.0"
 # server port
 ServerPort = 8183
 # server graceful exit timeout
 GracefulTimeOutInMs = 5000
+# monitor bind address, empty means all interfaces
+# MonitorAddr = ""
 # monitor port, don't start monitor server if less than 0
 MonitorPort = 8284
 
@@ -122,6 +126,8 @@ MaxIdle = 10
 # see design-docs/modifications/2026-09-15-report-query-api and
 # db_ddl_report_mysql.sql. When [Report] is absent the report module is
 # not assembled and /open-api/v1/report/* stay 404.
+#
+# 轻量形态（Backend="mysql"，本机 MySQL 报表库 + 进程内聚合/分区 JOB）：
 # [Databases.report_db]
 # Driver = "mysql"
 # DBName = "bfe_report"
@@ -132,10 +138,150 @@ MaxIdle = 10
 # MaxIdleConns = 5
 #
 # [Report]
-# Backend = "mysql"             # mysql | doris
-# Datasource = "report_db"      # a [Databases.*] entry (doris: FE 9030)
+# Backend = "mysql"
+# Datasource = "report_db"      # a [Databases.*] entry
 # Database = ""                 # schema override for table names (optional)
-# EnableAggregateJob = true     # backend=mysql only
+# EnableAggregateJob = true     # minute aggregate job (detail -> bfe_ai_metrics_1m)
+# AggregateIntervalSec = 60
+# RetentionDays = 7             # detail retention (partition DROP / DELETE window)
+# EnablePartitionMgmt = true    # partition management job (DELETE fallback)
+#
+# 标准形态（Backend="doris"，既有 Kafka -> Doris 链路；Doris 走 FE 的 MySQL
+# 协议端口，不引入新客户端；需先完成 ai-gateway-observability 侧建表/升级，
+# 见该仓 doris/docs/user/HOWTO.md）：
+# [Databases.doris_db]
+# Driver = "mysql"              # Doris FE MySQL-protocol port, not a new client
+# DBName = "bfe_observability"
+# Addr = "127.0.0.1:9030"       # Doris FE query_port
+# Net = "tcp"                   # 必须显式设置：Net 为空时 FormatDSN 丢弃地址段，
+#                               # 驱动回退 127.0.0.1:3306（2026-10-02 实机踩坑，
+#                               # 同 starrocks 段说明）
+# User = "report_read"          # SELECT-only is sufficient
+# Passwd = ""
+# AllowNativePasswords = true   # 必须显式开启：mysql.Config.FormatDSN 会把零值
+#                               # 序列化为 allowNativePasswords=false，Doris FE
+#                               # 的 mysql_native_password 认证随即被拒绝
+# InterpolateParams = true      # 建议显式开启：Doris FE 同为 MySQL 协议重实现，
+#                               # 二进制协议（COM_STMT）宽结果集路径尚未在本机
+#                               # 环境验证（v1.6.0 驱动该路径有 NULL 位图错位
+#                               # 记录；SR FE 已实锤有同类缺陷）；文本协议确定
+#                               # 可用。环境恢复后验证 binary 路径可再关闭
+# MaxOpenConns = 20
+# MaxIdleConns = 5
+#
+# [Report]
+# Backend = "doris"
+# Datasource = "doris_db"       # a [Databases.*] entry (doris: FE 9030)
+# Database = ""                 # schema override for table names (optional)
+# The three job options below only take effect with backend=mysql; with the
+# doris backend they are inert either way (aggregation is maintained by the
+# warehouse-side INSERT JOB, retention by the tables' dynamic_partition props):
+# EnableAggregateJob = false
 # AggregateIntervalSec = 60
 # RetentionDays = 7
-# EnablePartitionMgmt = true
+# EnablePartitionMgmt = false
+#
+# 标准形态（Backend="clickhouse"，既有 Kafka -> ClickHouse 链路；需先完成
+# ai-gateway-observability 侧建表/升级，见该仓 clickhouse/docs/user/HOWTO.md；
+# 本包为纯查询后端，无本地 JOB）：
+# [Databases.clickhouse_db]
+# Driver = "clickhouse"         # clickhouse-go/v2 stdlib, native TCP protocol
+# DBName = "bfe_observability"
+# Addr = "127.0.0.1:9000"       # ClickHouse native TCP port (9000), not HTTP (8123)
+# User = "report_read"          # SELECT-only is sufficient
+# Passwd = "******"
+# MaxOpenConns = 20
+# MaxIdleConns = 5
+#
+# [Report]
+# Backend = "clickhouse"
+# Datasource = "clickhouse_db"  # a [Databases.*] entry (clickhouse: native 9000)
+# Database = ""                 # schema override for table names (optional)
+# The three job options below only take effect with backend=mysql; with the
+# clickhouse backend they are inert either way (aggregation is maintained by
+# the warehouse-side materialized view, retention by the tables' TTL):
+# EnableAggregateJob = false
+# AggregateIntervalSec = 60
+# RetentionDays = 7
+# EnablePartitionMgmt = false
+#
+# 标准形态（Backend="starrocks"，既有 Kafka -> StarRocks 链路；SR FE 走
+# MySQL 协议端口，零新驱动；需先完成 ai-gateway-observability 侧建表/升级，
+# 见该仓 starrocks/docs/user/HOWTO.md；与 Doris 端口互斥不可同时部署；
+# 本包为纯查询后端，无本地 JOB）：
+# [Databases.starrocks_db]
+# Driver = "mysql"              # StarRocks FE MySQL-protocol port, 零新驱动
+# DBName = "bfe_observability"
+# Addr = "127.0.0.1:9030"       # SR FE query_port
+# Net = "tcp"                   # 必须显式设置：Net 为空时 FormatDSN 丢弃地址段，
+#                               # 驱动回退 127.0.0.1:3306（2026-10-02 实机踩坑）
+# User = "report_read"          # SELECT-only is sufficient
+# Passwd = "******"
+# AllowNativePasswords = true   # 必须显式开启（同 doris 段说明）
+# InterpolateParams = true      # 必须显式开启：SR FE（MySQL 协议重实现）的
+#                               # COM_STMT 二进制行包在 JSON 列与 NULL 列相邻
+#                               # 时有编码缺陷（驱动 v1.6.0 静默串位 / v1.9.3
+#                               # readRow panic，均 FE 侧问题，2026-10-02 实机
+#                               # 复现）；文本协议（参数客户端插值）规避
+# MaxOpenConns = 20
+# MaxIdleConns = 5
+#
+# [Report]
+# Backend = "starrocks"
+# Datasource = "starrocks_db"   # a [Databases.*] entry (starrocks: FE 9030)
+# Database = ""                 # schema override for table names (optional)
+# The three job options below only take effect with backend=mysql; with the
+# starrocks backend they are inert either way (aggregation is maintained by
+# the warehouse-side async materialized view, retention by dynamic_partition
+# + partition_ttl):
+# EnableAggregateJob = false
+# AggregateIntervalSec = 60
+# RetentionDays = 7
+# EnablePartitionMgmt = false
+# ---------------------------------
+# Batch & Async Tasks Reconcile Job (批量任务与对账.md §5)
+# 批量对账 job：每分钟 tick（MySQL named lock 多副本互斥；SQLite 退化为
+# 单实例空操作锁），依次执行 Redis BATCH_* 同步落库 → 状态推进 → 兜底结算。
+# 默认关闭。注意：状态推进/兜底结算需要控制面 → provider 出网（cancel 与
+# 兜底结算共用的 egress 能力），不允许出网的部署保持关闭（降级路径见
+# 批量任务与对账.md §9：只依赖下载拦截结算 + 预留 TTL 释放）。
+# [BatchJob]
+# Enable = true
+# IntervalSec = 60               # tick 周期，默认 60
+# ---------------------------------
+# Management Plane Access Control (IP Whitelist)
+# 管理面 IP 白名单：保护 Dashboard / OpenAPI / InnerAPI 三类管理入口。
+# 默认关闭（向后兼容）；启用后非白名单网段请求在网络层直接 403（先于鉴权）。
+# 配置位于服务端文件而非 DB：白名单保护的是控制面 API 自身，必须保证
+# "被锁死"时仍可通过修改本文件自救（见 design-docs/modifications/
+# 2026-10-04-mgmt-ip-whitelist）。
+# 变更生效：curl -X POST http://<pod-ip>:8284/reload/access_control（热加载，
+# 原子替换、失败保留旧配置）；优雅重启兜底。
+# 上线建议：新规则先 Audit=true 观察（只记录不拒绝），确认"本应拒绝"清单
+# 为空后再切 false；首条规则务必包含当前运维出口网段，防止锁死。
+# [AccessControl]
+# Enable = false
+# 可信代理网段（LB / Ingress / BFE 反代出口）。仅当请求对端属于可信代理时才
+# 解析 X-Forwarded-For（右起跳过可信代理取首个非可信 IP）；不可信来源的
+# XFF 一律忽略，伪造头无效。K8s 场景通常为 Ingress/Node 网段。
+# TrustedProxies = ["10.244.0.0/16"]
+#
+# InnerAPI：仅基础设施网段（conf-agent / BFE / EPP 拉取配置）
+# [[AccessControl.Rules]]
+# Name       = "inner-api"
+# PathPrefix = "/inner-api/v1"
+# Subnets    = ["10.10.0.0/16"]
+# Audit      = false
+#
+# 管理 API + Dashboard：仅运维网段（最长前缀匹配，上面的 inner-api 优先命中）
+# [[AccessControl.Rules]]
+# Name       = "mgmt"
+# PathPrefix = "/"
+# Subnets    = ["192.168.1.0/24", "100.64.0.0/16"]
+# Audit      = false
+
+# [Security] 安全相关配置（DB 落盘加密 keyring / 下发链路加密 / 口令哈希成本因子）
+# PasswordHashCost：users.password 的 bcrypt 成本因子。默认 10（现代 CPU 单次
+# 校验约 60-80ms），合法范围 4-16；0 或缺省 = 默认 10，越界启动失败（fail-fast）。
+# bcrypt 哈希串自带成本因子，调整该值无需迁移存量口令哈希。
+# PasswordHashCost = 10

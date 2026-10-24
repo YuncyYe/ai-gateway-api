@@ -279,6 +279,62 @@ func TestReportLogsAction_Defaults(t *testing.T) {
 	assert.Equal(t, "", gotQuery.Keyword)
 	assert.Equal(t, 0, gotQuery.Page)
 	assert.Equal(t, 0, gotQuery.PageSize)
+	assert.Nil(t, gotQuery.CacheStatus)
+	assert.Nil(t, gotQuery.MirrorHit)
+	assert.Nil(t, gotQuery.IntentQuestion)
+	assert.Nil(t, gotQuery.IntentAnswer)
+	assert.Nil(t, gotQuery.IntentSource)
+}
+
+// TestReportLogsAction_CacheMirrorIntentFilters 验证五个新过滤参数绑定：
+// cache_status / mirror_hit / intent_question / intent_answer / intent_source。
+func TestReportLogsAction_CacheMirrorIntentFilters(t *testing.T) {
+	var gotQuery *ireport.LogsQuery
+	manager := &fakeReportManager{
+		logsFn: func(ctx context.Context, query *ireport.LogsQuery) (*ireport.LogQueryResult, error) {
+			gotQuery = query
+			return &ireport.LogQueryResult{}, nil
+		},
+	}
+	container.ReportManager = manager
+	defer func() { container.ReportManager = nil }()
+
+	url := "/open-api/v1/report/logs?" + testQuery +
+		"&cache_status=hit&mirror_hit=true&intent_question=task_type&intent_answer=unknown&intent_source=classifier"
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	_, err := ReportLogsAction(req)
+	require.NoError(t, err)
+
+	require.NotNil(t, gotQuery)
+	require.NotNil(t, gotQuery.CacheStatus)
+	assert.Equal(t, "hit", *gotQuery.CacheStatus)
+	require.NotNil(t, gotQuery.MirrorHit)
+	assert.True(t, *gotQuery.MirrorHit)
+	require.NotNil(t, gotQuery.IntentQuestion)
+	assert.Equal(t, "task_type", *gotQuery.IntentQuestion)
+	require.NotNil(t, gotQuery.IntentAnswer)
+	assert.Equal(t, "unknown", *gotQuery.IntentAnswer)
+	require.NotNil(t, gotQuery.IntentSource)
+	assert.Equal(t, "classifier", *gotQuery.IntentSource)
+}
+
+// TestReportTimeSeriesAction_Dimension 验证 timeseries 可选 dimension 参数绑定。
+func TestReportTimeSeriesAction_Dimension(t *testing.T) {
+	var gotQuery *ireport.TimeSeriesQuery
+	manager := &fakeReportManager{
+		timeSeriesFn: func(ctx context.Context, query *ireport.TimeSeriesQuery) ([]*ireport.MetricPoint, error) {
+			gotQuery = query
+			return nil, nil
+		},
+	}
+	container.ReportManager = manager
+	defer func() { container.ReportManager = nil }()
+
+	req := httptest.NewRequest(http.MethodGet, "/open-api/v1/report/timeseries?"+testQuery+"&metric=qps&dimension=ai_cache_status", nil)
+	_, err := ReportTimeSeriesAction(req)
+	require.NoError(t, err)
+	require.NotNil(t, gotQuery)
+	assert.Equal(t, ireport.DimensionCacheStatus, gotQuery.Dimension)
 }
 
 func TestReportLogsAction_InvalidParams(t *testing.T) {
@@ -290,6 +346,8 @@ func TestReportLogsAction_InvalidParams(t *testing.T) {
 		"page=0",
 		"page_size=-1",
 		"status_codes=200,abc",
+		"mirror_hit=not-bool",
+		"intent_source=bogus",
 	}
 	for _, one := range cases {
 		req := httptest.NewRequest(http.MethodGet, "/open-api/v1/report/logs?"+testQuery+"&"+one, nil)

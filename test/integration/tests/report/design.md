@@ -10,32 +10,35 @@
 - **组 B（query，环境变量门控）**：真实 MySQL 8.x 上建专用库、套用项目 DDL、灌确定性种子，验证五端点的口径、分页、过滤与参数校验。
 - **组 C（partition，环境变量门控）**：真实 MySQL 8.x 上验证分区维护 JOB 的自动建分区行为（issue #191 回归：配置 `[Report].Database` 后分区查询不匹配 information_schema、JOB 静默降级 DELETE 兜底、log-reader 写入 Error 1526）。
 - **组 D（schema，见 `tests/schema/report/`）**：/report/* 的 api-define 契约形状守卫，REPORT_MYSQL_DSN 门控，与组 B 共用 `testutil.StartReportServer` 装配；种子定点成本取非整数金额（RMB 66900 → 0.000669），形状断言（value 为 number）叠加 0<value<1 语义断言锁死成本金额口径（issue #207）。
+- **组 E（dedup_key，环境变量门控）**：明细表幂等键的**请求级判别能力**（bfenetworks/bfe#1417）——同秒 + 同 `hostid`/`ai_apikey_id`/`ai_requested_model` 的 3 条并发请求必须各自成行（修复前按 `ON DUPLICATE KEY UPDATE` 全列覆盖只留 1 行、丢率 (n−1)/n）；含"旧四列键对照臂"（同批数据写入旧键镜像表 → 只留 1 行，证明唯一差别就是 `logid`）与"重放仍幂等臂"。见 §9。
 
 ## 2. 接口列表
 
 | 编号 | 接口名称 | 方法 | 路径 | 说明 |
 |------|----------|------|------|------|
-| RP-1 | 总览指标 | GET | `/open-api/v1/report/overview` | 请求总量/错误率/Token/延迟/TTFT/TPOT/成本/限流/认证拒绝/日志总量 |
-| RP-2 | 时序数据 | GET | `/open-api/v1/report/timeseries` | `metric=qps\|tokens\|latency\|ttft\|tpot\|cost`，桶宽按窗口自动计算 |
-| RP-3 | 维度排行 | GET | `/open-api/v1/report/rankings` | `dimension=model\|requested_model\|provider\|apikey\|host\|status\|protocol\|mode`，按 request_count 降序 |
-| RP-4 | 占比分布 | GET | `/open-api/v1/report/distribution` | `dimension=status\|protocol\|mode\|stream`，空维度归一为 `unknown` |
-| RP-5 | 日志明细 | GET | `/open-api/v1/report/logs` | 按 log_time 倒序分页，支持 err_only/keyword/requested_models |
+| RP-1 | 总览指标 | GET | `/open-api/v1/report/overview` | 请求总量/错误率/Token/延迟/TTFT/TPOT/成本/限流/认证拒绝/日志总量；缓存（次数/命中率/cache token）/镜像（命中数）/意图（分类数/unknown 率）三组指标 |
+| RP-2 | 时序数据 | GET | `/open-api/v1/report/timeseries` | `metric=qps\|tokens\|latency\|ttft\|tpot\|cost\|cache_tokens`（cache_tokens 按 kind 分序列）；可选 `dimension=ai_intent_answer\|ai_cache_status\|mirror_hit`（仅 mysql 后端，doris 422） |
+| RP-3 | 维度排行 | GET | `/open-api/v1/report/rankings` | `dimension=model\|requested_model\|provider\|apikey\|host\|status\|protocol\|mode`（+ `ai_intent_answer\|ai_cache_status\|mirror_hit`，仅 mysql），按 request_count 降序 |
+| RP-4 | 占比分布 | GET | `/open-api/v1/report/distribution` | `dimension=status\|protocol\|mode\|stream`（+ 上述三个新维度，仅 mysql），空维度归一为 `unknown` |
+| RP-5 | 日志明细 | GET | `/open-api/v1/report/logs` | 按 log_time 倒序分页，支持 err_only/keyword/requested_models 及 `cache_status`/`mirror_hit`/`intent_question`/`intent_answer`/`intent_source` 精确过滤（两后端均可用） |
 
 ## 3. 测试用例统计
 
 | 场景 | 用例组 | 测试用例数 |
 |------|--------|-----------|
 | 未装配 404（含未知子路径） | A | 2 |
-| overview 口径 | B | 2 |
-| timeseries（qps/tokens） | B | 2 |
-| rankings（model/status/limit） | B | 3 |
-| distribution（status/protocol+unknown） | B | 2 |
-| logs（分页/过滤/行形状/requested_models/page_size 封顶） | B | 5 |
-| 参数校验（422） | B | 8（子用例） |
+| overview 口径（含缓存/镜像/意图组与过滤后口径） | B | 3 |
+| timeseries（qps/tokens/cost/cache_tokens/维度拆分） | B | 5 |
+| rankings（model/status/limit/三个新维度） | B | 6 |
+| distribution（status/protocol+unknown/三个新维度） | B | 5 |
+| logs（分页/过滤/行形状/requested_models/page_size 封顶/新五参数过滤/新列行形状） | B | 7 |
+| 参数校验（422，含 mirror_hit/intent_source/timeseries 维度白名单） | B | 8（子用例+3） |
+| doris 后端新维度门控 422 + 明细能力放行 | B | 2 |
 | 启动即建分区（两表同验） | C | 1 |
 | 覆盖期内写入成功 | C | 1 |
 | 边界外写入拒绝（Error 1526） | C | 1 |
-| **合计** | | **25** |
+| 幂等键请求级判别（明细保留 / 旧四列键对照 / 重放幂等） | E | 3 |
+| **合计** | | **35+** |
 
 ## 4. 认证方式
 
@@ -52,9 +55,11 @@ report/
 │   ├── query_test.go           # TestMain：MySQL 环境准备、DDL、服务装配
 │   ├── seed_test.go            # 组 B 种子数据（聚合表 5 行 + 明细表 6 行）
 │   └── cases_test.go           # 组 B 用例断言
-└── partition/
-    ├── partition_test.go       # TestMain：MySQL 环境准备、DDL（INIT_DATE=昨天）、服务装配
-    └── cases_test.go           # 组 C 用例断言（C-1 建分区 / C-2 覆盖期写入 / C-3 边界外拒绝）
+├── partition/
+│   ├── partition_test.go       # TestMain：MySQL 环境准备、DDL（INIT_DATE=昨天）、服务装配
+│   └── cases_test.go           # 组 C 用例断言（C-1 建分区 / C-2 覆盖期写入 / C-3 边界外拒绝）
+└── dedup_key/
+    └── dedup_key_test.go       # 组 E：幂等键请求级判别（明细保留 / 旧四列键对照 / 重放幂等，issue #1417）
 ```
 
 ## 6. 组 A：未装配 404（not_assembled）
@@ -221,7 +226,45 @@ RetentionDays = 7
 - "今天"取测试进程本地民用日（`time.Now().Date()`），JOB 在子进程内使用同一继承时区；断言秒级完成，跨自然日漂移风险可忽略。
 - DATETIME 一律以 `YYYY-MM-DD HH:MM:SS` 字符串插入，不依赖驱动/会话时区。
 
-## 9. testutil 钩子
+## 9. 组 E：幂等键请求级判别（dedup_key）
+
+### 9.1 设计思路
+
+明细表 `bfe_ai_request_log` 的幂等键 `uk_dedup` 决定"同秒同 Key 同模型的并发请求"能否各自成行：键里没有请求级判别列时，写入侧的 `ON DUPLICATE KEY UPDATE`（全列覆盖）会把 n 个并发行压成 1 行（bfenetworks/bfe#1417，生产实测丢率恰为 (n−1)/n、窗口 13.5%）。本组把该行为钉在**报表出口**上（bfe 侧只断言 pb 日志、log-reader LR03 只断言"写入 MySQL"，报表 API 出口此前没有载体）：
+
+1. **明细侧保留**：3 条"同秒 + 同 Key + 同模型、仅 `logid` 不同"的行必须全部可查；
+2. **对照臂**：同批数据写入"旧四列键"镜像表 → 只留 1 行，证明这些行的唯一差别就是 `logid`；
+3. **重放幂等**：同 `logid` 再写一次（值变更）→ 仍 3 行且值被覆盖，确认覆盖语义只作用于同一请求的重放，未把"丢行"换成"重复行"。
+
+### 9.2 环境门控与数据源
+
+与组 B/组 D 同：`REPORT_MYSQL_DSN`（`user:pass@tcp(host:port)/`）；未设置时 TestMain 打印说明后以 0 退出，离线 CI 默认 Skip。装配用 `testutil.StartReportServer`（聚合/分区 JOB 关闭）。
+
+### 9.3 数据构造
+
+- **明细 3 行**（走生产同款多值 `INSERT ... ON DUPLICATE KEY UPDATE`）：共享 `(hostid='gw-01', log_time='2026-09-15 10:00:00', ai_apikey_id='key-1', ai_requested_model='gpt-4')`——即旧四列键的完整键值；`logid` 3001/3002/3003，`ai_total_tokens` 15/25/35，`ai_cost_value` 1500/2500/3500（定点，÷1e8 后为 0.000015/0.000025/0.000035）。
+- **聚合 1 行**（与明细一致）：`request_count=3`、`input/output/total_tokens=60/15/75`、`ai_cost_value_sum=7500`、`ai_cost_currency='RMB'`。
+- **对照臂镜像表** `bfe_ai_request_log_legacy_uk`：同库在建，复刻修复前的四列唯一键。
+
+### 9.4 用例与校验点
+
+| 子用例 | 校验点 |
+|--------|--------|
+| `detail_key_keeps_concurrent_rows` | `/report/overview.logs_total=3`；`/report/logs.total=3` 且返回 3 个不同 `logid`；3 行的 `log_time` 同秒且 `hostid`/`ai_apikey_id`/`ai_requested_model` 全同（键前提）；聚合口径 `request_total=3`、`total_tokens=75`、cost=`0.000075` |
+| `legacy_four_column_key_collapses` | 镜像表 `COUNT(*)=1`、幸存 `logid=3003`（最后写入行）——即 issue 现场"后写行整行存活、先写行消失" |
+| `replay_still_idempotent` | 重放后 `/report/logs.total=3`（不新增行）、token 求和被覆盖为 600（100+200+300） |
+
+> 聚合表在本组由测试预置（JOB 关闭），故 `request_total/total_tokens/cost` 仅用于口径一致性；**缺陷判据是明细侧行数**——聚合"不低估"以明细"不丢行"为前提。
+
+### 9.5 运行方式与红/绿
+
+```bash
+REPORT_MYSQL_DSN="root:****@tcp(127.0.0.1:3306)/" go test -v -count=1 ./tests/report/dedup_key/
+```
+
+把 `db_ddl_report_mysql.sql` 回退为修复前（旧四列键）→ 子用例 1/3 失败（并发行只剩 1 行）；恢复后全绿。因 seed 走生产同款 `ON DUPLICATE KEY UPDATE`，红色以**行数断言失败**呈现，而非 SQL 报重复键。
+
+## 10. testutil 钩子
 
 `testutil/server.go` 新增：
 
@@ -234,7 +277,7 @@ func StartServerWithExtraConfig(extraTOML string) (*ServerManager, error)
 - `extraTOML == ""` 时与 `StartServer()` 行为完全一致（既有测试零影响）；
 - 非共享模式下照常 `SetServerURL`，全局客户端语义不变。
 
-## 10. 注意事项
+## 11. 注意事项
 
 1. 组 B/组 C 需要真实 MySQL 8.x（≥5.7.8，JSON 列），离线 CI 默认 Skip；组 A 离线必跑。
 2. 聚合表种子只 INSERT 查询涉及的列，其余维度列走 `NOT NULL DEFAULT ''`、指标列走 `DEFAULT NULL`（SUM 口径不受影响）。

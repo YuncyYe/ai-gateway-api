@@ -43,6 +43,7 @@ type TModelPrice struct {
 	Limits              string    `db:"limits"`
 	Prices              string    `db:"prices"`
 	TierPrices          string    `db:"tier_prices"`
+	BatchDiscount       *float64  `db:"batch_discount"`
 	PriceCurrency       string    `db:"price_currency"`
 	Metadata            string    `db:"metadata"`
 	CreatedAt           time.Time `db:"created_at"`
@@ -61,6 +62,7 @@ type TModelPriceParam struct {
 	Limits              *string    `db:"limits"`
 	Prices              *string    `db:"prices"`
 	TierPrices          *string    `db:"tier_prices"`
+	BatchDiscount       *float64   `db:"batch_discount"`
 	PriceCurrency       *string    `db:"price_currency"`
 	Metadata            *string    `db:"metadata"`
 	CreatedAt           *time.Time `db:"created_at"`

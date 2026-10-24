@@ -117,7 +117,7 @@ func newFakeEppPoolManager(assigned map[string]*epp_pool.AssignmentParam, storag
 	return epp_pool.NewEppPoolManager(&fakeTxn{}, storager, nil, nil, nil)
 }
 
-const validEppConfigJSON = `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`
+const validEppConfigJSON = `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`
 
 func TestValidateClusterBalanceConfig(t *testing.T) {
 	t.Run("default WRR without any input", func(t *testing.T) {
@@ -157,11 +157,16 @@ func TestValidateClusterBalanceConfig(t *testing.T) {
 
 	t.Run("non-empty epp_config validated regardless of balance_mode", func(t *testing.T) {
 		for _, cfg := range []string{
-			`{"scheduling_profile":"bogus"}`,
-			`{"cache_affinity":"extreme"}`,
+			`{"load_profile":"bogus"}`,
+			`{"affinity":"extreme"}`,
 			`{"kv_cache_utilization_max":1.5}`,
+			`{"waiting_queue_max":-1}`,
+			`{"metrics_staleness_threshold_ms":0}`,
 			`{"unknown_field":true}`,
+			`{"scheduling_profile":"balanced"}`,
+			`{"cache_affinity":"low"}`,
 			`{"flow_control":{"queue_ttl":-1}}`,
+			`{"flow_control":{"enable_eviction":true}}`,
 			`{"session_affinity_enabled":true}`,
 		} {
 			_, _, err := validateClusterBalanceConfig(nil, BalanceModeWRR, lib.PString(cfg), "")
@@ -309,11 +314,11 @@ func TestClusterManager_CreateCluster_EPP(t *testing.T) {
 		m := NewClusterManager(&fakeTxn{}, clusterStore, subClusterStore, bfeClusterStore, poolStore, providerStore, nil, nil, nil)
 		err := m.CreateCluster(ctx, product, &ClusterParam{
 			Name:      lib.PString("c1"),
-			EppConfig: lib.PString(`{"scheduling_profile":"bogus"}`),
+			EppConfig: lib.PString(`{"load_profile":"bogus"}`),
 			LLMConfig: llmConfig(),
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "scheduling_profile")
+		assert.Contains(t, err.Error(), "load_profile")
 	})
 
 	t.Run("assignment failure does not block create", func(t *testing.T) {
@@ -514,5 +519,139 @@ func TestClusterManager_assignClusterToEPP(t *testing.T) {
 		m.SetEppPoolManager(newFakeEppPoolManager(assigned, errors.New("epp storage down")))
 		m.assignClusterToEPP(ctx, "c1")
 		assert.Empty(t, assigned)
+	})
+}
+
+func TestClusterManager_CreateCluster_EppRuntime(t *testing.T) {
+	ctx := context.Background()
+	product := &ibasic.Product{ID: 2, Name: "test"}
+	bfeClusterStore := &fakeBFEClusterStorager{
+		fetchBFEClustersFn: func(ctx context.Context, param *ibasic.BFEClusterFilter) ([]*ibasic.BFECluster, error) {
+			return []*ibasic.BFECluster{{Name: stateful.DefaultConfig.RunTime.DefaultAIClusterName}}, nil
+		},
+	}
+	llmConfig := func() *LLMConfig {
+		return &LLMConfig{Provider: lib.PString("deepseek"), Models: []string{"m1"}}
+	}
+
+	t.Run("EPP carries defaulted epp_runtime", func(t *testing.T) {
+		clusterStore, subClusterStore, poolStore, providerStore := eppCreateClusterStores()
+		var captured *string
+		clusterStore.clusterCreateFn = func(ctx context.Context, product *ibasic.Product, param *ClusterParam, subClusters []*SubCluster) (int64, error) {
+			captured = param.EppRuntime
+			return 20, nil
+		}
+		poolStore.createPoolFn = func(ctx context.Context, product *ibasic.Product, data *PoolParam) (*Pool, error) {
+			return &Pool{ID: 1, Name: *data.Name, Role: *data.Role}, nil
+		}
+
+		m := NewClusterManager(&fakeTxn{}, clusterStore, subClusterStore, bfeClusterStore, poolStore, providerStore, nil, nil, nil)
+		m.SetEppPoolManager(newFakeEppPoolManager(map[string]*epp_pool.AssignmentParam{}, nil))
+
+		err := m.CreateCluster(ctx, product, &ClusterParam{
+			Name:        lib.PString("c1"),
+			BalanceMode: lib.PString(BalanceModeEPP),
+			EppConfig:   lib.PString(validEppConfigJSON),
+			EppRuntime:  lib.PString(`{"timeout":{"connect":"1s"}}`),
+			LLMConfig:   llmConfig(),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.JSONEq(t, `{"timeout":{"connect":"1s","call":"3s"}}`, *captured)
+	})
+
+	t.Run("WRR keeps dormant epp_runtime and validates it", func(t *testing.T) {
+		clusterStore, subClusterStore, poolStore, providerStore := eppCreateClusterStores()
+		var captured *string
+		clusterStore.clusterCreateFn = func(ctx context.Context, product *ibasic.Product, param *ClusterParam, subClusters []*SubCluster) (int64, error) {
+			captured = param.EppRuntime
+			return 20, nil
+		}
+
+		m := NewClusterManager(&fakeTxn{}, clusterStore, subClusterStore, bfeClusterStore, poolStore, providerStore, nil, nil, nil)
+		err := m.CreateCluster(ctx, product, &ClusterParam{
+			Name:       lib.PString("c1"),
+			EppRuntime: lib.PString(`{"check":{"check_interval":"5s"}}`),
+			LLMConfig:  llmConfig(),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Contains(t, *captured, `"check_interval":"5s"`)
+	})
+
+	t.Run("invalid epp_runtime rejected before write", func(t *testing.T) {
+		clusterStore, subClusterStore, poolStore, providerStore := eppCreateClusterStores()
+		written := false
+		clusterStore.clusterCreateFn = func(ctx context.Context, product *ibasic.Product, param *ClusterParam, subClusters []*SubCluster) (int64, error) {
+			written = true
+			return 20, nil
+		}
+
+		m := NewClusterManager(&fakeTxn{}, clusterStore, subClusterStore, bfeClusterStore, poolStore, providerStore, nil, nil, nil)
+		err := m.CreateCluster(ctx, product, &ClusterParam{
+			Name:       lib.PString("c1"),
+			EppRuntime: lib.PString(`{"check":{"fail_threshold":0}}`),
+			LLMConfig:  llmConfig(),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fail_threshold")
+		assert.False(t, written)
+	})
+}
+
+func TestClusterManager_UpdateCluster_EppRuntime(t *testing.T) {
+	ctx := context.Background()
+	product := &ibasic.Product{ID: 2, Name: "test"}
+	base := func() *Cluster {
+		c := newTestClusterBase()
+		c.ID = 1
+		return c
+	}
+
+	t.Run("not carried keeps stored value", func(t *testing.T) {
+		var captured *string
+		clusterStore := &fakeClusterStorager{
+			clusterUpdateFn: func(ctx context.Context, product *ibasic.Product, old *Cluster, param *ClusterParam) error {
+				captured = param.EppRuntime
+				return nil
+			},
+		}
+		m := NewClusterManager(&fakeTxn{}, clusterStore, &fakeSubClusterStorager{}, &fakeBFEClusterStorager{}, &fakePoolStorager{}, nil, nil, nil, nil)
+		err := m.UpdateCluster(ctx, product, base(), &ClusterParam{Name: lib.PString("c1")})
+		require.NoError(t, err)
+		assert.Nil(t, captured)
+	})
+
+	t.Run("carried replaces with normalized value", func(t *testing.T) {
+		var captured *string
+		clusterStore := &fakeClusterStorager{
+			clusterUpdateFn: func(ctx context.Context, product *ibasic.Product, old *Cluster, param *ClusterParam) error {
+				captured = param.EppRuntime
+				return nil
+			},
+		}
+		m := NewClusterManager(&fakeTxn{}, clusterStore, &fakeSubClusterStorager{}, &fakeBFEClusterStorager{}, &fakePoolStorager{}, nil, nil, nil, nil)
+		err := m.UpdateCluster(ctx, product, base(), &ClusterParam{
+			Name:       lib.PString("c1"),
+			EppRuntime: lib.PString(`{"check":{"cooldown":"10s"}}`),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, captured)
+		assert.Contains(t, *captured, `"cooldown":"10s"`)
+		assert.Contains(t, *captured, `"fail_threshold":3`)
+	})
+
+	t.Run("EPP to WRR still validates carried epp_runtime", func(t *testing.T) {
+		old := base()
+		old.BalanceMode = BalanceModeEPP
+		old.EppConfig = validEppConfigJSON
+		m := NewClusterManager(&fakeTxn{}, &fakeClusterStorager{}, &fakeSubClusterStorager{}, &fakeBFEClusterStorager{}, &fakePoolStorager{}, nil, nil, nil, nil)
+		err := m.UpdateCluster(ctx, product, old, &ClusterParam{
+			Name:        lib.PString("c1"),
+			BalanceMode: lib.PString(BalanceModeWRR),
+			EppRuntime:  lib.PString(`{"check":{"fail_threshold":0}}`),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fail_threshold")
 	})
 }

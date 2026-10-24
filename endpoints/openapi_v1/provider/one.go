@@ -49,5 +49,9 @@ func OneAction(req *http.Request) (interface{}, error) {
 		return nil, xerror.WrapRecordNotExist("Provider")
 	}
 
+	if err := maskKeysIfReadonly(req.Context(), one); err != nil {
+		return nil, err
+	}
+
 	return one, nil
 }

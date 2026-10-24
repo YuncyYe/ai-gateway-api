@@ -26,8 +26,12 @@ import (
 )
 
 const (
-	DriverMySQL  = "mysql"
-	DriverSQLite = "sqlite"
+	DriverMySQL      = "mysql"
+	DriverSQLite     = "sqlite"
+	DriverClickHouse = "clickhouse"
+
+	// bfeDBName is the datasource key of the control-plane database.
+	bfeDBName = "bfe_db"
 )
 
 type DbConfig struct {
@@ -45,6 +49,22 @@ func (c *DbConfig) FormatDSN() (string, error) {
 	switch c.Driver {
 	case DriverMySQL:
 		return c.Config.FormatDSN(), nil
+	case DriverClickHouse:
+		// ClickHouse native TCP via clickhouse-go/v2 stdlib. Only the four
+		// embedded mysql.Config fields below are mapped; mysql-specific
+		// options (TLS, timeouts, etc.) are silently ignored for this driver.
+		// Addr must be the native TCP port (9000), not the HTTP port (8123).
+		if c.Config.Addr == "" {
+			return "", fmt.Errorf("clickhouse Addr is required")
+		}
+		if c.Config.User == "" {
+			return "", fmt.Errorf("clickhouse User is required")
+		}
+		if c.Config.DBName == "" {
+			return "", fmt.Errorf("clickhouse DBName is required")
+		}
+		return fmt.Sprintf("clickhouse://%s:%s@%s/%s?dial_timeout=10s&compress=lz4",
+			c.Config.User, c.Config.Passwd, c.Config.Addr, c.Config.DBName), nil
 	case DriverSQLite, "sqlite-strip":
 		if c.Config.DBName == "" {
 			return "", fmt.Errorf("sqlite DBName is required")
@@ -123,7 +143,7 @@ func BFEDB(db ...*sql.DB) (*sql.DB, error) {
 		return db[0], nil
 	}
 
-	return DbGet("bfe_db")
+	return DbGet(bfeDBName)
 }
 
 func NewBFEDBContext(ctx context.Context, ops ...*lib.Op) (*lib.DBContext, error) {

@@ -121,7 +121,14 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/rate-limit-policy?versi
                         "redis_key": "RL_RPM_rlp-0001_0"
                     }
                 ],
-                "max_concurrency": 50
+                "max_concurrency": 50,
+                "batch": {
+                    "max_create_rpm": 10,
+                    "max_active_batches": 5,
+                    "max_file_bytes": 104857600,
+                    "max_file_lines": 50000,
+                    "redis_key": "RL_BATCH_rlp-0001_rpm"
+                }
             }
         }
     }
@@ -143,6 +150,7 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/rate-limit-policy?versi
 | tpm | []TPMConfig | Token Per Minute 限制配置，最多 3 个；为空则不做 TPM 限制 |
 | rpm | []RPMConfig | Request Per Minute 限制配置，最多 3 个；为空则不做 RPM 限制 |
 | max_concurrency | int | 最大并发数，>=1 表示限制；0 表示封禁；<0 表示不限制 |
+| batch | object | 批量限流配置；源为控制面 `rate_limit_policies.batch_limits`，为空或省略时不输出本段；结构见下表 |
 
 **TPMConfig 结构**
 
@@ -165,6 +173,23 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/rate-limit-policy?versi
 | max_requests | int | 最大请求数 | >=1: 有限制；0: 封禁；<0: 不限制 |
 | burst | int | 突发请求数 | 最小值 1，默认 1 |
 | redis_key | string | Redis 计数器 key | 由控制面按 `(policy_id, 规则下标)` 稳定生成，例如 `RL_RPM_rlp-0001_0`；BFE 直接使用该值构建 Redis key，不依赖规则名或 model |
+
+**batch 结构（批量限流）**
+
+| 字段 | 类型 | 说明 | 约束 |
+|------|------|------|------|
+| max_create_rpm | int | 单 API-Key 每分钟允许创建的批量任务数 | 四个维度均可单独省略或配 0（= 不配此维度）；>=1 表示限制 |
+| max_active_batches | int | 单 API-Key 最大进行中（非终态）批量任务数 | 同上 |
+| max_file_bytes | int64 | 批量输入文件大小上限（字节） | 同上 |
+| max_file_lines | int64 | 批量输入文件行数上限 | 同上 |
+| redis_key | string | 批量创建计数 Redis key | 仅 `max_create_rpm` 需要计数 key；由控制面按策略 ID 稳定生成，生成惯例同 `RL_TPM_<policyId>_<idx>`（见 `model/shared/rate_limit_redis_key.go`），例如 `RL_BATCH_rlp-0001_rpm`；BFE 直接使用该值构建 Redis key |
+
+**batch 说明**：
+
+- `batch` 段四维度均**按 API-Key 计、与 model 无关**（区别于 tpm/rpm 可按 model 细分）。
+- 仅 `max_create_rpm` 需要 Redis 计数 key；文件上限（`max_file_bytes` / `max_file_lines`）为请求内本地校验，**无计数 key**；`max_active_batches` 复用数据面共享 `BATCH_ACTIVE` ZSET，**不重复配置 key**。
+- 源数据为控制面 `rate_limit_policies.batch_limits`：可空列，省略 / null 表示该策略不参与批量限流，导出时 `rules` 不携带 `batch` 段。
+- 批量任务的模型价格（`mode=batch`）由集群 conf 导出 `ModelTable` 的批量价格行提供（`batch_discount` 系数展开或手工 `mode=batch` 价格行），属价格表链路，对本接口消费方透明。
 
 ### 3.4 ApikeyRateLimitPolicyBindings 结构（绑定关系）
 
@@ -233,7 +258,14 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/rate-limit-policy?versi
                             "redis_key": "RL_RPM_rlp-0001_0"
                         }
                     ],
-                    "max_concurrency": 50
+                    "max_concurrency": 50,
+                    "batch": {
+                        "max_create_rpm": 10,
+                        "max_active_batches": 5,
+                        "max_file_bytes": 104857600,
+                        "max_file_lines": 50000,
+                        "redis_key": "RL_BATCH_rlp-0001_rpm"
+                    }
                 }
             },
             "rlp-0002": {
@@ -284,6 +316,12 @@ curl -X GET "http://api-server:port/inner-api/v1/configs/rate-limit-policy?versi
     "WorkMode": "ModeNormal"
 }
 ```
+
+## 6. 批量限流（batch）向后兼容
+
+- `rate_limit_policies.batch_limits` 为**可选可空列**，存量 NULL 行为不变（策略不参与批量限流，`rules` 不携带 `batch` 段）；存量数据**零迁移**。
+- 旧版本 BFE 收到含 `batch` 段的 `rules` 时，**忽略未知 JSON 字段安全**，不报错。
+- 策略更新为**整体替换语义**（同 `tpm` / `rpm_configs`）：省略 `batch_limits` 等价清空该策略的批量限流配置。
 
 ---
 

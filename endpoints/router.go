@@ -62,6 +62,27 @@ func RegisterRouters(router *mux.Router) {
 	fs := http.FileServer(root)
 	fh := fileHandler(root, fs)
 
+	router.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		res := &xreq.Result{Code: 405, ErrMsg: "Method Not Allowed"}
+		xreq.Render(w, r, res)
+	})
+
+	router.Use(middleware.MCRecovery)
+	router.Use(middleware.MCLogger)
+	// 管理面 IP 白名单；位置约束：Logger 后（拒绝留痕）/ CORS 前（403 对预检生效）；勿移
+	router.Use(middleware.McIPProbe)
+	router.Use(middleware.MCCors)
+
+	// 静态资源分支（NotFoundHandler）不经过 router.Use 链：mux v1.8 的
+	// ServeHTTP 对 NotFoundHandler 不应用 Use 注册的中间件。此处手动包裹
+	// 同一链条（执行序 Recovery→Logger→IPProbe→Cors，由内向外包），保证
+	// 管理面 IP 白名单对 Dashboard 静态路径同样生效（MAC-1-003 捕获）。
+	staticHandler := http.Handler(http.HandlerFunc(fh))
+	staticHandler = middleware.MCCors.Middleware(staticHandler)
+	staticHandler = middleware.McIPProbe.Middleware(staticHandler)
+	staticHandler = middleware.MCLogger.Middleware(staticHandler)
+	staticHandler = middleware.MCRecovery.Middleware(staticHandler)
+
 	router.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// API 路径未匹配时返回 JSON 404，避免返回静态文件 HTML
 		if strings.HasPrefix(r.URL.Path, "/open-api/v1") || strings.HasPrefix(r.URL.Path, "/inner-api/v1") {
@@ -70,17 +91,8 @@ func RegisterRouters(router *mux.Router) {
 			return
 		}
 
-		middleware.MCRecovery.Middleware(http.HandlerFunc(fh)).ServeHTTP(w, r)
+		staticHandler.ServeHTTP(w, r)
 	})
-
-	router.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		res := &xreq.Result{Code: 405, ErrMsg: "Method Not Allowed"}
-		xreq.Render(w, r, res)
-	})
-
-	router.Use(middleware.MCRecovery)
-	router.Use(middleware.MCLogger)
-	router.Use(middleware.MCCors)
 
 	openapi_v1.RegisterEndpoints(router)
 	innerapi_v1.RegisterRouter(router)

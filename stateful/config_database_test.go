@@ -74,6 +74,45 @@ func TestDbConfig_FormatDSN(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("clickhouse driver", func(t *testing.T) {
+		cfg := &DbConfig{
+			Driver: DriverClickHouse,
+			Config: mysql.Config{
+				User:   "report_read",
+				Passwd: "secret",
+				Addr:   "127.0.0.1:9000",
+				DBName: "bfe_observability",
+			},
+		}
+		dsn, err := cfg.FormatDSN()
+		require.NoError(t, err)
+		assert.Equal(t, "clickhouse://report_read:secret@127.0.0.1:9000/bfe_observability?dial_timeout=10s&compress=lz4", dsn)
+	})
+
+	t.Run("clickhouse driver without addr", func(t *testing.T) {
+		cfg := &DbConfig{
+			Driver: DriverClickHouse,
+			Config: mysql.Config{
+				User:   "report_read",
+				DBName: "bfe_observability",
+			},
+		}
+		_, err := cfg.FormatDSN()
+		require.Error(t, err)
+	})
+
+	t.Run("clickhouse driver without dbname", func(t *testing.T) {
+		cfg := &DbConfig{
+			Driver: DriverClickHouse,
+			Config: mysql.Config{
+				User: "report_read",
+				Addr: "127.0.0.1:9000",
+			},
+		}
+		_, err := cfg.FormatDSN()
+		require.Error(t, err)
+	})
+
 	t.Run("unsupported driver", func(t *testing.T) {
 		cfg := &DbConfig{
 			Driver: "postgres",

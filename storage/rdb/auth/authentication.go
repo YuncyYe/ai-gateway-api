@@ -113,17 +113,47 @@ func userD2M(param *dao.TUser) *iauth.User {
 		return nil
 	}
 
+	scopes := parseScopes(param.Scopes)
+
 	user := &iauth.User{
 		ID:                 param.ID,
 		Name:               param.Name,
 		Type:               param.Type,
-		Admin:              strings.Contains(param.Scopes, iauth.ScopeSystem),
+		Admin:              scopesContain(scopes, iauth.ScopeSystem),
 		Password:           param.Password,
 		SessionKey:         param.Ticket,
 		SessionKeyCreateAt: param.TicketCreatedAt,
+		Scopes:             scopes,
 	}
 
 	return user
+}
+
+// parseScopes splits the comma-joined users.scopes value into a clean list
+// (empty entries dropped). Never use strings.Contains on the raw value:
+// "SystemReadonly" contains "System" as a substring, which would wrongly
+// promote read-only admins to full admins.
+func parseScopes(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	scopes := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			scopes = append(scopes, p)
+		}
+	}
+	return scopes
+}
+
+func scopesContain(scopes []string, target string) bool {
+	for _, s := range scopes {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 func userFilter2Param(filter *iauth.UserFilter) *dao.TUserParam {

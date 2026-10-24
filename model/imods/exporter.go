@@ -371,7 +371,21 @@ func (rlm *APIKeyRuleManager) APIKeyRuleGenerator(ctx context.Context) (*iversio
 			tokenFile.UnlimitedQuota = true
 		}
 
-		items[*one.Key] = tokenFile
+		tokenKey := *one.Key
+		if stateful.ExportCryptoEnabled() {
+			// Field-level encryption at rest: the Tokens outer key IS the
+			// api-key value. Encrypt it so no key material lands on BFE
+			// disk in plaintext; the inner "key" field is cleared (the data
+			// plane fills it back from the decrypted key). Any failure
+			// aborts the export rather than emitting a half-encrypted file.
+			tokenKey, err = stateful.ExportEncrypt(tokenKey)
+			if err != nil {
+				return nil, fmt.Errorf("encrypt token key_id %s failed: %s", tokenFile.KeyID, err)
+			}
+			tokenFile.Key = ""
+		}
+
+		items[tokenKey] = tokenFile
 		apiKey2Config[*one.ProductName] = items
 	}
 

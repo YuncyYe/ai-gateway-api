@@ -2,13 +2,15 @@
 
 ## 1. 模块概述
 
-InnerAPI 模块为 BFE/Conf Agent 提供只读配置导出接口，支持基于 `version` 的增量同步。所有接口均为 GET 请求，返回值包含 `WorkMode` 字段。v0.3.0 对应 OpenAPI 的模块精简不影响 InnerAPI 导出结构（底层表结构未变）。v0.3.0 起，路由规则导出（`/configs/tls_conf/server_data_conf`）中的 `ClusterConf` 会包含模型定价表（`AIConf.ModelTable`），用于 BFE 按 provider 匹配可用模型。
+InnerAPI 模块为 BFE/Conf Agent 提供只读配置导出接口，支持基于 `version` 的增量同步。导出类接口均为 GET 请求，返回值包含 `WorkMode` 字段；`/k8s_pools` 域（IN-11）为例外的资源读写接口（PUT/GET/DELETE），供 K8s 发现组件维护实例池，不支持 `version` 增量同步。v0.3.0 对应 OpenAPI 的模块精简不影响 InnerAPI 导出结构（底层表结构未变）。v0.3.0 起，路由规则导出（`/configs/tls_conf/server_data_conf`）中的 `ClusterConf` 会包含模型定价表（`AIConf.ModelTable`），用于 BFE 按 provider 匹配可用模型。
 
 v0.5.0 起，模型定价表支持分时段定价：OpenAPI 在 `/providers` 上维护 `time_zone`/`tiers` 时段模板，在 `/model-prices` 上维护 `tier_prices`；InnerAPI 导出时把 provider 的时段模板与 model-prices 的分时价格拼接到 `AIConf.ModelTable` 中，BFE 按请求时刻匹配 tier 并取对应价格。
 
 v0.0.7 起，Cluster 表导出（`/configs/gslb_data/cluster_table`）中的 `AIConf` 字段不再使用单 `Key`，而是输出 `Keys`（`[]{Name, Key, Weight}`）和 `KeyPolicy`（`{Strategy, MaxRetries, RetryBackoffInitial, RetryBackoffMax}`），以支持多 API-Key 路由。InnerAPI 应验证该导出结构与 OpenAPI 写入的多 Key 配置一致。
 
 v0.6 起，`AIConf.KeyPolicy` 新增 `SessionAffinity`、`SessionAffinityTTL`、`SessionAffinityRedisPrefix`、`SessionAffinityPenaltyEnable` 字段，对应 OpenAPI `llm_config.key_affinity`，用于会话级 Key 亲和性。InnerAPI 应验证这些字段与 OpenAPI 写入的 `key_affinity` 配置一致（含默认值）。
+
+v0.10 起，`[Security].EncryptExports=true` 时，本清单的 IN-1（`AIConf.Keys[].Key`）与 IN-6（`tokens` 外层键、内层 `key` 置空）以 `enc$v1$` 字段级密文导出（信封/marker 直通/确定性密文等契约见 `api-define/InnerAPI接口定义/mod-api-key.md` §3.5 与 `modifications/2026-10-05-export-config-field-encryption/api-changes.md`）；其余 topic 不受影响。加密导出专项用例见独立模块 `tests/export_encryption/`（前缀 EFE），本目录各 submodule 用例保持明文形态（默认开关关闭）。
 
 ## 2. 接口列表
 
@@ -24,6 +26,8 @@ v0.6 起，`AIConf.KeyPolicy` 新增 `SessionAffinity`、`SessionAffinityTTL`、
 | IN-8 | 导出限流策略配置 | GET | `/inner-api/v1/configs/rate-limit-policy` | version 可选 |
 | IN-9 | 导出 AI 路由配置 | GET | `/inner-api/v1/configs/ai-route` | version 可选 |
 | IN-10 | 导出 EPP 配置 | GET | `/inner-api/v1/configs/epp_data/config` | version 可选 |
+| IN-11 | K8s 实例池维护 | PUT/GET/DELETE | `/inner-api/v1/k8s_pools/{name}/instances`、`/inner-api/v1/k8s_pools/{name}`、`/inner-api/v1/k8s_pools` | 资源读写，无 version；发现组件写入通道 |
+| IN-12 | 导出 AI 缓存规则配置 | GET | `/inner-api/v1/configs/ai-cache-rule` | version 可选；Data 形状 `{"Config": {"AI_product": [...]}, "Version": "..."}`；一期每条规则仅导出 cond/cacheKeyStrategy/cacheTTL/maxBodyBytes/maxValueBytes 5 个 tag |
 
 ## 3. 测试用例统计
 
@@ -39,7 +43,9 @@ v0.6 起，`AIConf.KeyPolicy` 新增 `SessionAffinity`、`SessionAffinityTTL`、
 | 导出限流策略配置 | 1 |
 | 导出 AI 路由配置 | 2 |
 | 导出 EPP 配置 | 5 |
-| **合计** | **23** |
+| 导出 AI 缓存规则配置 | 6 |
+| K8s 实例池维护 | 4 |
+| **合计** | **33** |
 
 ## 4. 认证方式
 
@@ -69,8 +75,15 @@ innerapi/
 │   └── rate_limit_policy_test.go
 ├── ai_route/
 │   └── ai_route_test.go
+├── ai_cache/
+│   └── ai_cache_test.go
+├── traffic_mirror/
+│   └── traffic_mirror_test.go
 └── epp_data/
-    └── epp_data_test.go
+│   └── epp_data_test.go
+└── k8s_pools/
+    ├── k8s_pools_test.go
+    └── concurrency_mysql_test.go  # //go:build mysql，需 AIAPI_MYSQL_DSN
 ```
 
 ## 6. 导出 TLS/Server 配置
@@ -1170,13 +1183,166 @@ IN-EPP-003 中 `flow_control` 写入 `{"max_requests": 200, "queue_ttl": 45, "no
 
 ---
 
-## 16. 依赖与数据准备
+## 16. 导出 AI 缓存规则配置
+
+### 16.1 接口信息
+
+| 项目 | 值 |
+|-----|-----|
+| 模块 | InnerAPI |
+| 接口名称 | 导出 AI 缓存规则配置 |
+| 方法 | GET |
+| 路径 | `/inner-api/v1/configs/ai-cache-rule` |
+| 说明 | 导出 BFE `mod_ai_cache` 规则文件（`ai_cache.data`），支持 version 增量同步；一期每条规则仅导出 `cond`/`cacheKeyStrategy`/`cacheTTL`/`maxBodyBytes`/`maxValueBytes` 5 个 tag（大写驼峰，与 Open API 词汇不同） |
+
+### 16.2 接口参数说明
+
+#### 16.2.1 请求参数
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| version | string | 否 | 上次返回的版本号；相同（内容未变）时 Data 为 null |
+
+#### 16.2.2 返回数据字段
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| Data.Config | object | 按产品线组织的缓存规则（key=`AI_product`，取自 `AIRouteInnerProductName`）；空集合导出空数组 `[]` 且 product 键 present |
+| Data.Config.AI_product[] | object | 规则按 first-match-wins 匹配，数组顺序即优先级（= Open API PUT 提交顺序） |
+| Data.Config.AI_product[].cond | string | BFE 条件表达式（必含） |
+| Data.Config.AI_product[].cacheKeyStrategy | string | 缓存键策略（`disabled` 为缓存豁免） |
+| Data.Config.AI_product[].cacheTTL | int | 缓存 TTL（秒），0 表示不过期 |
+| Data.Config.AI_product[].maxBodyBytes | int64 | 请求体大小上限 |
+| Data.Config.AI_product[].maxValueBytes | int64 | 缓存值大小上限 |
+| Data.Version | string | 配置版本号（`yyyyMMddHHmmss` 14 位定宽） |
+| WorkMode | string | 控制台工作模式 |
+
+合同锁定：一期不得导出 `cacheKeyFrom`/`cacheValueFrom`/`cacheStreamValueFrom`/`cacheToolCallsFrom`/`responseTemplate`/`streamResponseTemplate`（二期/预留字段）。
+
+### 16.3 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| AICE-1-001 | 首拉 | 正常参数 | PUT 2 条 → Config.AI_product 长度 2、顺序=提交顺序、5 个导出 tag 精确集合且值正确；对原始 body 文本断言 `"cacheKeyStrategy":"lastQuestion"` 等（家族8 文本形态） |
+| AICE-1-002 | 二期字段缺席 | 合同一致性 | 导出 body 不得含 6 个二期/预留字段（家族8） |
+| AICE-1-003 | 增量同步 | 正常参数 | 带当前 version 再拉 → Data null；不传 version 再拉 → 有数据且 Version 相同 |
+| AICE-1-004 | 版本单调 | 并发语义 | 同一秒内连续两次不同 PUT → 轮询导出（500ms×10）直到版本严格大于旧版本且内容收敛为最新集合（家族8/#142） |
+| AICE-1-005 | 清空导出 | 边界值 | PUT `{"rules":[]}` → Config.AI_product 为 `[]`（非 null，product 键 present）（家族8） |
+| AICE-1-006 | 422 防泄漏 | 异常参数 | PUT 被拒 → 带旧 version 增量拉取 Data null、Version 不变且内容与拒绝前一致（家族4） |
+
+> 逐用例明细（前置、步骤、请求、预期）见 `tests/ai_cache/design.md` 第 8 节。
+
+---
+
+## 17. 导出流量镜像规则配置
+
+### 17.1 接口信息
+
+| 项目 | 值 |
+|-----|-----|
+| 模块 | InnerAPI |
+| 接口名称 | 导出流量镜像规则配置 |
+| 方法 | GET |
+| 路径 | `/inner-api/v1/configs/traffic-mirror-rule` |
+| 说明 | 导出 BFE `mod_traffic_mirror` 规则文件（`mirror_rule.data`），支持 version 增量同步；每条规则**全字段 7 个 tag 恒输出**（`cond`/`mirrorCluster`/`percentage`/`removeHeaders`/`setHeaders`/`bodyRewrites`/`pathRewrite`，大写驼峰，与 Open API 词汇不同）；空值输出零值（`{}`/`[]`/`""`），不用 omitempty；`removeHeaders` 两层默认语义（缺省填默认黑名单 `["Authorization","Cookie","X-Api-Key"]`、显式 `[]` 不剔除） |
+
+### 17.2 接口参数说明
+
+#### 17.2.1 请求参数
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| version | string | 否 | 上次返回的版本号；相同（内容未变）时 Data 为 null |
+
+#### 17.2.2 返回数据字段
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| Data.Config | object | 按产品线组织的镜像规则（key=`AI_product`，取自 `AIRouteInnerProductName`）；空集合导出空数组 `[]` 且 product 键 present |
+| Data.Config.AI_product[] | object | 规则按 first-match-wins 匹配，数组顺序即优先级（= Open API PUT 提交顺序）；每条规则恰含 7 个导出 tag |
+| Data.Config.AI_product[].cond | string | BFE 条件表达式（控制面必填，不生成空 cond） |
+| Data.Config.AI_product[].mirrorCluster | string | 镜像目标 cluster 名（必含、显式非空） |
+| Data.Config.AI_product[].percentage | int | 镜像采样百分比（0-100） |
+| Data.Config.AI_product[].removeHeaders | array | 剔除 Header 黑名单；**缺省填默认黑名单，显式 `[]` 导出不剔除（两层默认语义，BFE 自身缺省为空列表）** |
+| Data.Config.AI_product[].setHeaders | object | 注入 Header（空输出 `{}`）；`X-Bfe-Mirror` 由 BFE 缺失时兜底注入，不随导出携带 |
+| Data.Config.AI_product[].bodyRewrites | array | body 字段改写（空输出 `[]`；一期 `path` 仅 `"model"`） |
+| Data.Config.AI_product[].pathRewrite | string | 镜像路径改写（空输出 `""`） |
+| Data.Version | string | 配置版本号（`yyyyMMddHHmmss` 14 位定宽） |
+
+### 17.3 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| TMIE-1-001 | 首拉与全字段文本形态 | 正常参数 | PUT 2 条（缺省 remove_headers + 显式全字段）→ 7 tag 精确集合与值；原始 body 文本断言 `"mirrorCluster"`、`"removeHeaders":["Authorization","Cookie","X-Api-Key"]`、`"setHeaders":{}`、`"bodyRewrites":[{"path":"model","value":"..."}]`、`"pathRewrite":""` 与 `"/v1/internal/chat/completions"`（家族8 文本形态/#102） |
+| TMIE-1-002 | 显式空黑名单导出 | 正常参数 | 显式 `remove_headers:[]` 的规则导出 `"removeHeaders":[]`（与缺省填默认黑名单对照，锁两层默认语义，家族1） |
+| TMIE-1-003 | 增量同步 | 正常参数 | 带当前 version 再拉 → Data null；不传 version 再拉 → 有数据且 Version 相同 |
+| TMIE-1-004 | 版本单调 | 并发语义 | 同一秒内连续两次不同 PUT → 轮询导出（500ms×10）直到版本严格大于旧版本且内容收敛（家族8/#142） |
+| TMIE-1-005 | 清空导出 | 边界值 | PUT `{"rules":[]}` → Config.AI_product 为 `[]`（非 null，product 键 present，body 文本 `"AI_product":[]`）（家族8） |
+| TMIE-1-006 | 422 防泄漏 | 异常参数 | PUT 被拒 → 带旧 version 增量拉取 Data null、Version 不变且内容与拒绝前一致（家族4） |
+
+> 逐用例明细（前置、步骤、请求、预期）见 `tests/traffic_mirror/design.md` 第 8 节。
+
+---
+
+## 18. K8s 实例池维护
+
+### 16.1 接口信息
+
+| 项目 | 值 |
+|-----|-----|
+| 模块 | InnerAPI |
+| 接口名称 | K8s 实例池维护（`k8s_pools`） |
+| 方法 | PUT（`/k8s_pools/{name}/instances`）、GET（`/k8s_pools/{name}`、`/k8s_pools`）、DELETE（`/k8s_pools/{name}`） |
+| 说明 | 资源读写接口，供 K8s 发现组件写入发现的实例快照；不支持 `version` 增量同步；DELETE 无引用保护 |
+
+### 16.2 返回数据字段
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| Data.name | string | pool 名称 |
+| Data.instances | array | 实例列表（元素 `{addr, port, weight}`，weight 缺省 100） |
+| Data.instance_count | int | 实例数量 |
+| Data.last_sync_time | int64 | 最近同步时间（unix 秒），取条目 `updated_at` |
+| ErrNum | int | 200 成功；404 pool 不存在；422 参数非法 |
+| WorkMode | string | 控制台工作模式 |
+
+### 16.3 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| IN-K8S-001 | PUT 幂等 upsert 全生命周期 | 正常参数 | 创建（weight 缺省 100）→ GET 单个 → 全量替换 → 重复 PUT 幂等 → GET 列表 → DELETE → GET 404 → 重复 DELETE 404 |
+| IN-K8S-002 | 参数校验 | 必填/边界校验 | 路径名非法、缺 addr、addr/port 重复、weight 越界均 422；空数组（零实例）合法 |
+| IN-K8S-003 | 共享池读路径与 last_sync_time | 返回数据 | N:1 读场景下 GET 单个返回完整实例列表；再次 PUT 后 `last_sync_time` 不回退 |
+| IN-K8S-007 | 4xx 回读零变更 | 假事务/校验层回归 | 对已存在 pool 的非法 PUT（重复 addr/port）→ 422 后 pool 逐字段不变；非法路径名下 GET/DELETE 返回 422（区别于 404） |
+| IN-K8S-008 | 并发全量替换（MySQL） | 并发语义（`//go:build mysql`，需 `AIAPI_MYSQL_DSN`） | 20 并发对同一 pool PUT 不同实例列表：全部 2xx、无 500/deadlock、最终读回与某一提交 payload 完全一致（last-write-wins） |
+
+> provider 镜像（`k8s_instance_pool`）刷新、cluster 派生池同步、cluster_table 导出跟随等跨域链路用例见 `tests/provider/k8s_pool/`（PV-K8S 系列）。
+
+---
+
+## 19. 依赖与数据准备
 
 1. 需要预先通过 OpenAPI 创建 API-Key、Entity、Cluster、证书、Global Route 等数据，才能验证导出内容非空；验证模型定价表时需先导入 model prices 并创建对应 provider 的 Cluster；验证分时段定价时需先设置 provider 的 `time_zone`/`tiers` 并导入含 `tier_prices` 的 model prices。
 2. `/configs/gslb_data/gslb` 依赖正确的 `bfe_cluster` 参数，通常为 `BFE-AI_product.szyf`。
 3. InnerAPI 鉴权为 `McUserProbe`，测试环境需配置为可跳过或使用 Support Token。
 
-## 17. 注意事项
+## 19. normalize_upstream_error 导出用例（2026-10-06 上游错误体归一）
+
+### 19.1 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| IN-NUE-1-001 | 导出 AIConf.NormalizeUpstreamError 存在性与取值 | 返回数据 | 创建全字段配置集群 → 导出断言 Enabled/StreamEnabled/UnrecognizedAction/MaxBodyBytes/RedactSecrets 逐字段（检查项 #8） |
+| IN-NUE-1-002 | redact_secrets 显式 false 导出 | 返回数据 | 验证显式 false 不被默认值污染（指针直通回归锚点） |
+| IN-NUE-1-003 | 未配置集群导出为 null | 返回数据 | 验证 `AIConf.NormalizeUpstreamError == null`（BFE 关闭，合同见 api-changes §3） |
+
+### 19.2 详细设计要点
+
+- 与 IN-1-002 同模式：创建集群后拉取 `/inner-api/v1/configs/tls_conf/server_data_conf`，
+  下钻 `ClusterConf.Config.<cluster>.AIConf`；
+- 数值断言对反序列化值（MaxBodyBytes 无精度风险，int64 直比）。
+
+## 20. 注意事项
 
 1. InnerAPI 返回值仍包含 `WorkMode`（与 OpenAPI v0.3.0 不同，InnerAPI 未移除该字段）。
 2. 配置未变化时 `Data=null`，不要断言为空对象 `{}`。

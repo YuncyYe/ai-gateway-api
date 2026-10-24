@@ -29,6 +29,7 @@ type TAPIKey struct {
 	ID                string    `db:"id"`
 	Enable            bool      `db:"enable"`
 	Key               string    `db:"api_key"`
+	KeyHash           string    `db:"api_key_hash"`
 	Description       string    `db:"description"`
 	UnlimitedQuota    bool      `db:"unlimited_quota"`
 	ProductName       string    `db:"product_name"`
@@ -76,6 +77,7 @@ type TAPIKeyParam struct {
 	ID                *string    `db:"id"`
 	Enable            *bool      `db:"enable"`
 	Key               *string    `db:"api_key"`
+	KeyHash           *string    `db:"api_key_hash"`
 	Description       *string    `db:"description"`
 	UnlimitedQuota    *bool      `db:"unlimited_quota"`
 	ProductName       *string    `db:"product_name"`

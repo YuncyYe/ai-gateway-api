@@ -338,3 +338,36 @@ models:
 	assert.Equal(t, 7.6234102728e-08, back.Prices["output_cost_per_token"])
 	assert.Equal(t, 4.141631732e-06, back.TierPrices["peak"]["input_cost_per_token"])
 }
+
+func TestParseModelListYAML_BatchDiscount(t *testing.T) {
+	yaml := `
+version: v1.0
+default_currency: RMB
+models:
+  - provider: openai
+    model: gpt-4
+    base_model: gpt-4
+    mode: chat
+    batch_discount: 0.5
+    prices:
+      input_cost_per_token: 0.001
+  - provider: openai
+    model: gpt-4
+    base_model: gpt-4
+    mode: batch
+    prices:
+      input_cost_per_token: 0.0005
+`
+	file, err := ParseModelListYAML(strings.NewReader(yaml))
+	require.NoError(t, err)
+	require.Len(t, file.Models, 2)
+
+	require.NotNil(t, file.Models[0].BatchDiscount)
+	assert.Equal(t, 0.5, *file.Models[0].BatchDiscount)
+	assert.Nil(t, file.Models[1].BatchDiscount)
+
+	// Import validation accepts the batch mode row and the discounted row.
+	for _, m := range file.Models {
+		require.NoError(t, ValidateModelPrice(m))
+	}
+}

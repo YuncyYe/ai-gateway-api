@@ -17,16 +17,21 @@ package innerapi_v1
 import (
 	"github.com/gorilla/mux"
 
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/ai_cache"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/ai_context"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/ai_route"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/epp_data"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/extra_file"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/gslb_data"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/intent_config_export"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/k8s_pools"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/mod_api_key"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/mod_body_process"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/protocol"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/quota_reset"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/rate_limit_policy"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/server_data"
+	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/innerapi_v1/traffic_mirror"
 	"github.com/rainway-ai-gateway/ai-gateway-api/endpoints/middleware"
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib/xreq"
 )
@@ -42,8 +47,16 @@ func endpoints() []*xreq.Endpoint {
 		mod_body_process.ExportRoute,
 		quota_reset.TriggerResetRoute,
 		rate_limit_policy.ExportRoute,
+		ai_cache.ExportRoute,
+		ai_context.ExportRoute,
+		traffic_mirror.ExportRoute,
 		ai_route.ExportRoute,
+		intent_config_export.ExportRoute,
 		epp_data.ExportRoute,
+		k8s_pools.ReplaceInstancesRoute,
+		k8s_pools.GetPoolRoute,
+		k8s_pools.ListPoolsRoute,
+		k8s_pools.DeletePoolRoute,
 	}
 }
 

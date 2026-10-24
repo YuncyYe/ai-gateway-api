@@ -61,7 +61,6 @@ func TestEppPool_Get(t *testing.T) {
 				map[string]interface{}{
 					"name": "g1",
 					"instances": []interface{}{
-						map[string]interface{}{"id": "epp-b", "host": "10.0.0.2", "port": 9002},
 						map[string]interface{}{"id": "epp-a", "host": "10.0.0.1", "port": 9002},
 					},
 				},
@@ -87,14 +86,11 @@ func TestEppPool_Get(t *testing.T) {
 		g1 := groups[0].(map[string]interface{})
 		assert.Equal(t, "g1", g1["name"])
 		insts := g1["instances"].([]interface{})
-		require.Len(t, insts, 2)
+		require.Len(t, insts, 1)
 		inst0 := insts[0].(map[string]interface{})
 		assert.Equal(t, "epp-a", inst0["id"])
 		assert.Equal(t, "10.0.0.1", inst0["host"])
 		assert.Equal(t, float64(9002), inst0["port"])
-		inst1 := insts[1].(map[string]interface{})
-		assert.Equal(t, "epp-b", inst1["id"])
-		assert.Equal(t, "10.0.0.2", inst1["host"])
 
 		g2 := groups[1].(map[string]interface{})
 		assert.Equal(t, "g2", g2["name"])

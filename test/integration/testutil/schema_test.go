@@ -78,6 +78,44 @@ func TestAssertSchema(t *testing.T) {
 			t.Fatalf("expected integer type error, got %v", fakeT.errors)
 		}
 	})
+
+	t.Run("nullable field", func(t *testing.T) {
+		nullableSchema := &ObjectSchema{
+			Required: []string{"name", "pool"},
+			Fields: map[string]FieldSpec{
+				"name": {Type: TypeString},
+				"pool": {Type: TypeString, Nullable: true},
+			},
+		}
+
+		// null 值通过类型校验，键存在性仍被 Required 约束
+		data := map[string]interface{}{"name": "test", "pool": nil}
+		raw, _ := json.Marshal(data)
+		AssertSchema(t, &APIResponse{ErrNum: 200, Data: raw}, nullableSchema)
+
+		// 非 null 仍按类型校验
+		data = map[string]interface{}{"name": "test", "pool": "svc-a"}
+		raw, _ = json.Marshal(data)
+		AssertSchema(t, &APIResponse{ErrNum: 200, Data: raw}, nullableSchema)
+
+		// 键缺失仍报 required field missing
+		data = map[string]interface{}{"name": "test"}
+		raw, _ = json.Marshal(data)
+		fakeT := &testingT{}
+		AssertSchema(fakeT, &APIResponse{ErrNum: 200, Data: raw}, nullableSchema)
+		if !fakeT.failed || !contains(fakeT.errors, "required field missing") {
+			t.Fatalf("expected required field missing error for pool, got %v", fakeT.errors)
+		}
+
+		// null 以外的错误类型仍失败
+		data = map[string]interface{}{"name": "test", "pool": float64(1)}
+		raw, _ = json.Marshal(data)
+		fakeT = &testingT{}
+		AssertSchema(fakeT, &APIResponse{ErrNum: 200, Data: raw}, nullableSchema)
+		if !fakeT.failed || !contains(fakeT.errors, "expected string") {
+			t.Fatalf("expected string type error for pool, got %v", fakeT.errors)
+		}
+	})
 }
 
 func TestAssertPagedListSchema(t *testing.T) {

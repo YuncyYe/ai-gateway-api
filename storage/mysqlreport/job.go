@@ -450,7 +450,7 @@ func buildAggregateDeleteSQL(metricsTable string) string {
 }
 
 // aggregateInsertColumns is the explicit column list of bfe_ai_metrics_1m
-// (37 dimensions + 24 metrics, same order as db_ddl_report_mysql.sql).
+// (40 dimensions + 24 metrics, same order as db_ddl_report_mysql.sql).
 var aggregateInsertColumns = " (ts_min," +
 	"hostid,ai_apikey_id,ai_requested_model,ai_target_model,ai_stream," +
 	"product,cluster,sub_cluster,backend_info,method,res_status_code,err_code,header_host," +
@@ -459,13 +459,14 @@ var aggregateInsertColumns = " (ts_min," +
 	"rate_limit_policy_id,rate_limit_type,rate_limit_rule_name,ai_auth_reject_reason," +
 	"ai_auth_reject_quota_plans_slot1,ai_auth_reject_quota_plans_slot2,ai_auth_reject_quota_plans_slot3," +
 	"ai_auth_reject_quota_plans_slot4,ai_auth_reject_quota_plans_slot5," +
+	"ai_cache_status,mirror_hit,ai_intent_answer," +
 	"request_count,error_count,auth_reject_count,input_tokens,output_tokens,total_tokens," +
 	"ttft_us_sum,tpot_us_sum,req_header_bytes,req_body_bytes,res_header_bytes,res_body_bytes," +
 	"rate_limit_hits,backend_retries,all_time_sum,cluster_serve_sum,backend_serve_sum," +
 	"ai_retry_count_sum,ai_cost_value_sum,cache_read_tokens,cache_write_tokens," +
 	"ai_audio_input_tokens,ai_audio_output_tokens,ai_image_count)"
 
-// aggregateGroupBy lists the 37 dimension aliases (ts_min + 36) of the
+// aggregateGroupBy lists the 40 dimension aliases (ts_min + 39) of the
 // aggregate insert, mirroring the Doris bfe_ai_metrics_1m_job.sql.
 const aggregateGroupBy = " GROUP BY ts_min," +
 	"hostid,ai_apikey_id,ai_requested_model,ai_target_model,ai_stream," +
@@ -474,7 +475,8 @@ const aggregateGroupBy = " GROUP BY ts_min," +
 	"level1Name,level1,level2Name,level2,level3Name,level3,level4Name,level4,level5Name,level5," +
 	"rate_limit_policy_id,rate_limit_type,rate_limit_rule_name,ai_auth_reject_reason," +
 	"ai_auth_reject_quota_plans_slot1,ai_auth_reject_quota_plans_slot2,ai_auth_reject_quota_plans_slot3," +
-	"ai_auth_reject_quota_plans_slot4,ai_auth_reject_quota_plans_slot5"
+	"ai_auth_reject_quota_plans_slot4,ai_auth_reject_quota_plans_slot5," +
+	"ai_cache_status,mirror_hit,ai_intent_answer"
 
 // buildAggregateInsertSQL builds the INSERT SELECT aggregating one minute
 // window of the detail table into the aggregate table. Dimension columns
@@ -521,6 +523,9 @@ func buildAggregateInsertSQL(detailTable, metricsTable string) string {
 		" IFNULL(JSON_UNQUOTE(JSON_EXTRACT(ai_auth_reject_quota_plans,'$[2]')),'') AS ai_auth_reject_quota_plans_slot3," +
 		" IFNULL(JSON_UNQUOTE(JSON_EXTRACT(ai_auth_reject_quota_plans,'$[3]')),'') AS ai_auth_reject_quota_plans_slot4," +
 		" IFNULL(JSON_UNQUOTE(JSON_EXTRACT(ai_auth_reject_quota_plans,'$[4]')),'') AS ai_auth_reject_quota_plans_slot5," +
+		" IFNULL(ai_cache_status,'') AS ai_cache_status," +
+		" IFNULL(mirror_hit,0) AS mirror_hit," +
+		" IFNULL(ai_intent_answer,'') AS ai_intent_answer," +
 		" COUNT(1) AS request_count," +
 		" SUM(CASE WHEN err_code != '' AND err_code IS NOT NULL THEN 1 ELSE 0 END) AS error_count," +
 		" SUM(CASE WHEN ai_auth_reject_reason != '' AND ai_auth_reject_reason IS NOT NULL THEN 1 ELSE 0 END) AS auth_reject_count," +

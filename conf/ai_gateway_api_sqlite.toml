@@ -1,0 +1,95 @@
+# ---------------------------------
+# AI GATEWAY API Config (Local / SQLite)
+# 本地单机部署配置：SQLite 数据库 + 内存 Redis Mock
+# 启动：./ai-gateway-api -c ./conf -sc ai_gateway_api_sqlite.toml -l ./log
+[Server]
+# 服务监听地址，默认 0.0.0.0
+ServerAddr = "0.0.0.0"
+# server port
+ServerPort = 8183
+# server graceful exit timeout
+GracefulTimeOutInMs = 5000
+# monitor port, don't start monitor server if less than 0
+MonitorPort = 8284
+
+# ---------------------------------
+# Logger Config
+[Loggers.access]
+LogName     = "access"
+LogLevel    = "INFO"
+RotateWhen  = "MIDNIGHT"
+BackupCount = 1
+Format      = "[%D %T] [%L] [%S] %M"
+StdOut      = true
+
+[Loggers.sql]
+LogName     = "sql"
+LogLevel    = "INFO"
+RotateWhen  = "MIDNIGHT"
+BackupCount = 1
+Format      = "[%D %T] %M"
+StdOut      = false
+
+[Loggers.exception]
+LogName     = "exception"
+LogLevel    = "ERROR"
+RotateWhen  = "MIDNIGHT"
+BackupCount = 7
+Format      = "[%D %T] [%L] [%S] %M"
+StdOut      = true
+
+# ---------------------------------
+# Database Config (SQLite)
+# DBName is the SQLite database file path used by the pure-Go
+# github.com/glebarez/go-sqlite driver (no CGO required).
+# Driver "sqlite-strip" == "sqlite" + strips unsupported "FOR UPDATE".
+# Apply db_ddl_sqlite.sql before the first start (see scripts/deploy_local_sqlite.sh).
+[Databases.bfe_db]
+DBName               = "./data/ai_gateway.db"
+Driver               = "sqlite-strip"
+MaxOpenConns         = 5
+MaxIdleConns         = 1
+ConnMaxIdleTimeInMs  = 500000
+ConnMaxLifetimeInMs  = 5000000
+
+# ---------------------------------
+# Dependence Config
+[Depends]
+NavTreeFile = "${conf_dir}/nav_tree.toml"
+I18nDir     = "${conf_dir}/i18n"
+UIIcon = "https://raw.githubusercontent.com/bfenetworks/bfe/develop/docs/images/logo/icon/color/bfe-icon-color.svg"
+UILogo = "https://raw.githubusercontent.com/bfenetworks/bfe/develop/docs/images/logo/horizontal/color/bfe-horizontal-color.png"
+
+# ---------------------------------
+# Runtime Config
+[RunTime]
+# 本地调试可置 true，跳过登录态校验（生产勿开）
+SkipTokenValidate = false
+# sql will be record to log file when this option be opend
+RecordSQL = false
+# how long use must login again
+SessionExpireInDay = 10
+# static file path, when dynamic router not be matched, static file will be return if found
+StaticFilePath = "./static"
+# debug info will be add to response when this option be opend
+Debug = false
+# support AI product name
+AIRouteInnerProductName = "AI_product"
+# default AI cluster name
+DefaultAIClusterName = "BFE-AI_product.szyf"
+# default EPP instance pool name (singleton, /epp-pool)
+DefaultEPPInstancePoolName = "EPP.pool"
+# EPP assignment reconciler period in seconds (default 30)
+EPPReconcileIntervalSeconds = 30
+
+# ---------------------------------
+# Redis Config
+# 本地单机部署使用内存 Redis Mock，无需外部 Redis 服务。
+# Bns = "mock" 或 ClusterMode = "mock" 即启用 mock（见 stateful/config_redis.go）。
+[RedisConf]
+Bns         = "mock"
+ClusterMode = "mock"
+ConnectTimeout = 10
+ReadTimeout    = 5
+WriteTimeout   = 5
+MaxIdle        = 10

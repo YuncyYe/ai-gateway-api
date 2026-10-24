@@ -154,11 +154,15 @@ func (rm *RouteRuleManager) exportRouteRule(ctx context.Context) (*iversion_cont
 	}
 
 	emptyVersion := iversion_control.ZeroVersion
+	bfeClusterConf, err := icluster_conf.NewBfeClusterConf(ctx, emptyVersion, clusters, providerModelTable, providerKeyTable, providerProtocolTable, providerProtocolPathsTable, providerPricingTable, rm.eppAssignmentResolver)
+	if err != nil {
+		return nil, err
+	}
 	rred := &RouteRuleExportData{
 		Version:     emptyVersion,
 		RouteTable:  newRouteTableFile(emptyVersion, productMapID2Name, routeRules),
 		HostTable:   newHostTableConf(emptyVersion, productMapID2Name, domains),
-		ClusterConf: icluster_conf.NewBfeClusterConf(ctx, emptyVersion, clusters, providerModelTable, providerKeyTable, providerProtocolTable, providerProtocolPathsTable, providerPricingTable, rm.eppAssignmentResolver),
+		ClusterConf: bfeClusterConf,
 	}
 
 	return &iversion_control.ExportData{

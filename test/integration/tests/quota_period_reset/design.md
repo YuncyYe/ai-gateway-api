@@ -28,7 +28,10 @@ quota-plan 周期重置模块负责在配额计划（`quota_plan`）跨越自然
 | 已重置后再次触发保持幂等 | 1 |
 | 多实例共享 Redis 时只有一个实例完成重置 | 1 |
 | 锁释放后另一实例可再次获取锁（幂等） | 1 |
-| **合计** | **6** |
+| 创建时初始化 `last_reset_at`（issue #228） | 2 |
+| 存量 NULL 计划认领回填与同周期幂等（issue #228） | 2 |
+| 调度器自然 tick 不循环重置（issue #228，~150s） | 1 |
+| **合计** | **10** |
 
 ## 4. 认证方式
 
@@ -39,7 +42,8 @@ quota-plan 周期重置模块负责在配额计划（`quota_plan`）跨越自然
 ```
 quota_period_reset/
 ├── design.md
-└── quota_period_reset_test.go
+├── quota_period_reset_test.go
+└── quota_reset_null_guard_test.go
 ```
 
 ## 6. 触发周期重置
@@ -387,7 +391,42 @@ quota_period_reset/
 
 ---
 
-## 8. 依赖与数据准备
+## 8. NULL 计划回归（issue #228）
+
+### 8.1 测试目标
+
+验证配额周期重置死循环修复（issue #228）的三项效果：
+
+1. **创建即初始化**：`reset_period` 为 weekly/monthly 的配额计划在创建时即将 `last_reset_at` 置为创建时间，不再以 NULL 进入调度判定；
+2. **认领回填 + 同周期幂等**：存量 `last_reset_at IS NULL` 的计划触发一次重置后标记必须落库，同周期内再次触发不得重复重置。旧实现因 SQL 三值逻辑（`last_reset_at < ?` 对 NULL 恒不成立）丢失 NULL 分支，标记永不落库，每分钟重复重置；
+3. **调度器自然 tick 不循环**：不调用任何重置接口，仅靠调度器自然 tick，不出现"每分钟 SET 回满额"的运行时症状。
+
+### 8.2 辅助设施
+
+新增两个 testutil 辅助函数（`test/integration/testutil/server.go`）：
+
+- `ServerManager.NullQuotaPlanLastResetAt(ownerID, ownerType)`：直接写 SQLite 将 `last_reset_at` 置为 NULL，模拟修复前创建的存量计划；
+- `ServerManager.GetQuotaPlanLastResetAtNullable(ownerID, ownerType)`：读取 `last_reset_at`，列为 NULL 时返回 `(nil, nil)`。
+
+### 8.3 测试场景总览
+
+| 编号 | 场景 | 测试类型 | 简要说明 |
+|------|------|---------|---------|
+| QR-4-001 | 创建 monthly 计划初始化 `last_reset_at` | 回归 | POST 创建带 `reset_period=monthly` 的 API-Key，断言 `last_reset_at` 为创建时间 |
+| QR-4-002 | 创建 reset_period 缺省的计划保持 NULL | 回归 | 创建不配 `reset_period` 的 API-Key，断言 `last_reset_at` 为 NULL（never 语义不变） |
+| QR-4-003 | 存量 NULL 计划触发一次重置并回填标记 | 回归 | PATCH 出 monthly 计划后置 NULL，trigger-reset 后断言 Redis 回满额且 `last_reset_at` 落库（旧实现此处仍为 NULL） |
+| QR-4-004 | 回填后同周期再次触发不得重复重置 | 回归 | 再次调低 Redis 并 trigger-reset，断言不被二次重置（旧实现会回满额） |
+| QR-4-005 | 调度器自然 tick 不循环重置 | 回归/端到端 | 不调用触发接口，等待约 2 个调度窗口（~150s）：首窗口 tick 重置并回填，第二窗口调低后不被再重置；`go test -short` 跳过 |
+
+### 8.4 用例位置
+
+- QR-4-001 / QR-4-002：`TestQuotaResetNullGuard_CreateInitLastResetAt`
+- QR-4-003 / QR-4-004：`TestQuotaResetNullGuard_LegacyNullClaimAndIdempotency`
+- QR-4-005：`TestQuotaResetNullGuard_SchedulerTickNoLoop`
+
+---
+
+## 9. 依赖与数据准备
 
 1. 测试二进制 `ai-gateway-api.exe` 已由 `make build` 生成。
 2. `testutil.StartServer()` 启动完整服务，初始化 SQLite 与 miniredis。
@@ -398,7 +437,7 @@ quota_period_reset/
 5. 通过 `ServerManager.UpdateQuotaPlanLastResetAt` 直接写 SQLite，模拟跨周期/同周期场景。
 6. 通过 `ServerManager.SetQuotaRemaining` / `GetQuotaRemaining` 直接读写 miniredis。
 
-## 9. 注意事项
+## 10. 注意事项
 
 1. `/inner-api/v1/quota/trigger-reset` 仅供测试与运维排障，不走 OpenAPI 鉴权（受 `McUserProbe` 中间件保护，但测试环境 `SkipTokenValidate=true`）。
 2. 触发接口复用生产调度器的分布式锁路径，因此会真实尝试获取 Redis 锁；单实例测试下总能获取锁。
@@ -406,4 +445,5 @@ quota_period_reset/
 4. 测试用例共享一次服务启动；QR-1-004 依赖 QR-1-001 的副作用，需按顺序放在同一个 `t.Run` 链中执行。
 5. `last_reset_at` 的周期判断基于服务器本地时区，测试构造的 `previousMonthStart` / `currentMonthMid` 需使用相同本地时区。
 6. 多实例共享基础设施时，实例 A 创建的 miniredis 与 SQLite 文件由实例 A 的 `Shutdown()` 统一关闭或删除；后续实例在 `Shutdown()` 中不会重复释放共享资源。
-7. 为避免同一测试进程内多实例复制二进制时触发 Windows 文件锁冲突，`testutil` 在复制的临时二进制文件名中追加 `time.Now().UnixNano()`，确保文件名唯一。
+7. `StartServerWithSharedInfra(nil, "")`（新建基础设施的实例）会把全局 HTTP 客户端 URL 重置为该实例地址；多实例用例必须在启动任何实例**之前**捕获 `GetClient().BaseURL` 并 defer 恢复，否则用例结束后全局 URL 指向已关闭的实例，后续用例将连接被拒绝（QR-2 曾因此污染同包后续用例）。
+8. 为避免同一测试进程内多实例复制二进制时触发 Windows 文件锁冲突，`testutil` 在复制的临时二进制文件名中追加 `time.Now().UnixNano()`，确保文件名唯一。

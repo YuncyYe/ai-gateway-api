@@ -145,6 +145,28 @@ func (m *MockRedisClient) IncrBy(key string, delta int64) (int64, error) {
 	return current, nil
 }
 
+// HGetAll 获取 hash key 的全部字段。mock 中以 map[string]string 存储
+// hash；key 缺失 / 过期 / 非 hash 类型时返回空 map（对齐真实 Redis 对
+// 缺失 key 执行 HGETALL 的语义）。
+func (m *MockRedisClient) HGetAll(key string) (map[string]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.isExpiredLocked(key) {
+		delete(m.data, key)
+		delete(m.ttls, key)
+		return map[string]string{}, nil
+	}
+	hash, ok := m.data[key].(map[string]string)
+	if !ok {
+		return map[string]string{}, nil
+	}
+	rst := make(map[string]string, len(hash))
+	for k, v := range hash {
+		rst[k] = v
+	}
+	return rst, nil
+}
+
 // Delete 删除 key
 func (m *MockRedisClient) Delete(key string) error {
 	m.mu.Lock()
@@ -187,6 +209,31 @@ func (s *mockRedisScript) Run(key string, args ...interface{}) (interface{}, err
 		val := s.client.toInt64Locked(args[0])
 		s.client.data[key] = val
 		return int64(1), nil
+	}
+
+	// Hash set with TTL (ibatch HSetWithTTL): hset field/value pairs + expire.
+	if strings.Contains(src, "HSET") && strings.Contains(src, "EXPIRE") {
+		if len(args) < 3 {
+			return nil, fmt.Errorf("hset script expects ttl and field/value pairs")
+		}
+		ttl := s.client.toInt64Locked(args[0])
+		hash, _ := s.client.data[key].(map[string]string)
+		if hash == nil {
+			hash = map[string]string{}
+		}
+		added := int64(0)
+		for i := 1; i+1 < len(args); i += 2 {
+			f, v := fmt.Sprintf("%v", args[i]), fmt.Sprintf("%v", args[i+1])
+			if _, exists := hash[f]; !exists {
+				added++
+			}
+			hash[f] = v
+		}
+		s.client.data[key] = hash
+		if ttl > 0 {
+			s.client.ttls[key] = time.Now().Add(time.Duration(ttl) * time.Second)
+		}
+		return added, nil
 	}
 
 	// Lock acquire: exists + setex.

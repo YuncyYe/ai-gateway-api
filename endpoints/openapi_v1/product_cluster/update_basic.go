@@ -131,6 +131,7 @@ func clusterParamControlModel4Update(param *UpsertParam) *icluster_conf.ClusterP
 		Description: param.Description,
 		BalanceMode: param.BalanceMode,
 		EppConfig:   normalizeEppConfigRaw(param.EppConfig),
+		EppRuntime:  normalizeEppRuntimeRaw(param.EppRuntime),
 	}
 
 	if param.LLMConfig != nil {

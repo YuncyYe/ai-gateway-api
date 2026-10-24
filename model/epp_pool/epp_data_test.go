@@ -30,17 +30,16 @@ func TestEppDataGenerator(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced","kv_cache_utilization_max":0.9}`},
-		{Name: "cluster-b", EppConfigJSON: `{"scheduling_profile":"latency-first"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced","kv_cache_utilization_max":0.9}`},
+		{Name: "cluster-b", EppConfigJSON: `{"load_profile":"queue-first"}`},
 		{Name: "cluster-c", EppConfigJSON: `{"prefix_cache_affinity":true}`},
 	}}
 	store.seedAssignments(
-		&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"},
+		&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"},
 		// Dangling: cluster-b unassigned in the export.
-		&AssignmentParam{Cluster: "cluster-b", GroupName: "g9", PrimaryInstanceID: "epp-x"},
+		&AssignmentParam{Cluster: "cluster-b", GroupName: "g9"},
 	)
 
 	m := testManager(store, source)
@@ -62,13 +61,11 @@ func TestEppDataGenerator(t *testing.T) {
 	require.NotNil(t, findProfilePlugin(t, compiledB, pluginNameQueueScorer))
 	assert.Equal(t, 1.0, *findProfilePlugin(t, compiledB, pluginNameQueueScorer).Weight)
 
-	// assignment section: only validly assigned clusters.
+	// assignment section: only validly assigned clusters, mapped to groups.
 	require.Len(t, conf.Config.Assignment, 1)
 	entry := conf.Config.Assignment["cluster-a"]
 	require.NotNil(t, entry)
-	assert.Equal(t, "epp-a", entry.Primary)
-	require.NotNil(t, entry.Standby)
-	assert.Equal(t, "epp-b", *entry.Standby)
+	assert.Equal(t, "g1", entry.Group)
 	_, hasB := conf.Config.Assignment["cluster-b"]
 	assert.False(t, hasB)
 
@@ -77,14 +74,14 @@ func TestEppDataGenerator(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestEppDataGenerator_SingleInstanceStandbyNull(t *testing.T) {
+func TestEppDataGenerator_SingleInstanceGroup(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(inst("epp-a", "g1", "10.0.0.1", 9002))
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
 		{Name: "cluster-a", EppConfigJSON: `{}`},
 	}}
-	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 
 	m := NewEppPoolManager(&fakeTxn{}, store, source, nil, nil)
 
@@ -94,8 +91,7 @@ func TestEppDataGenerator_SingleInstanceStandbyNull(t *testing.T) {
 
 	entry := conf.Config.Assignment["cluster-a"]
 	require.NotNil(t, entry)
-	assert.Equal(t, "epp-a", entry.Primary)
-	assert.Nil(t, entry.Standby)
+	assert.Equal(t, "g1", entry.Group)
 }
 
 func TestEppDataGenerator_Errors(t *testing.T) {
@@ -115,10 +111,17 @@ func TestEppDataGenerator_Errors(t *testing.T) {
 	})
 
 	t.Run("invalid stored epp_config", func(t *testing.T) {
-		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"nope"}`}}}
+		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"load_profile":"nope"}`}}}
 		m := testManager(newMemoryEppPoolStorager(), source)
 		_, err := m.EppDataGenerator(ctx)
 		require.NoError(t, err) // parse ok; field validation happens at write time
+	})
+
+	t.Run("unknown stored field rejected", func(t *testing.T) {
+		source := &fakeClusterSource{clusters: []*EPPClusterInfo{{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`}}}
+		m := testManager(newMemoryEppPoolStorager(), source)
+		_, err := m.EppDataGenerator(ctx)
+		require.Error(t, err)
 	})
 }
 
@@ -127,12 +130,11 @@ func TestExportEppData_VersionSemantics(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
-	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1", PrimaryInstanceID: "epp-a"})
+	store.seedAssignments(&AssignmentParam{Cluster: "cluster-a", GroupName: "g1"})
 
 	vcStore := &fakeVersionControlStorager{}
 	vc := iversion_control.NewVersionControllerManager(&fakeTxn{}, vcStore)
@@ -165,10 +167,10 @@ func TestOverrideAssignment_TriggersExport(t *testing.T) {
 	store := newMemoryEppPoolStorager()
 	store.seedInstances(
 		inst("epp-a", "g1", "10.0.0.1", 9002),
-		inst("epp-b", "g1", "10.0.0.2", 9002),
+		inst("epp-b", "g2", "10.0.0.2", 9002),
 	)
 	source := &fakeClusterSource{clusters: []*EPPClusterInfo{
-		{Name: "cluster-a", EppConfigJSON: `{"scheduling_profile":"balanced"}`},
+		{Name: "cluster-a", EppConfigJSON: `{"load_profile":"balanced"}`},
 	}}
 
 	var exported []*iversion_control.ExportData
@@ -181,7 +183,7 @@ func TestOverrideAssignment_TriggersExport(t *testing.T) {
 	vc := iversion_control.NewVersionControllerManager(&fakeTxn{}, vcStore)
 	m := NewEppPoolManager(&fakeTxn{}, store, source, vc, &ManagerOptions{})
 
-	_, err := m.OverrideAssignment(ctx, "cluster-a", "g1", "epp-b")
+	_, err := m.OverrideAssignment(ctx, "cluster-a", "g2")
 	require.NoError(t, err)
 	require.NotEmpty(t, exported)
 	assert.Equal(t, ConfigTopicEppData, exported[0].Topic)
@@ -196,12 +198,16 @@ func TestEppDataGenerator_ClusterSourceError(t *testing.T) {
 func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	// End-to-end: stored raw JSON -> parse -> validate -> compile -> marshal.
 	raw := `{
-		"scheduling_profile": "throughput-first",
-		"cache_affinity": "high",
+		"load_profile": "kv-first",
+		"affinity": "high",
 		"session_affinity_enabled": true,
 		"session_affinity_header": "x-session-id",
 		"kv_cache_utilization_max": 0.85,
-		"flow_control": {"max_requests": -1, "queue_ttl": 45, "no_endpoint_queue_ttl": 0, "enable_eviction": true}
+		"waiting_queue_max": 8,
+		"running_requests_max": 16,
+		"fallback_on_empty": true,
+		"metrics_staleness_threshold_ms": 300,
+		"flow_control": {"max_requests": -1, "queue_ttl": 45, "no_endpoint_queue_ttl": 0, "enable_eviction": false}
 	}`
 	conf, err := ParseEppConfig(raw)
 	require.NoError(t, err)
@@ -219,7 +225,9 @@ func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	assert.NotContains(t, flowControl, "maxRequests") // -1 not generated
 	assert.Equal(t, "45s", flowControl["defaultRequestTTL"])
 	assert.Equal(t, "0s", flowControl["noEndpointRequestTTL"])
-	assert.Equal(t, true, flowControl["enableEviction"])
+	assert.NotContains(t, flowControl, "enableEviction")
+	saturationDetector := flowControl["saturationDetector"].(map[string]interface{})
+	assert.Equal(t, pluginNameSaturationDetector, saturationDetector["pluginRef"])
 
 	// max_requests 为 -1（不限）：全局不生成，但 band 0 必须显式存在且带显式上限。
 	bands := flowControl["priorityBands"].([]interface{})
@@ -229,5 +237,21 @@ func TestCompileIntegration_FromStoredJSON(t *testing.T) {
 	assert.Equal(t, "10000", band["maxRequests"])
 	assert.Equal(t, "5Gi", band["maxBytes"])
 
-	assert.Equal(t, "llm-cluster-a", decoded["plugins"].([]interface{})[0].(map[string]interface{})["parameters"].(map[string]interface{})["clusterName"])
+	// Detector plugin is always injected with the shared KV threshold and the
+	// configured queue / staleness thresholds.
+	pluginList := decoded["plugins"].([]interface{})
+	assert.Equal(t, "llm-cluster-a", pluginList[0].(map[string]interface{})["parameters"].(map[string]interface{})["clusterName"])
+
+	var detectorParams map[string]interface{}
+	for _, p := range pluginList {
+		plugin := p.(map[string]interface{})
+		if plugin["name"] == pluginNameSaturationDetector {
+			detectorParams = plugin["parameters"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, detectorParams)
+	assert.Equal(t, 0.85, detectorParams["kvCacheUtilThreshold"])
+	assert.Equal(t, float64(8), detectorParams["queueDepthThreshold"])
+	assert.Equal(t, "300ms", detectorParams["metricsStalenessThreshold"])
+	assert.Equal(t, stalenessPolicyIgnore, detectorParams["stalenessPolicy"])
 }

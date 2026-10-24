@@ -34,11 +34,12 @@ const (
 
 // FieldSpec 描述单个字段的校验规则
 type FieldSpec struct {
-	Type   FieldType
-	Elem   *ObjectSchema // 数组元素为对象时的 schema（TypeArray 时使用，与 Item 二选一）
-	Item   *FieldSpec    // 数组元素为原始类型时的 schema（TypeArray 时使用，与 Elem 二选一）
-	Nested *ObjectSchema // 嵌套对象 schema（TypeObject 时使用）
-	Enum   []interface{} // 可选：枚举值校验
+	Type     FieldType
+	Elem     *ObjectSchema // 数组元素为对象时的 schema（TypeArray 时使用，与 Item 二选一）
+	Item     *FieldSpec    // 数组元素为原始类型时的 schema（TypeArray 时使用，与 Elem 二选一）
+	Nested   *ObjectSchema // 嵌套对象 schema（TypeObject 时使用）
+	Enum     []interface{} // 可选：枚举值校验
+	Nullable bool          // 可选：值为 null 时跳过类型校验（键仍按 Required/Optional 做存在性校验）
 }
 
 // ObjectSchema 描述一个 JSON 对象的 schema
@@ -211,7 +212,8 @@ func validateObject(path string, data map[string]interface{}, schema *ObjectSche
 }
 
 // validateValue 校验单个值是否符合 FieldSpec
-// optional 为 true 时，null 值会被接受，跳过类型校验。
+// optional 为 true 时，null 值会被接受，跳过类型校验；
+// spec.Nullable 为 true 时，null 同样被接受（键的存在性仍由 Required/Optional 约束）。
 func validateValue(path string, value interface{}, spec *FieldSpec, optional bool) []schemaError {
 	if spec == nil {
 		return nil
@@ -219,7 +221,7 @@ func validateValue(path string, value interface{}, spec *FieldSpec, optional boo
 
 	var errs []schemaError
 
-	if value == nil && optional {
+	if value == nil && (optional || spec.Nullable) {
 		return errs
 	}
 

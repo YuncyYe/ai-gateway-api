@@ -64,27 +64,37 @@ func TestUserCreateParamValidate(t *testing.T) {
 	}{
 		{
 			name:    "valid",
-			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123"), IsAdmin: true},
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123"), Role: lib.PString("system_admin")},
+			wantErr: false,
+		},
+		{
+			name:    "valid readonly",
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123"), Role: lib.PString("system_admin_readonly")},
 			wantErr: false,
 		},
 		{
 			name:    "reserved user name",
-			param:   &UserCreateParam{UserName: lib.PString("admin"), Password: lib.PString("Password123"), IsAdmin: true},
+			param:   &UserCreateParam{UserName: lib.PString("admin"), Password: lib.PString("Password123"), Role: lib.PString("system_admin")},
 			wantErr: true,
 		},
 		{
 			name:    "password too short",
-			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("short1"), IsAdmin: true},
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("short1"), Role: lib.PString("system_admin")},
 			wantErr: true,
 		},
 		{
 			name:    "password equals user name",
-			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("user1"), IsAdmin: true},
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("user1"), Role: lib.PString("system_admin")},
 			wantErr: true,
 		},
 		{
-			name:    "is_admin false",
-			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123"), IsAdmin: false},
+			name:    "invalid role",
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123"), Role: lib.PString("other")},
+			wantErr: true,
+		},
+		{
+			name:    "role missing",
+			param:   &UserCreateParam{UserName: lib.PString("user1"), Password: lib.PString("Password123")},
 			wantErr: true,
 		},
 	}
@@ -101,25 +111,35 @@ func TestUserCreateParamValidate(t *testing.T) {
 	}
 }
 
-func TestUserUpdateIsAdminParamValidate(t *testing.T) {
+func TestUserUpdateRoleParamValidate(t *testing.T) {
 	cases := []struct {
 		name    string
-		param   *UserUpdateIsAdminParam
+		param   *UserUpdateRoleParam
 		wantErr bool
 	}{
 		{
 			name:    "valid",
-			param:   &UserUpdateIsAdminParam{UserName: lib.PString("user1"), IsAdmin: true},
+			param:   &UserUpdateRoleParam{UserName: lib.PString("user1"), Role: lib.PString("system_admin_readonly")},
+			wantErr: false,
+		},
+		{
+			name:    "reserved user name is allowed",
+			param:   &UserUpdateRoleParam{UserName: lib.PString("admin"), Role: lib.PString("system_admin")},
 			wantErr: false,
 		},
 		{
 			name:    "invalid user name",
-			param:   &UserUpdateIsAdminParam{UserName: lib.PString("-user"), IsAdmin: true},
+			param:   &UserUpdateRoleParam{UserName: lib.PString("-user"), Role: lib.PString("system_admin")},
 			wantErr: true,
 		},
 		{
-			name:    "is_admin false",
-			param:   &UserUpdateIsAdminParam{UserName: lib.PString("user1"), IsAdmin: false},
+			name:    "invalid role",
+			param:   &UserUpdateRoleParam{UserName: lib.PString("user1"), Role: lib.PString("other")},
+			wantErr: true,
+		},
+		{
+			name:    "role missing",
+			param:   &UserUpdateRoleParam{UserName: lib.PString("user1")},
 			wantErr: true,
 		},
 	}
@@ -148,8 +168,13 @@ func TestUserUpdatePasswordParamValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "invalid user name",
+			name:    "reserved user name is allowed",
 			param:   &UserUpdatePasswordParam{UserName: lib.PString("admin"), Password: lib.PString("NewPass123")},
+			wantErr: false,
+		},
+		{
+			name:    "invalid user name",
+			param:   &UserUpdatePasswordParam{UserName: lib.PString("-user"), Password: lib.PString("NewPass123")},
 			wantErr: true,
 		},
 		{

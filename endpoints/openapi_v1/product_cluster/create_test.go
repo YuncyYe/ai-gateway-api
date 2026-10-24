@@ -15,6 +15,7 @@
 package product_cluster
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
@@ -203,6 +204,36 @@ func TestNormalizeLLMConfig(t *testing.T) {
 		assert.Equal(t, 600, *got.KeyAffinity.TTL)
 		assert.Equal(t, "bfe:ai:key_affinity", *got.KeyAffinity.RedisPrefix)
 		assert.Equal(t, true, *got.KeyAffinity.PenaltyEnable)
+	})
+
+	t.Run("copies normalize_upstream_error (no default synthesis)", func(t *testing.T) {
+		in := &icluster_conf.LLMConfig{
+			Models: []string{"gpt-4"},
+			NormalizeUpstreamError: &icluster_conf.NormalizeUpstreamError{
+				Enabled:            lib.PBool(true),
+				StreamEnabled:      lib.PBool(true),
+				UnrecognizedAction: lib.PString("rewrite_generic"),
+				MaxBodyBytes:       lib.PInt64(65536),
+				RedactSecrets:      lib.PBool(false),
+			},
+		}
+		got := normalizeLLMConfig(in)
+		require.NotNil(t, got)
+		require.NotNil(t, got.NormalizeUpstreamError)
+		assert.Equal(t, true, *got.NormalizeUpstreamError.Enabled)
+		assert.Equal(t, true, *got.NormalizeUpstreamError.StreamEnabled)
+		assert.Equal(t, "rewrite_generic", *got.NormalizeUpstreamError.UnrecognizedAction)
+		assert.Equal(t, int64(65536), *got.NormalizeUpstreamError.MaxBodyBytes)
+		assert.Equal(t, false, *got.NormalizeUpstreamError.RedactSecrets)
+	})
+
+	t.Run("normalize_upstream_error nil stays nil (BFE Effective applies defaults)", func(t *testing.T) {
+		in := &icluster_conf.LLMConfig{
+			Models: []string{"gpt-4"},
+		}
+		got := normalizeLLMConfig(in)
+		require.NotNil(t, got)
+		assert.Nil(t, got.NormalizeUpstreamError)
 	})
 
 	t.Run("key_affinity fills defaults when empty object", func(t *testing.T) {
@@ -501,5 +532,28 @@ func TestUpsertParamValidate_BasicRanges(t *testing.T) {
 			},
 		}
 		assert.NoError(t, p.Validate())
+	})
+}
+
+func TestNormalizeEppRuntimeRaw(t *testing.T) {
+	raw := func(s string) *json.RawMessage {
+		r := json.RawMessage(s)
+		return &r
+	}
+
+	t.Run("nil stays nil", func(t *testing.T) {
+		assert.Nil(t, normalizeEppRuntimeRaw(nil))
+	})
+
+	t.Run("empty/null/blank stay nil", func(t *testing.T) {
+		for _, s := range []string{"", "   ", "null", " null "} {
+			assert.Nil(t, normalizeEppRuntimeRaw(raw(s)), "s=%q", s)
+		}
+	})
+
+	t.Run("valid JSON trimmed and carried", func(t *testing.T) {
+		got := normalizeEppRuntimeRaw(raw(`  {"timeout":{"connect":"1s"}}  `))
+		require.NotNil(t, got)
+		assert.Equal(t, `{"timeout":{"connect":"1s"}}`, *got)
 	})
 }

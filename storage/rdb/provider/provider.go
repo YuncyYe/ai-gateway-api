@@ -17,10 +17,12 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
 	"github.com/rainway-ai-gateway/ai-gateway-api/model/iprovider"
+	"github.com/rainway-ai-gateway/ai-gateway-api/stateful"
 	"github.com/rainway-ai-gateway/ai-gateway-api/storage/rdb/internal/dao"
 )
 
@@ -91,7 +93,11 @@ func (s *RDBProviderStorager) FetchProvider(ctx context.Context, filter *iprovid
 	if one == nil {
 		return nil, nil
 	}
-	return fromDAO(one), nil
+	p, err := fromDAO(one)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 func (s *RDBProviderStorager) FetchProviderNames(ctx context.Context) ([]string, error) {
@@ -120,7 +126,11 @@ func (s *RDBProviderStorager) FetchProviderList(ctx context.Context, filter *ipr
 
 		rst := make([]*iprovider.Provider, 0, len(list))
 		for _, one := range list {
-			rst = append(rst, fromDAO(one))
+			p, err := fromDAO(one)
+			if err != nil {
+				return nil, 0, err
+			}
+			rst = append(rst, p)
 		}
 		return rst, int64(len(rst)), nil
 	}
@@ -149,7 +159,11 @@ func (s *RDBProviderStorager) FetchProviderList(ctx context.Context, filter *ipr
 
 	rst := make([]*iprovider.Provider, 0, len(list))
 	for _, one := range list {
-		rst = append(rst, fromDAO(one))
+		p, err := fromDAO(one)
+		if err != nil {
+			return nil, 0, err
+		}
+		rst = append(rst, p)
 	}
 	return rst, total, nil
 }
@@ -173,9 +187,23 @@ func toDAOParam(param *iprovider.ProviderParam) (*dao.TProviderParam, error) {
 	if err != nil {
 		return nil, err
 	}
+	encKeys, err := stateful.EncryptIfEnabled(*keys)
+	if err != nil {
+		return nil, err
+	}
+	keys = lib.PString(encKeys)
 	instancePool, err := marshalJSON(param.InstancePool)
 	if err != nil {
 		return nil, err
+	}
+	// k8s_instance_pool is read-only for API callers and therefore always nil
+	// here; persist an explicit empty array for the default mode.
+	k8sInstancePool, err := marshalJSONPtr(param.K8sInstancePool)
+	if err != nil {
+		return nil, err
+	}
+	if k8sInstancePool == nil {
+		k8sInstancePool = lib.PString("[]")
 	}
 	modelProtocols, err := marshalJSON(param.ModelProtocols)
 	if err != nil {
@@ -191,16 +219,19 @@ func toDAOParam(param *iprovider.ProviderParam) (*dao.TProviderParam, error) {
 	}
 
 	return &dao.TProviderParam{
-		Name:           param.Name,
-		Description:    param.Description,
-		ModelEndpoint:  modelEndpoint,
-		Models:         models,
-		Keys:           keys,
-		InstancePool:   instancePool,
-		ModelProtocols: modelProtocols,
-		ProtocolPaths:  protocolPaths,
-		TimeZone:       param.TimeZone,
-		Tiers:          tiers,
+		Name:            param.Name,
+		Description:     param.Description,
+		ModelEndpoint:   modelEndpoint,
+		Models:          models,
+		Keys:            keys,
+		InstancePool:    instancePool,
+		InstanceSource:  param.InstanceSource,
+		K8sPoolName:     param.K8sPoolName,
+		K8sInstancePool: k8sInstancePool,
+		ModelProtocols:  modelProtocols,
+		ProtocolPaths:   protocolPaths,
+		TimeZone:        param.TimeZone,
+		Tiers:           tiers,
 	}, nil
 }
 
@@ -209,15 +240,22 @@ func filterToDAOParam(filter *iprovider.ProviderFilter) *dao.TProviderParam {
 		return nil
 	}
 	return &dao.TProviderParam{
-		ID:    filter.ID,
-		Name:  filter.Name,
-		Names: filter.Names,
+		ID:             filter.ID,
+		Name:           filter.Name,
+		Names:          filter.Names,
+		InstanceSource: filter.InstanceSource,
+		K8sPoolName:    filter.K8sPoolName,
 	}
 }
 
-func fromDAO(one *dao.TProvider) *iprovider.Provider {
+func fromDAO(one *dao.TProvider) (*iprovider.Provider, error) {
 	if one == nil {
-		return nil
+		return nil, nil
+	}
+
+	keysJSON, err := stateful.DecryptIfEnabled(one.Keys)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: decrypt api_keys: %v", one.Name, err)
 	}
 
 	createTime := one.CreatedAt.Unix()
@@ -233,21 +271,47 @@ func fromDAO(one *dao.TProvider) *iprovider.Provider {
 		tiers = []iprovider.PricingTier{}
 	}
 
-	return &iprovider.Provider{
-		ID:             one.ID,
-		Name:           one.Name,
-		Description:    one.Description,
-		ModelEndpoint:  unmarshalEndpoint(one.ModelEndpoint),
-		Models:         unmarshalStringSlice(one.Models),
-		Keys:           unmarshalKeys(one.Keys),
-		InstancePool:   unmarshalInstancePool(one.InstancePool),
-		ModelProtocols: unmarshalStringSlice(one.ModelProtocols),
-		ProtocolPaths:  unmarshalStringMap(one.ProtocolPaths),
-		TimeZone:       timeZone,
-		Tiers:          tiers,
-		CreateTime:     createTime,
-		UpdateTime:     updateTime,
+	instanceSource := one.InstanceSource
+	if instanceSource == "" {
+		instanceSource = iprovider.InstanceSourceInstancePool
 	}
+
+	k8sInstancePool := unmarshalInstancePool(one.K8sInstancePool)
+	if k8sInstancePool == nil {
+		k8sInstancePool = []iprovider.ProviderInstance{}
+	}
+
+	var k8sPoolName *string
+	if one.K8sPoolName != "" {
+		k8sPoolName = &one.K8sPoolName
+	}
+
+	keys, err := unmarshalKeys(keysJSON)
+	if err != nil {
+		// The api_keys column is a text column (it carries an enc$v1$
+		// envelope at rest), so the DB no longer rejects malformed JSON for
+		// us: surface the corruption instead of silently dropping the keys.
+		return nil, fmt.Errorf("provider %s: parse api_keys: %v", one.Name, err)
+	}
+
+	return &iprovider.Provider{
+		ID:              one.ID,
+		Name:            one.Name,
+		Description:     one.Description,
+		ModelEndpoint:   unmarshalEndpoint(one.ModelEndpoint),
+		Models:          unmarshalStringSlice(one.Models),
+		Keys:            keys,
+		InstancePool:    unmarshalInstancePool(one.InstancePool),
+		InstanceSource:  instanceSource,
+		K8sPoolName:     k8sPoolName,
+		K8sInstancePool: k8sInstancePool,
+		ModelProtocols:  unmarshalStringSlice(one.ModelProtocols),
+		ProtocolPaths:   unmarshalStringMap(one.ProtocolPaths),
+		TimeZone:        timeZone,
+		Tiers:           tiers,
+		CreateTime:      createTime,
+		UpdateTime:      updateTime,
+	}, nil
 }
 
 func toDAOParamForUpdate(param *iprovider.ProviderParam) (*dao.TProviderParam, error) {
@@ -267,7 +331,21 @@ func toDAOParamForUpdate(param *iprovider.ProviderParam) (*dao.TProviderParam, e
 	if err != nil {
 		return nil, err
 	}
+	if keys != nil {
+		encKeys, err := stateful.EncryptIfEnabled(*keys)
+		if err != nil {
+			return nil, err
+		}
+		keys = lib.PString(encKeys)
+	}
 	instancePool, err := marshalJSONPtr(param.InstancePool)
+	if err != nil {
+		return nil, err
+	}
+	// A non-nil K8sInstancePool (including a pointer to an empty slice) is
+	// marshaled and written, so mirror clearing stores "[]"; nil keeps the
+	// stored value (DAO nil-skip).
+	k8sInstancePool, err := marshalJSONPtr(param.K8sInstancePool)
 	if err != nil {
 		return nil, err
 	}
@@ -285,16 +363,19 @@ func toDAOParamForUpdate(param *iprovider.ProviderParam) (*dao.TProviderParam, e
 	}
 
 	return &dao.TProviderParam{
-		Name:           param.Name,
-		Description:    param.Description,
-		ModelEndpoint:  modelEndpoint,
-		Models:         models,
-		Keys:           keys,
-		InstancePool:   instancePool,
-		ModelProtocols: modelProtocols,
-		ProtocolPaths:  protocolPaths,
-		TimeZone:       param.TimeZone,
-		Tiers:          tiers,
+		Name:            param.Name,
+		Description:     param.Description,
+		ModelEndpoint:   modelEndpoint,
+		Models:          models,
+		Keys:            keys,
+		InstancePool:    instancePool,
+		InstanceSource:  param.InstanceSource,
+		K8sPoolName:     param.K8sPoolName,
+		K8sInstancePool: k8sInstancePool,
+		ModelProtocols:  modelProtocols,
+		ProtocolPaths:   protocolPaths,
+		TimeZone:        param.TimeZone,
+		Tiers:           tiers,
 	}, nil
 }
 
@@ -359,15 +440,17 @@ func unmarshalStringSlice(s string) []string {
 	return rst
 }
 
-func unmarshalKeys(s string) []iprovider.ProviderKey {
+func unmarshalKeys(s string) ([]iprovider.ProviderKey, error) {
 	if s == "" || s == "null" {
-		return nil
+		return nil, nil
 	}
 	var rst []iprovider.ProviderKey
 	if err := json.Unmarshal([]byte(s), &rst); err != nil {
-		return nil
+		// Deliberately do not echo the value: it may be plaintext key
+		// material or an envelope.
+		return nil, fmt.Errorf("invalid key list json")
 	}
-	return rst
+	return rst, nil
 }
 
 func unmarshalInstancePool(s string) []iprovider.ProviderInstance {

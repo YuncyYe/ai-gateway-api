@@ -82,6 +82,9 @@ func Resolve(err error) *ResolveResult {
 	case etConflict:
 		rr.Type = "Conflict"
 		rr.ErrNo = 409
+	case etUpstream:
+		rr.Type = "Upstream Unreachable"
+		rr.ErrNo = 502
 	case etDependentUnReady:
 		rr.Type = "Dependent Not Ready"
 		rr.Msg = err.Error()
@@ -92,6 +95,9 @@ func Resolve(err error) *ResolveResult {
 	case etAuthorizateFail:
 		rr.ErrNo = 402
 		rr.Type = "Authorizate Fail"
+	case etAccessForbidden:
+		rr.ErrNo = 403
+		rr.Type = "Access Forbidden"
 
 	default: // never come here
 		rr.Type = "Unknown Exception"

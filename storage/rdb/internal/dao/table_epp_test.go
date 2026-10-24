@@ -51,7 +51,6 @@ CREATE TABLE epp_instances (
 CREATE TABLE epp_assignments (
   cluster TEXT NOT NULL PRIMARY KEY,
   group_name TEXT NOT NULL,
-  primary_instance_id TEXT NOT NULL,
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`)
@@ -134,9 +133,8 @@ func TestTEppAssignmentCRUD(t *testing.T) {
 	_, dbCtx := setupEppTestDB(t)
 
 	affected, err := TEppAssignmentCreate(dbCtx, &TEppAssignmentParam{
-		Cluster:           lib.PString("cluster-a"),
-		GroupName:         lib.PString("g1"),
-		PrimaryInstanceID: lib.PString("epp-a"),
+		Cluster:   lib.PString("cluster-a"),
+		GroupName: lib.PString("g1"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), affected)
@@ -144,7 +142,7 @@ func TestTEppAssignmentCRUD(t *testing.T) {
 	one, err := TEppAssignmentOne(dbCtx, &TEppAssignmentParam{Cluster: lib.PString("cluster-a")})
 	require.NoError(t, err)
 	require.NotNil(t, one)
-	assert.Equal(t, "epp-a", one.PrimaryInstanceID)
+	assert.Equal(t, "g1", one.GroupName)
 
 	none, err := TEppAssignmentOne(dbCtx, &TEppAssignmentParam{Cluster: lib.PString("cluster-x")})
 	require.NoError(t, err)
@@ -152,9 +150,8 @@ func TestTEppAssignmentCRUD(t *testing.T) {
 
 	// Primary key conflict on duplicate cluster.
 	_, err = TEppAssignmentCreate(dbCtx, &TEppAssignmentParam{
-		Cluster:           lib.PString("cluster-a"),
-		GroupName:         lib.PString("g2"),
-		PrimaryInstanceID: lib.PString("epp-b"),
+		Cluster:   lib.PString("cluster-a"),
+		GroupName: lib.PString("g2"),
 	})
 	require.Error(t, err)
 
@@ -163,7 +160,7 @@ func TestTEppAssignmentCRUD(t *testing.T) {
 	assert.Len(t, list, 1)
 
 	affected, err = TEppAssignmentUpdate(dbCtx,
-		&TEppAssignmentParam{PrimaryInstanceID: lib.PString("epp-b")},
+		&TEppAssignmentParam{GroupName: lib.PString("g2")},
 		&TEppAssignmentParam{Cluster: lib.PString("cluster-a")},
 	)
 	require.NoError(t, err)
@@ -171,7 +168,7 @@ func TestTEppAssignmentCRUD(t *testing.T) {
 
 	one, err = TEppAssignmentOne(dbCtx, &TEppAssignmentParam{Cluster: lib.PString("cluster-a")})
 	require.NoError(t, err)
-	assert.Equal(t, "epp-b", one.PrimaryInstanceID)
+	assert.Equal(t, "g2", one.GroupName)
 
 	affected, err = TEppAssignmentDelete(dbCtx, &TEppAssignmentParam{Cluster: lib.PString("cluster-a")})
 	require.NoError(t, err)

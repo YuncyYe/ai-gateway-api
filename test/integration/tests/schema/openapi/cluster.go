@@ -141,14 +141,26 @@ var KeyAffinitySchema = &testutil.ObjectSchema{
 	},
 }
 
+// NormalizeUpstreamErrorSchema llm_config.normalize_upstream_error schema
+var NormalizeUpstreamErrorSchema = &testutil.ObjectSchema{
+	Optional: []string{"enabled", "stream_enabled", "unrecognized_action", "max_body_bytes", "redact_secrets"},
+	Fields: map[string]testutil.FieldSpec{
+		"enabled":              {Type: testutil.TypeBool},
+		"stream_enabled":       {Type: testutil.TypeBool},
+		"unrecognized_action":  {Type: testutil.TypeString},
+		"max_body_bytes":       {Type: testutil.TypeInt},
+		"redact_secrets":       {Type: testutil.TypeBool},
+	},
+}
+
 // LLMConfigSchema LLM 配置 schema
-// model_endpoint、model_mappings、keys、key_policy、key_affinity、match_prefix、strip_prefix
+// model_endpoint、model_mappings、keys、key_policy、key_affinity、normalize_upstream_error、match_prefix、strip_prefix
 // 在未配置时为 null，因此设为可选。
 var LLMConfigSchema = &testutil.ObjectSchema{
 	Required: []string{"models", "provider"},
 	Optional: []string{
 		"model_mappings", "keys",
-		"key_policy", "key_affinity", "match_prefix", "strip_prefix",
+		"key_policy", "key_affinity", "normalize_upstream_error", "match_prefix", "strip_prefix",
 	},
 	Fields: map[string]testutil.FieldSpec{
 		"models":         {Type: testutil.TypeArray, Item: &testutil.FieldSpec{Type: testutil.TypeString}},
@@ -156,6 +168,7 @@ var LLMConfigSchema = &testutil.ObjectSchema{
 		"keys":           {Type: testutil.TypeArray, Elem: ClusterKeySchema},
 		"key_policy":     {Type: testutil.TypeObject, Nested: KeyPolicySchema},
 		"key_affinity":   {Type: testutil.TypeObject, Nested: KeyAffinitySchema},
+		"normalize_upstream_error": {Type: testutil.TypeObject, Nested: NormalizeUpstreamErrorSchema},
 		"provider":       {Type: testutil.TypeString},
 		"match_prefix":   {Type: testutil.TypeString},
 		"strip_prefix":   {Type: testutil.TypeBool},
@@ -179,18 +192,55 @@ var EppConfigFlowControlSchema = &testutil.ObjectSchema{
 // balance_mode=WRR 时 epp_config 可为 null（休眠保留），故 ClusterSchema 中设为 Optional。
 var EppConfigSchema = &testutil.ObjectSchema{
 	Optional: []string{
-		"scheduling_profile", "cache_affinity",
+		"load_profile", "affinity",
 		"prefix_cache_affinity", "session_affinity_enabled", "session_affinity_header",
-		"kv_cache_utilization_max", "flow_control",
+		"kv_cache_utilization_max", "waiting_queue_max", "running_requests_max",
+		"fallback_on_empty", "metrics_staleness_threshold_ms", "flow_control",
 	},
 	Fields: map[string]testutil.FieldSpec{
-		"scheduling_profile": {Type: testutil.TypeString, Enum: []interface{}{"latency-first", "balanced", "throughput-first"}},
-		"cache_affinity":     {Type: testutil.TypeString, Enum: []interface{}{"low", "medium", "high"}},
-		"prefix_cache_affinity":    {Type: testutil.TypeBool},
-		"session_affinity_enabled": {Type: testutil.TypeBool},
-		"session_affinity_header":  {Type: testutil.TypeString},
-		"kv_cache_utilization_max": {Type: testutil.TypeNumber},
-		"flow_control":             {Type: testutil.TypeObject, Nested: EppConfigFlowControlSchema},
+		"load_profile":                   {Type: testutil.TypeString, Enum: []interface{}{"queue-first", "balanced", "kv-first"}},
+		"affinity":                       {Type: testutil.TypeString, Enum: []interface{}{"off", "low", "medium", "high"}},
+		"prefix_cache_affinity":          {Type: testutil.TypeBool},
+		"session_affinity_enabled":       {Type: testutil.TypeBool},
+		"session_affinity_header":        {Type: testutil.TypeString},
+		"kv_cache_utilization_max":       {Type: testutil.TypeNumber},
+		"waiting_queue_max":              {Type: testutil.TypeNumber},
+		"running_requests_max":           {Type: testutil.TypeNumber},
+		"fallback_on_empty":              {Type: testutil.TypeBool},
+		"metrics_staleness_threshold_ms": {Type: testutil.TypeNumber},
+		"flow_control":                   {Type: testutil.TypeObject, Nested: EppConfigFlowControlSchema},
+	},
+}
+
+// EppRuntimeCheckSchema epp_runtime.check schema（clusters.md 表：EPP运行时配置）
+var EppRuntimeCheckSchema = &testutil.ObjectSchema{
+	Optional: []string{"disabled", "check_interval", "fail_threshold", "cooldown", "success_threshold"},
+	Fields: map[string]testutil.FieldSpec{
+		"disabled":          {Type: testutil.TypeBool},
+		"check_interval":    {Type: testutil.TypeString},
+		"fail_threshold":    {Type: testutil.TypeInt},
+		"cooldown":          {Type: testutil.TypeString},
+		"success_threshold": {Type: testutil.TypeInt},
+	},
+}
+
+// EppRuntimeTimeoutSchema epp_runtime.timeout schema（clusters.md 表：EPP运行时配置）
+var EppRuntimeTimeoutSchema = &testutil.ObjectSchema{
+	Optional: []string{"connect", "call"},
+	Fields: map[string]testutil.FieldSpec{
+		"connect": {Type: testutil.TypeString},
+		"call":    {Type: testutil.TypeString},
+	},
+}
+
+// EppRuntimeSchema 集群 epp_runtime（BFE 侧 EPP 运行时参数）schema。
+// 存储保留用户原始 JSON（未显式携带的字段不落盘），且 balance_mode=WRR 时可为
+// null（休眠保留），故全部可选。
+var EppRuntimeSchema = &testutil.ObjectSchema{
+	Optional: []string{"check", "timeout"},
+	Fields: map[string]testutil.FieldSpec{
+		"check":   {Type: testutil.TypeObject, Nested: EppRuntimeCheckSchema},
+		"timeout": {Type: testutil.TypeObject, Nested: EppRuntimeTimeoutSchema},
 	},
 }
 
@@ -203,7 +253,7 @@ var ClusterSchema = &testutil.ObjectSchema{
 		"basic", "sticky_sessions", "passive_health_check",
 		"balance_mode",
 	},
-	Optional: []string{"epp_config"},
+	Optional: []string{"epp_config", "epp_runtime"},
 	Fields: map[string]testutil.FieldSpec{
 		"name":                 {Type: testutil.TypeString},
 		"description":          {Type: testutil.TypeString},
@@ -213,5 +263,6 @@ var ClusterSchema = &testutil.ObjectSchema{
 		"llm_config":           {Type: testutil.TypeObject, Nested: LLMConfigSchema},
 		"balance_mode":         {Type: testutil.TypeString, Enum: []interface{}{"WRR", "EPP"}},
 		"epp_config":           {Type: testutil.TypeObject, Nested: EppConfigSchema},
+		"epp_runtime":          {Type: testutil.TypeObject, Nested: EppRuntimeSchema},
 	},
 }

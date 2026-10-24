@@ -129,6 +129,9 @@ func modelPriceToMap(price *ModelPrice) map[string]interface{} {
 	if len(price.TierPrices) > 0 {
 		m["tier_prices"] = price.TierPrices
 	}
+	if price.BatchDiscount != nil {
+		m["batch_discount"] = *price.BatchDiscount
+	}
 	if price.PriceCurrency != "" {
 		m["price_currency"] = price.PriceCurrency
 	}
