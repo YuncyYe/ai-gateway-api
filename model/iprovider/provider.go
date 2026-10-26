@@ -32,7 +32,7 @@ const (
 	MaxProviderNameLength        = 64
 	MaxProviderKeyLength         = 512
 	MaxProviderDescriptionLength = 256
-	MaxK8sPoolNameLength         = 64
+	MaxK8sPoolNameLength         = 128
 )
 
 // Instance sources of a provider (providers.md §instance_source).
@@ -860,7 +860,7 @@ func validateProviderInstanceSource(param *ProviderParam) error {
 	return nil
 }
 
-// K8sPoolName validates a K8s pool name (k8s-pools.md §2): 1-64 chars, only
+// K8sPoolName validates a K8s pool name (k8s-pools.md §2): 1-128 chars, only
 // letters, digits, '_', '-', '.', no leading/trailing '.', '-', '_', no
 // whitespace. The name is a plain control-plane identifier and is not coupled
 // to K8s Service names.

@@ -16,6 +16,7 @@ package iprovider
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/rainway-ai-gateway/ai-gateway-api/lib"
@@ -62,11 +63,8 @@ func TestK8sPoolName(t *testing.T) {
 		require.Error(t, K8sPoolName(s), "name %q should be invalid", s)
 	}
 
-	long := make([]byte, MaxK8sPoolNameLength+1)
-	for i := range long {
-		long[i] = 'a'
-	}
-	require.Error(t, K8sPoolName(string(long)))
+	require.NoError(t, K8sPoolName(strings.Repeat("a", MaxK8sPoolNameLength)), "max length name should be valid")
+	require.Error(t, K8sPoolName(strings.Repeat("a", MaxK8sPoolNameLength+1)), "over max length name should be invalid")
 }
 
 func TestValidateProviderParam_InstanceSource(t *testing.T) {
