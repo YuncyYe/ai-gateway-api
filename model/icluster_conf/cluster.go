@@ -408,6 +408,7 @@ type ClusterManager struct {
 	versionControlManager *iversion_control.VersionControlManager
 	operationLogManager   ioperlog.OperationLogRecorder
 	eppPoolManager        *epp_pool.EppPoolManager
+	instancePoolResolver  *iprovider.InstancePoolResolver
 
 	deleteCheckers map[string]func(context.Context, *ibasic.Product, *Cluster) error
 	updateCheckers map[string]func(context.Context, *ibasic.Product, *Cluster, *ClusterParam) error
@@ -423,6 +424,12 @@ func (cm *ClusterManager) SetOperationLogManager(manager ioperlog.OperationLogRe
 // block cluster writes; the periodic reconciler converges (design-changes.md §2.3).
 func (cm *ClusterManager) SetEppPoolManager(manager *epp_pool.EppPoolManager) {
 	cm.eppPoolManager = manager
+}
+
+// SetInstancePoolResolver injects the resolver used by the cluster_table
+// exporter to resolve k8s_pool-mode provider instances at export time.
+func (cm *ClusterManager) SetInstancePoolResolver(resolver *iprovider.InstancePoolResolver) {
+	cm.instancePoolResolver = resolver
 }
 
 func (rm *ClusterManager) FetchClusterList(ctx context.Context, param *ClusterFilter) (list []*Cluster, err error) {
@@ -517,15 +524,22 @@ func (cm *ClusterManager) CreateCluster(ctx context.Context, product *ibasic.Pro
 			// balance_mode=EPP creates a Role=EPP pool that still carries the
 			// provider instance list, so cluster_table export has RS entries for
 			// EPP backend discovery and BFE local fallback (design-changes.md §2.3);
-			// WRR keeps the same provider-snapshot path. The snapshot uses the
-			// provider's effective pool, so a k8s_pool-mode provider with an
-			// empty mirror yields an empty (but present) pool — the clear
-			// semantics required by the k8s_pool flow.
+			// WRR keeps the same provider-snapshot path. The snapshot is
+			// source-based: manual providers persist their instance_pool, while
+			// k8s providers only get an empty placeholder row — the derived pool
+			// merely satisfies the subcluster -> pool schema reference, because
+			// k8s instances are resolved in realtime from k8s_pools at export
+			// time and must never be snapshotted here.
 			poolRole := ProductPoolRoleCommon
 			if balanceMode == BalanceModeEPP {
 				poolRole = ProductPoolRoleEPP
 			}
-			poolInstances := providerInstancesToClusterInstances(iprovider.EffectiveInstancePool(provider))
+			var poolInstances []Instance
+			if provider.InstanceSource == iprovider.InstanceSourceK8sPool {
+				poolInstances = providerInstancesToClusterInstances(nil)
+			} else {
+				poolInstances = providerInstancesToClusterInstances(provider.InstancePool)
+			}
 
 			pool, err := cm.poolStorager.CreatePool(ctx, product, &PoolParam{
 				Name:      &poolName,
@@ -824,16 +838,33 @@ func (cm *ClusterManager) UpdateCluster(ctx context.Context, product *ibasic.Pro
 				return err
 			}
 
-			// Sync instance pool whenever the cluster references a provider, so
-			// that the cluster pool reflects the provider's current instance_pool
-			// regardless of whether the provider name changed.
+			// Sync the derived pool whenever the cluster references a provider.
+			// The write is source-based: manual providers persist their
+			// instance_pool snapshot; k8s providers never write instance data —
+			// their derived pool is an empty placeholder and k8s instances are
+			// resolved in realtime at export time. On a provider change the
+			// placeholder invariant is enforced by clearing any stale snapshot.
 			oldProvider := ""
 			if oldData.LLMConfig != nil && oldData.LLMConfig.Provider != nil {
 				oldProvider = *oldData.LLMConfig.Provider
 			}
 			providerChanged := oldProvider != *param.LLMConfig.Provider
 			providerUnchangedButReferenced := oldProvider == *param.LLMConfig.Provider && oldProvider != ""
-			if providerChanged || providerUnchangedButReferenced {
+			if provider.InstanceSource == iprovider.InstanceSourceK8sPool {
+				if providerChanged {
+					for _, sc := range oldData.SubClusters {
+						if sc.InstancePool == nil {
+							continue
+						}
+						if err = cm.poolStorager.UpdatePool(ctx, sc.InstancePool, &PoolParam{
+							Instances: providerInstancesToClusterInstances(nil),
+						}); err != nil {
+							return err
+						}
+					}
+				}
+				// provider unchanged: the placeholder is already empty, no write.
+			} else if providerChanged || providerUnchangedButReferenced {
 				for _, sc := range oldData.SubClusters {
 					if sc.InstancePool != nil {
 						if err = cm.poolStorager.UpdatePool(ctx, sc.InstancePool, &PoolParam{
@@ -944,17 +975,14 @@ func providerModelsEqual(a, b []string) bool {
 	return true
 }
 
-// SyncProviderEffectivePool propagates the provider's effective instance pool
-// to every sub-cluster pool of clusters referencing the provider. An empty
-// effective pool is written as an empty instance list (clear semantics): K8s
-// instances come and go dynamically, and "pool does not exist" must be
-// equivalent to "zero instances" downstream. EPP-role pools are synced as
-// well since they carry the provider instance snapshot for EPP backend
-// discovery and BFE local fallback.
-func (cm *ClusterManager) SyncProviderEffectivePool(ctx context.Context, provider *iprovider.Provider) error {
-	if provider == nil {
-		return nil
-	}
+// SyncProviderInstances writes the given instance list into every sub-cluster
+// pool of clusters referencing the named provider. An empty/nil list is
+// written as an explicit empty instance list (clear semantics), so a stale
+// manual snapshot never survives a mode switch. This function only ever
+// carries manual instances or an empty list — k8s instances are resolved in
+// realtime at export time and are never persisted into derived pools.
+func (cm *ClusterManager) SyncProviderInstances(ctx context.Context,
+	providerName string, instances []iprovider.ProviderInstance) error {
 
 	clusters, err := cm.storager.FetchClusterList(ctx, nil)
 	if err != nil {
@@ -962,14 +990,14 @@ func (cm *ClusterManager) SyncProviderEffectivePool(ctx context.Context, provide
 	}
 
 	// providerInstancesToClusterInstances always returns a non-nil slice, so
-	// an empty effective pool is stored as "[]" instead of being skipped by
-	// the DAO nil-skip (which would leave stale instances behind).
-	newInstances := providerInstancesToClusterInstances(iprovider.EffectiveInstancePool(provider))
+	// an empty pool is stored as "[]" instead of being skipped by the DAO
+	// nil-skip (which would leave stale instances behind).
+	newInstances := providerInstancesToClusterInstances(instances)
 	for _, cluster := range clusters {
 		if cluster.LLMConfig == nil || cluster.LLMConfig.Provider == nil {
 			continue
 		}
-		if *cluster.LLMConfig.Provider != provider.Name {
+		if *cluster.LLMConfig.Provider != providerName {
 			continue
 		}
 
@@ -989,22 +1017,41 @@ func (cm *ClusterManager) SyncProviderEffectivePool(ctx context.Context, provide
 }
 
 // ProviderInstancePoolSyncer returns a hook suitable for passing to
-// iprovider.ProviderManager.UpdateProvider. When the provider's effective
-// instance pool changes (including mode switches and becoming empty), it
-// updates the instance pool of every sub-cluster that references the provider
-// to match the new effective instances.
+// iprovider.ProviderManager.UpdateProvider. The derived-pool write is
+// source-based:
+//   - k8s -> k8s (incl. k8s_pool_name A->B): the placeholder row stays empty,
+//     nothing is written;
+//   - manual -> k8s: the old manual snapshot is cleared so the derived pool
+//     keeps the empty-placeholder invariant;
+//   - k8s -> manual / manual instance_pool change: the new manual pool is
+//     written into the derived pools.
+//
+// K8s instances are never written here (they are resolved at export time).
 func (cm *ClusterManager) ProviderInstancePoolSyncer(ctx context.Context,
 	oldProvider, newProvider *iprovider.Provider) error {
 
 	if newProvider == nil {
 		return nil
 	}
-	if oldProvider != nil && providerInstancePoolEqual(
-		iprovider.EffectiveInstancePool(oldProvider), iprovider.EffectiveInstancePool(newProvider)) {
-		return nil
+
+	if newProvider.InstanceSource == iprovider.InstanceSourceK8sPool {
+		if oldProvider != nil && oldProvider.InstanceSource == iprovider.InstanceSourceK8sPool {
+			// k8s -> k8s (including pool-name switch): the placeholder is
+			// unchanged; the exporter resolves the new pool at read time.
+			return nil
+		}
+		// manual -> k8s: clear the old manual snapshot to keep the derived
+		// pool an empty placeholder.
+		return cm.SyncProviderInstances(ctx, newProvider.Name, nil)
 	}
 
-	return cm.SyncProviderEffectivePool(ctx, newProvider)
+	// Manual source: propagate the manual instance_pool snapshot.
+	if oldProvider != nil &&
+		oldProvider.InstanceSource != iprovider.InstanceSourceK8sPool &&
+		providerInstancePoolEqual(oldProvider.InstancePool, newProvider.InstancePool) {
+		return nil
+	}
+	return cm.SyncProviderInstances(ctx, newProvider.Name, newProvider.InstancePool)
 }
 
 // ProviderKeyRefChecker returns a hook that verifies all clusters referencing

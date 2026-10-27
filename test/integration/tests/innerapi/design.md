@@ -1316,7 +1316,7 @@ IN-EPP-003 中 `flow_control` 写入 `{"max_requests": 200, "queue_ttl": 45, "no
 | IN-K8S-007 | 4xx 回读零变更 | 假事务/校验层回归 | 对已存在 pool 的非法 PUT（重复 addr/port）→ 422 后 pool 逐字段不变；非法路径名下 GET/DELETE 返回 422（区别于 404） |
 | IN-K8S-008 | 并发全量替换（MySQL） | 并发语义（`//go:build mysql`，需 `AIAPI_MYSQL_DSN`） | 20 并发对同一 pool PUT 不同实例列表：全部 2xx、无 500/deadlock、最终读回与某一提交 payload 完全一致（last-write-wins） |
 
-> provider 镜像（`k8s_instance_pool`）刷新、cluster 派生池同步、cluster_table 导出跟随等跨域链路用例见 `tests/provider/k8s_pool/`（PV-K8S 系列）。
+> `k8s_pools` 写入后的实时解析、cluster_table 导出跟随、provider 模式切换等跨域链路用例见 `tests/provider/k8s_pool/`（PV-K8S 系列）。PUT/DELETE 只写 `k8s_pools` 单表，不刷新 provider 镜像、不做派生池 fan-out。
 
 ---
 

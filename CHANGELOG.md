@@ -38,6 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Breaking** EPP exposed config refactored to load profile + admission watermark + bad-backend eviction; `scheduling_profile` and `cache_affinity` removed from the EPP config surface.
 - Upgrade data-plane dependency `github.com/bfenetworks/bfe` to v1.8.9 (formal release); the `replace` directive pinning a fork pseudo-version is removed, so the released module is consumed directly.
 
+### Removed
+- **Breaking** `providers.k8s_instance_pool`: the system-maintained read-only mirror column is dropped entirely (`db_ddl.sql` / `db_ddl_sqlite.sql` / `database/db_ddl_upgrade_to_0.0.11.sql` §1.4 — the column never shipped with v0.0.11; preview databases that added it must run `ALTER TABLE providers DROP COLUMN k8s_instance_pool` manually). Provider responses no longer carry the field, and request bodies that still send it are silently ignored as an unknown field. K8s-mode instances are now resolved at read time from `k8s_pools` (cluster_table export and batch egress), with no mirror refresh or fan-out; see `design-docs/modifications/2026-10-27-k8s-pool-realtime-resolution/`.
+
 ### Fixed
 - `GET /open-api/v1/batches/{batch_id}` now returns the task object itself at the `Data` top level with the associated files in `batch_files` (shape per `batches.md` §3.2), instead of the `{task, files}` wrapper; file entries follow the documented metadata shape and no longer expose internal fields (`id`/`direction`/`key_name`/…). This fixes the batch task detail page rendering empty panels in the dashboard (issue #249).
 - `/entity-types` `description` now rejects values longer than 255 bytes on both create and partial update (`422`); previously the limit was mis-set to 256, so a 256-byte description was accepted and stored. Matches `entity-types.md` §1/§2.1 (0-255 bytes) — issue #244, unblocking SC1203-TC011/TC015/TC017.

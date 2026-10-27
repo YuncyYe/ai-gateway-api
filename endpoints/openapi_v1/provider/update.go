@@ -44,6 +44,7 @@ func UpdateAction(req *http.Request) (interface{}, error) {
 		return nil, xerror.WrapParamErrorWithMsg("provider_name is required")
 	}
 
+	// "name" is immutable (carried by the URI).
 	if err := rejectBodyField(req, "name"); err != nil {
 		return nil, err
 	}

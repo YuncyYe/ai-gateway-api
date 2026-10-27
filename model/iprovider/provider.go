@@ -41,8 +41,9 @@ const (
 	// instance_pool (default).
 	InstanceSourceInstancePool = "instance_pool"
 	// InstanceSourceK8sPool: instances are maintained by the K8s discovery
-	// component via the /k8s_pools InnerAPI; provider side is a read-only
-	// mirror.
+	// component via the /k8s_pools InnerAPI; the provider only references the
+	// pool by name (k8s_pools is the single source of truth, consumers resolve
+	// instances at read time via InstancePoolResolver).
 	InstanceSourceK8sPool = "k8s_pool"
 )
 
@@ -93,16 +94,15 @@ type PricingTier struct {
 
 // Provider represents a model provider.
 type Provider struct {
-	ID              int64              `json:"id"`
-	Name            string             `json:"name"`
-	Description     string             `json:"description"`
-	ModelEndpoint   *ProviderEndpoint  `json:"model_endpoint"`
-	Models          []string           `json:"models"`
-	Keys            []ProviderKey      `json:"keys"`
-	InstancePool    []ProviderInstance `json:"instance_pool"`
-	InstanceSource  string             `json:"instance_source"`
-	K8sPoolName     *string            `json:"k8s_pool_name"`
-	K8sInstancePool []ProviderInstance `json:"k8s_instance_pool"`
+	ID             int64              `json:"id"`
+	Name           string             `json:"name"`
+	Description    string             `json:"description"`
+	ModelEndpoint  *ProviderEndpoint  `json:"model_endpoint"`
+	Models         []string           `json:"models"`
+	Keys           []ProviderKey      `json:"keys"`
+	InstancePool   []ProviderInstance `json:"instance_pool"`
+	InstanceSource string             `json:"instance_source"`
+	K8sPoolName    *string            `json:"k8s_pool_name"`
 
 	ModelProtocols []string          `json:"model_protocols"`
 	ProtocolPaths  map[string]string `json:"protocol_paths"`
@@ -122,9 +122,8 @@ type ProviderParam struct {
 	Keys          []ProviderKey      `json:"keys,omitempty"`
 	InstancePool  []ProviderInstance `json:"instance_pool"`
 
-	InstanceSource  *string             `json:"instance_source,omitempty"`
-	K8sPoolName     *string             `json:"k8s_pool_name,omitempty"`
-	K8sInstancePool *[]ProviderInstance `json:"k8s_instance_pool,omitempty"`
+	InstanceSource *string `json:"instance_source,omitempty"`
+	K8sPoolName    *string `json:"k8s_pool_name,omitempty"`
 
 	ModelProtocols []string          `json:"model_protocols"`
 	ProtocolPaths  map[string]string `json:"protocol_paths"`
@@ -259,24 +258,10 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 			return err
 		}
 
-		// Mirror lifecycle: k8s_instance_pool is only meaningful in k8s_pool
-		// mode. When the merged instance_source resolves to instance_pool,
-		// clear any previously synced mirror so the response matches the
-		// contract ("k8s_instance_pool is [] in instance_pool mode"). The
-		// field is read-only for clients, so forcing it here cannot clobber
-		// a client intent.
-		mergedSource := existing.InstanceSource
-		if param.InstanceSource != nil {
-			mergedSource = *param.InstanceSource
-		}
-		if mergedSource == InstanceSourceInstancePool && len(existing.K8sInstancePool) > 0 {
-			empty := []ProviderInstance{}
-			param.K8sInstancePool = &empty
-		}
-
 		// Capture which cluster-relevant fields are explicitly provided before
 		// the storager applies defaults (FillDefaults mutates nil slices into
 		// empty slices, which would be mistaken for an intentional clear).
+		origInstanceSource := param.InstanceSource
 		origInstancePool := param.InstancePool
 		origKeys := param.Keys
 		origModels := param.Models
@@ -295,8 +280,21 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 		if origModels != nil && !providerModelsEqual(existing.Models, origModels) {
 			clusterConfigChanged = true
 		}
+		if origInstanceSource != nil && *origInstanceSource != existing.InstanceSource {
+			// A mode switch must trigger the hook: manual -> k8s needs the old
+			// manual snapshot cleared from the derived pools; k8s -> manual
+			// needs the new instance_pool written into them.
+			clusterConfigChanged = true
+		}
+		if origInstancePool != nil &&
+			existing.InstanceSource == InstanceSourceInstancePool &&
+			!providerInstancePoolEqual(existing.InstancePool, origInstancePool) {
+			// Only the manual source propagates instance snapshots; a dormant
+			// instance_pool edit under k8s_pool mode must not sync anything.
+			clusterConfigChanged = true
+		}
 
-		if len(syncHooks) > 0 {
+		if len(syncHooks) > 0 && clusterConfigChanged {
 			// Restore nil for unchanged fields so applyProviderUpdate preserves
 			// the existing provider values when building the hook snapshot.
 			if origInstancePool == nil {
@@ -309,18 +307,9 @@ func (m *ProviderManager) UpdateProvider(ctx context.Context, name string,
 				param.Models = nil
 			}
 			newProvider := applyProviderUpdate(existing, param)
-			// The effective pool covers both explicit instance_pool edits and
-			// instance_source/k8s_pool_name mode switches; a dormant instance_pool
-			// edit under k8s_pool mode leaves the effective pool untouched and
-			// therefore does not trigger a sync.
-			if !providerInstancePoolEqual(EffectiveInstancePool(existing), EffectiveInstancePool(newProvider)) {
-				clusterConfigChanged = true
-			}
-			if clusterConfigChanged {
-				for _, hook := range syncHooks {
-					if err := hook(ctx, existing, newProvider); err != nil {
-						return err
-					}
+			for _, hook := range syncHooks {
+				if err := hook(ctx, existing, newProvider); err != nil {
+					return err
 				}
 			}
 		}
@@ -820,17 +809,14 @@ func validateProviderDescription(s string) error {
 }
 
 // validateProviderInstanceSource validates the instance-source conditional
-// rules (providers.md §3): k8s_instance_pool is a read-only mirror (422 when
-// present in a request); instance_pool keeps its legacy rules (>=1 element,
+// rules (providers.md §3): instance_pool keeps its legacy rules (>=1 element,
 // dedupe, >=1 positive weight) in instance_pool mode and stays dormant (no
 // member validation) in k8s_pool mode; k8s_pool_name is required with the
 // common name format in k8s_pool mode and format-checked but dormant when
-// provided in instance_pool mode.
+// provided in instance_pool mode. The k8s_instance_pool mirror field was
+// removed entirely; request bodies that still carry it are ignored as unknown
+// JSON fields by the binder.
 func validateProviderInstanceSource(param *ProviderParam) error {
-	if param.K8sInstancePool != nil {
-		return xerror.WrapParamErrorWithMsg("k8s_instance_pool is read-only and cannot be set in a request")
-	}
-
 	source := InstanceSourceInstancePool
 	if param.InstanceSource != nil {
 		source = *param.InstanceSource
@@ -990,19 +976,58 @@ func BuildAuthHeader(protocol, key string) (string, string) {
 	}
 }
 
-// EffectiveInstancePool returns the provider's effective instance pool, the
-// single consumption contract for downstream consumers (cluster creation
-// snapshot, instance-pool sync, equality comparison):
+// K8sPoolInstanceReader resolves the current instance list of a k8s_pools
+// entry. It is implemented by the k8s_pool storage layer and injected into
+// InstancePoolResolver; keeping it in this package avoids an ik8s_pool ->
+// iprovider dependency direction problem for consumers.
+type K8sPoolInstanceReader interface {
+	FetchK8sPoolInstances(ctx context.Context, poolName string) ([]ProviderInstance, error)
+}
+
+// ErrInstancePoolResolverNotConfigured is returned when a k8s_pool-mode
+// provider must be resolved but no reader was injected. Producing an explicit
+// error (instead of an empty pool) prevents a misconfigured deployment from
+// silently draining all k8s clusters.
+var ErrInstancePoolResolverNotConfigured = xerror.WrapModelErrorWithMsg(
+	"instance pool resolver is not configured",
+)
+
+// InstancePoolResolver computes the provider's effective instance pool at
+// consumption time (k8s-pools.md realtime resolution):
 //
-//	instance_source == "k8s_pool" ? k8s_instance_pool : instance_pool
-func EffectiveInstancePool(p *Provider) []ProviderInstance {
+//	instance_source == "k8s_pool" ? k8s_pools[k8s_pool_name].instances : instance_pool
+//
+// k8s_pools is the single source of truth for the k8s source; no instance
+// mirror is kept on the provider. The resolver itself performs no caching;
+// callers that resolve many providers in one pass (e.g. the cluster_table
+// exporter) add a request-level cache on top.
+type InstancePoolResolver struct {
+	reader K8sPoolInstanceReader
+}
+
+// NewInstancePoolResolver creates a resolver backed by the given reader.
+func NewInstancePoolResolver(reader K8sPoolInstanceReader) *InstancePoolResolver {
+	return &InstancePoolResolver{reader: reader}
+}
+
+// Effective resolves the provider's effective instance pool. A nil provider
+// yields (nil, nil); k8s mode with an empty/absent pool name or a missing
+// pool yields a non-nil empty list (zero instances, no error); a reader
+// failure or a missing reader is an error (fail-close).
+func (r *InstancePoolResolver) Effective(ctx context.Context, p *Provider) ([]ProviderInstance, error) {
 	if p == nil {
-		return nil
+		return nil, nil
 	}
-	if p.InstanceSource == InstanceSourceK8sPool {
-		return p.K8sInstancePool
+	if p.InstanceSource != InstanceSourceK8sPool {
+		return p.InstancePool, nil
 	}
-	return p.InstancePool
+	if p.K8sPoolName == nil || *p.K8sPoolName == "" {
+		return []ProviderInstance{}, nil
+	}
+	if r == nil || r.reader == nil {
+		return nil, ErrInstancePoolResolverNotConfigured
+	}
+	return r.reader.FetchK8sPoolInstances(ctx, *p.K8sPoolName)
 }
 
 // providerInstancePoolEqual reports whether two instance pools are identical.
@@ -1084,9 +1109,6 @@ func applyProviderUpdate(existing *Provider, param *ProviderParam) *Provider {
 	}
 	if param.K8sPoolName != nil {
 		newProvider.K8sPoolName = param.K8sPoolName
-	}
-	if param.K8sInstancePool != nil {
-		newProvider.K8sInstancePool = *param.K8sInstancePool
 	}
 	if param.ModelProtocols != nil {
 		newProvider.ModelProtocols = param.ModelProtocols

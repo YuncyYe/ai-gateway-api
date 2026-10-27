@@ -55,6 +55,14 @@ func (s *fakeK8sPoolStorager) FetchPool(ctx context.Context, name string) (*ik8s
 	return nil, nil
 }
 
+func (s *fakeK8sPoolStorager) FetchK8sPoolInstances(ctx context.Context, name string) ([]iprovider.ProviderInstance, error) {
+	pool, err := s.FetchPool(ctx, name)
+	if err != nil || pool == nil {
+		return []iprovider.ProviderInstance{}, err
+	}
+	return pool.Instances, nil
+}
+
 func (s *fakeK8sPoolStorager) FetchPoolList(ctx context.Context) ([]*ik8s_pool.K8sPool, error) {
 	if s.fetchListErr != nil {
 		return nil, s.fetchListErr
@@ -68,7 +76,7 @@ func (s *fakeK8sPoolStorager) DeletePool(ctx context.Context, name string) error
 
 func setupManager(storager ik8s_pool.K8sPoolStorager) func() {
 	old := container.K8sPoolManager
-	container.K8sPoolManager = ik8s_pool.NewK8sPoolManager(nil, storager, nil, nil)
+	container.K8sPoolManager = ik8s_pool.NewK8sPoolManager(nil, storager, nil)
 	return func() { container.K8sPoolManager = old }
 }
 
