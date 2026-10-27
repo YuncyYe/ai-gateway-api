@@ -2,6 +2,8 @@
 
 K8s 实例池（`k8s_pools`）是控制面内独立的实例集合资源，成员列表的**唯一写入方是 K8s 发现组件**（service-controller）。引用该池的 provider（`instance_source=k8s_pool`）上 `k8s_instance_pool` 为系统维护的只读镜像；人通过 OpenAPI `/providers` 维护池引用（`instance_source` / `k8s_pool_name`），不触碰池成员。
 
+`k8s_instance_pool` 镜像的刷新有两个触发源：本域 PUT/DELETE 的 fan-out（§6）；以及 OpenAPI provider 创建/更新时，当引用建立或变化（来源切换、`k8s_pool_name` 变化、显式重新提交池名），系统在同一事务内读取 `k8s_pools` 刷新镜像并同步引用 cluster 的派生池（详见 `../OpenAPI接口定义/providers.md`）。
+
 与导出类接口不同，本域为资源读写接口（PUT/GET/DELETE），不支持 `version` 增量同步参数。
 
 ## 1. 接口信息
@@ -17,7 +19,7 @@ K8s 实例池（`k8s_pools`）是控制面内独立的实例集合资源，成�
 | 1 | `/inner-api/v1/k8s_pools/{name}/instances` | PUT | 全量替换 pool 实例列表（幂等 upsert） |
 | 2 | `/inner-api/v1/k8s_pools/{name}` | GET | 查询单个 pool 条目 |
 | 3 | `/inner-api/v1/k8s_pools` | GET | 查询全部 pool 列表 |
-| 4 | `/inner-api/v1/k8s_pools/{name}` | DELETE | 删除 pool（无引用保护） |
+| 4 | `/inner-api/v1/k8s_pools/{name}` | DELETE | 删除 pool（引用感知：未引用删行；被引用清空保留 + fan-out 清空） |
 
 ## 2. 全量替换实例列表
 
@@ -151,7 +153,7 @@ pool 不存在时返回 404。
 
 | 项目 | 值 | 说明 |
 |------|------|------|
-| 含义 | 删除指定 pool | **无引用保护**：被 provider 引用时同样允许删除 |
+| 含义 | 删除指定 pool（引用感知） | 未被 provider 引用时删除条目；被引用时不删除条目，打印 warning 后清空实例并同步清空引用方镜像与 cluster 派生池 |
 | 端点 | `/inner-api/v1/k8s_pools/{name}` | - |
 | Method | DELETE | - |
 
@@ -163,26 +165,36 @@ pool 不存在时返回 404。
 
 **执行逻辑**
 
-1. 删除 `k8s_pools` 中该 pool 条目。
-2. 将所有 `instance_source=k8s_pool && k8s_pool_name==name` 的 provider 的 `k8s_instance_pool` 置为空列表。
-3. 逐个触发上述 provider 的 cluster 派生池同步（清空）。
+1. 查询 `k8s_pools` 中该 pool 条目，不存在返回 404。
+2. 查出所有 `instance_source=k8s_pool && k8s_pool_name==name` 的 provider（引用方）。
+3. **无任何引用方**：删除 `k8s_pools` 中该 pool 条目。
+4. **存在引用方**：
+   - 打印 warning 日志：正在删除被引用的 k8s pool，将清空实例池而不是删除条目（记录 pool 名称与引用 provider 数量）；
+   - 清空该 pool 条目的实例列表（**保留条目**，`last_sync_time` 随之更新）；
+   - 触发 fan-out：将所有引用方 provider 的 `k8s_instance_pool` 置为空列表，并逐个触发其 cluster 派生池同步（清空）。
 
-provider 视角下"池不存在"与"池存在但零实例"是同一状态（有效池均为空）。
+以上步骤在同一数据库事务内完成，任一步失败整体回滚。
+
+provider 视角下"池不存在"与"池存在但零实例"是同一状态（有效池均为空）；被引用时 DELETE 后该 pool 条目仍存在，`GET` 返回 200 且 `instance_count=0`。
 
 **返回数据（Data内容）**
 
-Data 为 null。pool 不存在时返回 404。
+Data 为 null。pool 不存在时返回 404；被引用时删除（清空）成功同样返回 200。
 
 ## 6. 同步事务语义
 
 §2 的 PUT 与 §5 的 DELETE 共用同一 fan-out，在单个数据库事务内完成：
 
-1. 写 `k8s_pools` 行（PUT 更新 instances / DELETE 删行）；
+1. 写 `k8s_pools` 行（PUT 更新 instances；DELETE 分两种情形——未被引用时删行，被引用时清空 instances 保留条目并打印 warning）；
 2. 查出所有 `instance_source=k8s_pool && k8s_pool_name==name` 的 provider；
 3. 逐个刷新其 `k8s_instance_pool`（PUT → 新列表；DELETE → 空列表）；
 4. 逐个触发 cluster 派生池同步（复用 provider 更新时的实例池同步链路，cluster_table version 由导出签名机制自动 bump）。
 
 任一步失败整个事务回滚。多个 provider 引用同一 pool（N:1）时共享同一份实例列表，无额外成本。
+
+镜像刷新的另一个触发源是 OpenAPI provider 创建/更新时的 hydration（引用建立/变化），同样在单事务内完成“读 `k8s_pools` → 写镜像 → 同步派生池”，二者写入同一字段、语义一致。
+
+存量镜像漂移的修复方式：对受影响 pool 重新执行一次 §2 的 PUT（本期不提供自动 backfill / 周期 reconcile，镜像漂移后由运维重新 PUT pool 修复）。
 
 ## 7. 错误码
 

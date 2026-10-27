@@ -28,7 +28,7 @@ K8s 实例池维护接口，供 K8s 发现组件写入发现的实例快照。�
 | 1 | `/k8s_pools/{name}/instances` | PUT | 全量替换 pool 实例列表（幂等 upsert） | [k8s-pools.md](./k8s-pools.md) |
 | 2 | `/k8s_pools/{name}` | GET | 查询单个 pool 条目 | [k8s-pools.md](./k8s-pools.md) |
 | 3 | `/k8s_pools` | GET | 查询全部 pool 列表 | [k8s-pools.md](./k8s-pools.md) |
-| 4 | `/k8s_pools/{name}` | DELETE | 删除 pool（无引用保护） | [k8s-pools.md](./k8s-pools.md) |
+| 4 | `/k8s_pools/{name}` | DELETE | 删除 pool（引用感知：未引用删行；被引用清空保留 + fan-out 清空） | [k8s-pools.md](./k8s-pools.md) |
 
 ## 3. 特殊参数说明
 

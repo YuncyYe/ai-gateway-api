@@ -62,7 +62,7 @@
 | `instance_source` | string | 实例供给方式 | 枚举：`instance_pool`、`k8s_pool` | 非必填；默认 `instance_pool`；`instance_pool` = 人维护 `instance_pool`；`k8s_pool` = 实例由 K8s 发现组件经 InnerAPI `/k8s_pools` 维护 |
 | `instance_pool` | []Instance | Provider 对应的后端实例池 | 系统自动据此创建实例池和子集群 | `instance_source=instance_pool` 时必填：至少 1 个元素；同一 provider 内 `(addr, port)` 组合不能重复；至少有一个实例 `weight > 0`；`instance_source=k8s_pool` 时不参与有效池、不做成员数校验（休眠保留，切回 `instance_pool` 模式时自动恢复生效，作为人工兜底） |
 | `k8s_pool_name` | string | 引用的 K8s 实例池名称 | 引用 `/k8s_pools` 中的条目 | 非必填；`instance_source=k8s_pool` 时必填；`instance_source=instance_pool` 时保留原值但不生效（休眠，切回 `k8s_pool` 模式时自动恢复生效）；普通名称校验（长度 1-128 字符，仅允许字母、数字、`_`、`-`、`.`，不能以 `.`、`-`、`_` 开头或结尾，不能包含空白字符）；与 K8s Service 名无耦合（Service→池名映射由发现组件自行约定）；引用的 pool 无需预先存在（池不存在 ≡ 零实例） |
-| `k8s_instance_pool` | []Instance | K8s 实例池只读镜像 | 系统从 `/k8s_pools` 同步 | **只读**；请求体中携带返回 422；元素结构与 表：Instance 相同；`instance_source=instance_pool` 时为空数组 `[]` |
+| `k8s_instance_pool` | []Instance | K8s 实例池只读镜像 | 系统在 provider 创建/更新（引用建立或变化）与 `/k8s_pools` PUT/DELETE 时同步 | **只读**；请求体中携带返回 422；元素结构与 表：Instance 相同；`instance_source=instance_pool` 时为空数组 `[]`；本期无自动 backfill，镜像漂移后需重新 PUT pool 修复 |
 | `model_protocols` | []string | 支持的模型访问协议 | 枚举：`openai`、`anthropic`、`gemini` | 必填；至少 1 个元素；元素不可重复；枚举值见下方 |
 | `protocol_paths` | map[string]string | 按协议的上游 API 基路径（该协议 SDK `base_url` 的 path 部分）；BFE 转发时将命中的标准端点改写到该基路径（openai 兼容带/不带 `/v1` 的客户端入口） | 键：`openai`、`anthropic` | 非必填；缺省 = 不改写（请求路径原样转发）；键必须是 `model_protocols` 已声明协议的子集；值须以 `/` 开头、不以 `/` 结尾、不含 `..`/`?`/`#`、长度 ≤ 128；语义与参考值见下方 |
 | `time_zone` | string | 计算时段所使用的时区 | 用于 tier 价格匹配 | 非必填；默认 `Asia/Shanghai`；须为合法 IANA 时区名 |
@@ -236,7 +236,8 @@ provider 对下游（cluster 引用快照、实例池同步、配置导出）暴
 4. 若未传 `time_zone`，默认 `Asia/Shanghai`。
 5. 若请求中携带 `tiers`，按 表：PricingTier 结构 校验；**初期只支持 `name="peak"`**。
 6. 校验 `models` 必填：至少 1 个元素，元素非空且不可重复，通过后直接保存。如需借助模型发现工具（`/providers/tools/discover-models`，无状态接口）确定模型列表，调用方需先调用该工具，再在创建请求中携带其结果。
-7. 写入 provider 记录，返回完整对象。
+7. `instance_source=k8s_pool` 时，在同一事务内按 `k8s_pool_name` 读取 `k8s_pools` 写入 `k8s_instance_pool` 镜像：池存在则镜像=池实例列表；池不存在则镜像为空数组（零实例语义）；读取失败则创建失败并回滚。
+8. 写入 provider 记录，返回完整对象。
 
 **返回数据（Data内容）**
 
@@ -403,7 +404,8 @@ provider 对下游（cluster 引用快照、实例池同步、配置导出）暴
 > - 两字段均可通过 PATCH 修改，包括**模式切换**（`instance_pool` ↔ `k8s_pool`）；切换后有效池随之变化，经同步链路自动更新引用 cluster 的派生实例池（空有效池同样同步清空）。
 > - 模式切换时点校验：`instance_source=instance_pool` 要求 `instance_pool` 非空；`instance_source=k8s_pool` 要求 `k8s_pool_name` 非空。不满足返回 422。
 > - `instance_source=k8s_pool` 时 PATCH `instance_pool` 仅作休眠保留（不参与有效池、不触发同步），切回 `instance_pool` 模式时自动恢复生效。
-> - `k8s_instance_pool` 为只读镜像，请求体携带返回 422；其内容由系统根据 `/k8s_pools` 的变更自动刷新。
+> - `k8s_instance_pool` 为只读镜像，请求体携带返回 422；其内容由系统在以下时机刷新：本接口 PATCH 发生**来源切换、`k8s_pool_name` 变化、或显式重新提交 `k8s_pool_name`**（重新保存 provider 即可修复镜像漂移），以及 `/k8s_pools` PUT/DELETE 的 fan-out。
+> - 镜像刷新在同一事务内完成（读 `k8s_pools` → 写镜像 → 同步引用 cluster 派生池）：`k8s_pools` 读取失败导致本次 PATCH 失败并回滚；引用的 pool 不存在按零实例处理（镜像置空并同步清空派生池）。
 
 > **注意**：本接口为**部分更新**语义——请求体中未提供的字段（`description`、`model_endpoint`、`models`、`keys`、`time_zone`、`tiers`、`instance_source`、`k8s_pool_name` 等）保持原值不变。
 > - 通用约定：对可选的 map / 数组字段（`keys`、`tiers`、`protocol_paths` 等），省略与传 `null` 等价，均保留原值；显式传入空集合（`[]` / `{}`）按全量替换处理，即清空该字段（仍须通过对应字段校验）。
@@ -672,7 +674,7 @@ tiers:
 5. `k8s_pool_name` 校验按 `instance_source` 条件化：
    - `instance_source=k8s_pool`：必填，长度 1-128 字符，仅允许字母、数字、`_`、`-`、`.`，不能以 `.`、`-`、`_` 开头或结尾，不能包含空白字符；引用的 pool 无需预先存在（池不存在 ≡ 零实例）。
    - `instance_source=instance_pool`：不参与有效池，传入时保留原值（休眠，切回 `k8s_pool` 模式时自动恢复生效）。
-6. `k8s_instance_pool` 为只读镜像：任意模式的请求体携带该字段均返回 422；其内容由系统根据 `/k8s_pools` 的变更自动刷新，`instance_source=instance_pool` 时为空数组 `[]`。
+6. `k8s_instance_pool` 为只读镜像：任意模式的请求体携带该字段均返回 422；其内容由系统在 provider 创建/更新（引用建立或变化）与 `/k8s_pools` PUT/DELETE 时刷新，`instance_source=instance_pool` 时为空数组 `[]`；本期无自动 backfill，镜像漂移后需重新 PUT pool 修复。
 7. 每个实例包含 `addr`、`weight`、`port`；`addr` 必填且类型为 [Hostname](./00-common.md#1-主机名hostname)；`weight` 取值范围 [0,100]；`port` 必填且类型为 [Port](./00-common.md#3-网络端口port)。`k8s_instance_pool` 元素复用同一结构（`weight` 缺省 100）。
 8. `model_endpoint.schema` 有效值为 `http`、`https`，未设置时默认 `https`；`uri` 非空且须以 `/` 开头。
 9. `models` 必填，至少 1 个元素；元素非空且不可重复。（PATCH 部分更新时省略 `models` 表示保留原值，不视为违反必填；显式提供时必须满足本条款。）

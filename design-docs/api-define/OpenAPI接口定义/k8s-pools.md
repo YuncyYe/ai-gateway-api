@@ -222,6 +222,8 @@ provider 在 `instance_source=k8s_pool` 模式下通过 `k8s_pool_name` 引用�
    - 从 `GET /open-api/v1/providers/{provider_name}` 读取 `instance_source` 和 `k8s_pool_name`；
    - 当 `instance_source == "k8s_pool"` 时，调用 `GET /open-api/v1/k8s_pools/{k8s_pool_name}` 展示实时实例列表。
 
+provider 的 `k8s_instance_pool` 镜像与本模块数据同源：provider 创建/更新（引用建立或变化）时系统会读取本模块对应 pool 刷新镜像，本域 PUT/DELETE 时经 fan-out 刷新；镜像漂移后重新 PUT 一次 pool 即可修复（本期无自动 backfill）。
+
 本模块只提供池的只读视图，不修改 provider 的请求/响应契约。
 
 ---

@@ -178,7 +178,7 @@
 | - | -  | - | - | - | - |
 | failnum| int |  进入健康检查的失败次数阈值 | N | 连续转发失败多次后，BFE进入健康检查状态，对下游RS发起探活；**默认值为3** | 非必填；默认值为3；须为 >=0 的整数 |
 | interval| int |  连续健康检查的时间间隔 | N | 单位ms；**默认值为1000** | 非必填；默认值为1000；须为 >=0 的整数 |
-| host| string |  健康检查请求的域名| N | 为空时使用所属 provider 的 `instance_pool` 中第一个实例的 `addr` | 非必填；为空时使用 provider 首个实例的 `addr` |
+| host| string |  健康检查请求的域名| N | 为空时使用所属 provider 的有效实例池（`instance_source=k8s_pool` 时为 `k8s_instance_pool` 镜像）中第一个实例的 `addr` | 非必填；为空时使用 provider 首个实例的 `addr` |
 | uri| string |  健康检查请求的URI  | N | **默认值为 `/`** | 非必填；默认值为 `/`；非空；须以 `/` 开头 |
 | statuscode| int |  期望的健康检查返回码 | N | 如果需要忽略返回码，此处可以填0；**默认值为0** | 非必填；默认值为0；须为 `0` 或 `100-599` 的整数 |
 
@@ -511,7 +511,7 @@
 1. 校验请求参数（`name` 必填；`llm_config` 必填，且 `provider` 引用已存在的 provider；`llm_config.models` 为 provider `models` 的子集；`llm_config.keys` 引用 provider 中存在的 key name 等）
 2. 若 `llm_config` 不为 nil，内部自动设置 `enable = true`
 3. 创建集群
-4. 根据 `llm_config.provider` 查找对应 provider，读取其 `instance_pool`，自动创建实例池（名称格式：`{product_name}.{cluster_name}`）
+4. 根据 `llm_config.provider` 查找对应 provider，读取其**有效实例池**（`instance_source=instance_pool` 时为 `instance_pool`；`instance_source=k8s_pool` 时为系统维护的 `k8s_instance_pool` 镜像），自动创建实例池（名称格式：`{product_name}.{cluster_name}`）
 5. 自动创建子集群（名称：`{cluster_name}`，绑定实例池）
 6. 自动绑定子集群到集群
 7. 若 `balance_mode=EPP`：该集群的后端选择与流量调度由 EPP 调度器接管（实例分配见 [epp-assignments.md](./epp-assignments.md)）
@@ -612,7 +612,7 @@
 
 **输入参数（Body）**
 
-可修改字段含义同创建接口，但**输入参数不包括 `name`，即不能修改 cluster 的 name**（名称由 URI 中的 `cluster_name` 指定）。若请求体中仍包含 `name`，返回 422。不支持直接修改 `instance_pool`；如需调整后端实例，请更新对应 provider 的 `instance_pool`。
+可修改字段含义同创建接口，但**输入参数不包括 `name`，即不能修改 cluster 的 name**（名称由 URI 中的 `cluster_name` 指定）。若请求体中仍包含 `name`，返回 422。不支持直接修改 `instance_pool`；如需调整后端实例，请更新对应 provider 的实例来源（手工来源更新 `instance_pool`；k8s 来源由 `/k8s_pools` 维护，provider 侧仅维护 `k8s_pool_name` 引用）。引用 provider 的 cluster 更新时，系统按 provider 的有效实例池（`instance_source=k8s_pool` 时为 `k8s_instance_pool` 镜像）刷新其自动创建的实例池。
 
 `balance_mode` / `epp_config` 更新规则：
 
