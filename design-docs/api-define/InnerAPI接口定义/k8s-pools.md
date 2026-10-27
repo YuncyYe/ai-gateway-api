@@ -33,7 +33,7 @@ K8s 实例池（`k8s_pools`）是控制面内独立的实例集合资源，成�
 
 | 参数名 | 类型 | 参数含义 | 必填 | 合法性条件 |
 |--------|------|----------|------|------------|
-| name | string | pool 名称 | Y | 长度 1-64 字符；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；不能包含空白字符；与 K8s Service 名无耦合（Service→池名映射由发现组件自行约定） |
+| name | string | pool 名称 | Y | 长度 1-128 字符；仅允许字母、数字、`_`、`-`、`.`；不能以 `.`、`-`、`_` 开头或结尾；不能包含空白字符；与 K8s Service 名无耦合（Service→池名映射由发现组件自行约定） |
 
 **输入参数（Body）**
 
@@ -84,7 +84,7 @@ curl -X PUT "http://api-server:port/inner-api/v1/k8s_pools/svc-a/instances" \
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | name | string | pool 名称 |
-| instances | []Instance | 当前实例列表（结构同 §2 Body 元素） |
+| instances | []Instance | 当前实例列表（结构同 §2 Body 元素，另含系统只读字段 `disable`） |
 | instance_count | int | 实例数量 |
 | last_sync_time | int64 | 最近同步时间（unix 秒），取条目 `updated_at` |
 
@@ -97,8 +97,8 @@ curl -X PUT "http://api-server:port/inner-api/v1/k8s_pools/svc-a/instances" \
     "Data": {
         "name": "svc-a",
         "instances": [
-            {"addr": "10.0.0.1", "port": 8000, "weight": 100},
-            {"addr": "10.0.0.2", "port": 8000, "weight": 100}
+            {"addr": "10.0.0.1", "port": 8000, "weight": 100, "disable": false},
+            {"addr": "10.0.0.2", "port": 8000, "weight": 100, "disable": false}
         ],
         "instance_count": 2,
         "last_sync_time": 1716883200
